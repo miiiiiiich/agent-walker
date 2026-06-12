@@ -21,7 +21,7 @@ path = "src/bin/agw.rs"
 
 [dependencies]
 anyhow = "1.0.100"
-bincode = "1.3.3"
+bincode = "3.0.0"
 clap = { version = "4.5.53", features = ["derive"] }
 clap_complete = "4.5.60"
 crossterm = "0.29.0"
