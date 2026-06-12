@@ -16,9 +16,9 @@ narrow `#[allow]`s with a `reason` are fine where the lint hurts readability.
 
 ## Useful dev flags
 
-- `agentwalker --render=120` — render every tab as plain text (no TTY needed)
-- `agentwalker --snapshot` — aggregate stats as text
-- `agentwalker --no-cache` — bypass the parse cache
+- `agw --render=120` — render every tab as plain text (no TTY needed)
+- `agw --snapshot` — aggregate stats as text
+- `agw --no-cache` — bypass the parse cache
 - `cargo run -- --update-pricing-snapshot assets/pricing.json` — refresh the vendored pricing snapshot
 
 ## Conventions

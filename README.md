@@ -40,13 +40,10 @@ gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/age
 ## Install
 
 ```sh
-# Homebrew
+# Homebrew (installs the `agent-walker` and `agw` commands)
 brew install miiiiiiich/tap/agent-walker
 
-# Shell (macOS / Linux)
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/miiiiiiich/agent-walker/releases/latest/download/agent-walker-installer.sh | sh
-
-# npm / bun
+# Run without installing (npm / bun)
 npx agent-walker
 bunx agent-walker
 
@@ -57,8 +54,8 @@ cargo install agent-walker
 ## Use
 
 ```sh
-agw            # short alias
-agentwalker    # same thing
+agw             # short alias
+agent-walker    # same thing
 ```
 
 | Key | Action |
@@ -83,7 +80,7 @@ dashboard — no logs read; all screenshots here use it), `--offline`,
 | Antigravity CLI | `~/.gemini/antigravity-cli` | sessions and tool flow (no token data in its logs) |
 
 Everything is parsed in parallel and cached per file
-(`~/.cache/agentwalker/`), so warm starts take ~100 ms even on gigabytes of
+(`~/.cache/agent-walker/`), so warm starts take ~100 ms even on gigabytes of
 logs. Log lines are treated as untrusted input — malformed records are
 counted and skipped, never evaluated.
 

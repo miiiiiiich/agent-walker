@@ -188,7 +188,7 @@ fn cache_path(cache_name: &str) -> Option<PathBuf> {
     Some(
         PathBuf::from(home)
             .join(".cache")
-            .join("agentwalker")
+            .join("agent-walker")
             .join(format!("{cache_name}-v{CACHE_VERSION}.bin")),
     )
 }

@@ -15,8 +15,8 @@ use crate::ui;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "agentwalker",
-    bin_name = "agentwalker",
+    name = "agent-walker",
+    bin_name = "agent-walker",
     about = "Inspect local AI coding-agent usage",
     version
 )]
@@ -100,7 +100,7 @@ pub fn run(args: Args) -> Result<()> {
         clap_complete::generate(
             shell,
             &mut Args::command(),
-            "agentwalker",
+            "agent-walker",
             &mut std::io::stdout(),
         );
         return Ok(());
