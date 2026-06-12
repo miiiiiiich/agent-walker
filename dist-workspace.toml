@@ -1,0 +1,24 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew", "npm"]
+# A GitHub repo to push Homebrew formulas to
+tap = "michisato/homebrew-tap"
+# A namespace to use when publishing this package to the npm registry
+npm-package = "agent-walker"
+# Target platforms to build apps for (Rust target-triple syntax)
+# (Windows is out for now: log discovery relies on $HOME.)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Where to host releases
+hosting = "github"
+# Whether to attest build provenance with GitHub Artifact Attestations
+github-attestations = true
+# Publish jobs to run in CI
+publish-jobs = ["homebrew", "npm"]
