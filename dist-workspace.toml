@@ -10,7 +10,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "homebrew", "npm"]
 # A GitHub repo to push Homebrew formulas to
-tap = "michisato/homebrew-tap"
+tap = "miiiiiiich/homebrew-tap"
 # A namespace to use when publishing this package to the npm registry
 npm-package = "agent-walker"
 # Target platforms to build apps for (Rust target-triple syntax)

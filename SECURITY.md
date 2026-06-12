@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security issues privately via
-[GitHub Security Advisories](https://github.com/michisato/agent-walker/security/advisories/new)
+[GitHub Security Advisories](https://github.com/miiiiiiich/agent-walker/security/advisories/new)
 — do not open a public issue for vulnerabilities.
 
 You can expect an initial response within a week.
@@ -20,4 +20,4 @@ agent-walker reads local log files written by AI coding agents
 - Log lines are treated as untrusted input: malformed JSON is counted and
   skipped, never executed or evaluated.
 - Release binaries carry GitHub Artifact Attestations (SLSA build provenance);
-  verify with `gh attestation verify <file> -R michisato/agent-walker`.
+  verify with `gh attestation verify <file> -R miiiiiiich/agent-walker`.

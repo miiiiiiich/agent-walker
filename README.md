@@ -29,17 +29,17 @@ reads the session logs on your disk and answers, in one screen:
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
-gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R michisato/agent-walker
+gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/agent-walker
 ```
 
 ## Install
 
 ```sh
 # Homebrew
-brew install michisato/tap/agent-walker
+brew install miiiiiiich/tap/agent-walker
 
 # Shell (macOS / Linux)
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/michisato/agent-walker/releases/latest/download/agent-walker-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/miiiiiiich/agent-walker/releases/latest/download/agent-walker-installer.sh | sh
 
 # npm / bun
 npx agent-walker
