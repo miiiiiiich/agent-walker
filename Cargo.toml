@@ -12,8 +12,8 @@ keywords = ["cli", "tui", "claude", "usage", "dashboard"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "agentwalker"
-path = "src/bin/agentwalker.rs"
+name = "agent-walker"
+path = "src/bin/agent-walker.rs"
 
 [[bin]]
 name = "agw"

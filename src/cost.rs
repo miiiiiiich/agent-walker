@@ -49,7 +49,7 @@ fn pricing_cache_path() -> Option<PathBuf> {
     Some(
         PathBuf::from(home)
             .join(".cache")
-            .join("agentwalker")
+            .join("agent-walker")
             .join("pricing.json"),
     )
 }
