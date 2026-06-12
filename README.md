@@ -1,5 +1,10 @@
 # agent-walker
 
+[![CI](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml/badge.svg)](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
+[![No telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy)
+
 **A terminal dashboard for your local AI coding-agent usage** — tokens, real
 API-equivalent cost, projects, tools, and autonomy metrics, aggregated from
 the logs that Claude Code, Codex CLI, and Antigravity CLI already write to
