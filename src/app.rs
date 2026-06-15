@@ -41,22 +41,17 @@ pub struct Args {
     #[arg(long)]
     pub no_cache: bool,
 
-    /// Never touch the network (skips the daily model-pricing refresh).
-    #[arg(long)]
-    pub offline: bool,
+    /// Render the shareable stats card to a PNG path and print the caption.
+    #[arg(long, value_name = "PATH")]
+    pub share: Option<PathBuf>,
 
-    /// Render a synthetic demo dashboard; no logs are read.
+    /// Include project names on the shared card (with --share).
     #[arg(long)]
-    pub demo: bool,
+    pub share_projects: bool,
 
     /// Print shell completions for the given shell and exit.
     #[arg(long, value_enum, value_name = "SHELL")]
     pub completions: Option<Shell>,
-
-    /// Refresh the vendored pricing snapshot from `LiteLLM` and exit
-    /// (release tooling).
-    #[arg(long, hide = true, value_name = "PATH")]
-    pub update_pricing_snapshot: Option<PathBuf>,
 
     #[arg(long, hide = true)]
     pub snapshot: bool,
@@ -90,12 +85,6 @@ pub struct Config {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    if let Some(path) = args.update_pricing_snapshot {
-        crate::cost::update_snapshot_file(&path)?;
-        println!("wrote {}", path.display());
-        return Ok(());
-    }
-
     if let Some(shell) = args.completions {
         clap_complete::generate(
             shell,
@@ -110,7 +99,7 @@ pub fn run(args: Args) -> Result<()> {
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let config = Config {
-        demo: args.demo,
+        demo: demo_enabled(),
         claude_dir: args.claude_dir.unwrap_or(default_claude_dir()?),
         codex_dir: args.codex_dir.unwrap_or(default_codex_dir()?),
         agy_dir: args.agy_dir.unwrap_or(default_agy_dir()?),
@@ -119,7 +108,21 @@ pub fn run(args: Args) -> Result<()> {
         local_offset,
     };
 
-    crate::cost::refresh_pricing_in_background(args.offline);
+    if let Some(path) = &args.share {
+        let report = load_report(&config)?;
+        let variant = if args.share_projects {
+            crate::share::Variant::Full
+        } else {
+            crate::share::Variant::Summary
+        };
+        let card = crate::share::ShareCard::from_summary(&report.combined, variant);
+        let png = crate::share::render_png(&card)?;
+        std::fs::write(path, png)
+            .with_context(|| format!("write share card to {}", path.display()))?;
+        println!("{}", card.caption());
+        eprintln!("\nwrote {}", path.display());
+        return Ok(());
+    }
 
     if args.snapshot {
         let report = load_report(&config)?;
@@ -141,9 +144,17 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 pub fn load_report(config: &Config) -> Result<AppSummary> {
+    let pricing_refresh = crate::cost::spawn_pricing_refresh();
+    let result = load_report_inner(config);
+    let _ = pricing_refresh.join();
+    result
+}
+
+fn load_report_inner(config: &Config) -> Result<AppSummary> {
     if config.demo {
         return Ok(crate::demo::demo_report(config));
     }
+
     let started = Instant::now();
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
 
@@ -224,4 +235,17 @@ fn default_agy_dir() -> Result<PathBuf> {
 fn home_dir() -> Result<PathBuf> {
     let home = env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
     Ok(PathBuf::from(home))
+}
+
+fn demo_enabled() -> bool {
+    let Some(value) = env::var_os("AGENT_WALKER_DEMO") else {
+        return false;
+    };
+    let Some(value) = value.to_str() else {
+        return false;
+    };
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
 }

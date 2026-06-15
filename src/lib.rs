@@ -18,9 +18,11 @@
 
 pub mod analyzer;
 pub mod app;
+pub mod codename;
 pub mod collector;
 pub mod cost;
 pub mod demo;
 pub mod format;
 pub mod model;
+pub mod share;
 pub mod ui;

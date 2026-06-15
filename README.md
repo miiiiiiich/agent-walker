@@ -10,7 +10,7 @@ API-equivalent cost, projects, tools, and autonomy metrics, aggregated from
 the logs that Claude Code, Codex CLI, and Antigravity CLI already write to
 your machine.
 
-![demo — synthetic data via `--demo`](docs/demo.gif)
+![agent-walker terminal dashboard preview](docs/demo.gif)
 
 ## Why
 
@@ -28,9 +28,8 @@ reads the session logs on your disk and answers, in one screen:
 ## Privacy
 
 - Your logs **never leave your machine**. No telemetry, no analytics.
-- The only network access is a daily fetch of public model-pricing metadata
-  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm),
-  cached locally. `--offline` disables all network access.
+- The only network access is a per-run fetch of public model-pricing metadata
+  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm).
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
@@ -66,18 +65,20 @@ agent-walker    # same thing
 | `r` | reload |
 | `q` / `Esc` / `Ctrl-C` | quit |
 
-Useful flags: `--days 30` (window, default 90), `--demo` (synthetic demo
-dashboard — no logs read; all screenshots here use it), `--offline`,
-`--claude-dir` / `--codex-dir` / `--agy-dir` (non-standard log locations),
-`--completions zsh` (shell completions).
+Useful flags: `--days 30` (window, default 90), `--claude-dir` /
+`--codex-dir` / `--agy-dir` (non-standard log locations), `--completions zsh`
+(shell completions).
 
 ## What it reads
 
 | Agent | Location | Notes |
 |---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | sessions and tool flow (no token data in its logs) |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
+| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+
+Each agent counts and caches tokens differently. The per-agent pages above
+explain what's read, how tokens/cache/cost are counted, and the caveats.
 
 Everything is parsed in parallel and cached per file
 (`~/.cache/agent-walker/`), so warm starts take ~100 ms even on gigabytes of
@@ -104,6 +105,15 @@ indefinitely; no setting needed.
   cost on metered pricing), not your actual bill. Rates come from LiteLLM
   with cache reads/writes priced separately; the rates date is shown in the
   COST panel.
+- Token totals are **cache-inclusive** (input + output + cache writes + cache
+  reads), matching `ccusage`. Because Claude Code re-sends the full context
+  every turn, ~95% of a Claude total is cache reads — real but cheaply-billed
+  context re-reads, not new work. See [docs/claude.md](docs/claude.md).
+- **Antigravity tokens/cost are not counted** — its usage lives in an
+  undocumented protobuf format. agy is activity-only; see [docs/agy.md](docs/agy.md).
+- These numbers **won't match each tool's own usage display** (Claude's `/cost`
+  bar, Codex `/status`, the vendor dashboards): they use different time windows
+  and count cache reads differently. See the per-agent pages above.
 - Antigravity log timestamps carry no timezone and are assumed to be local.
 - Windows is not supported yet (log discovery relies on `$HOME`).
 

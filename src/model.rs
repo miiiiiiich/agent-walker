@@ -275,6 +275,21 @@ pub struct DurationBucket {
     pub count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Orchestration {
+    /// Fraction (0.0–1.0) of active wall-time with two or more sessions running
+    /// at once — the cross-agent "orchestration" signal (running sessions in
+    /// parallel, not any Claude-specific subagent feature).
+    pub parallel_rate: f64,
+    /// Maximum number of sessions observed running simultaneously.
+    pub peak_concurrency: usize,
+    /// Positive-duration session-day spans the overlap sweep considered.
+    pub span_count: usize,
+    /// Active seconds spent at concurrency level 1, 2, 3, 4–6, 7–9, 10+
+    /// (6 buckets). Drives the PARALLEL AGENTS distribution bar.
+    pub time_by_level: [u64; 6],
+}
+
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub provider: Provider,
@@ -306,6 +321,7 @@ pub struct Summary {
     pub favorite_model: Option<String>,
     pub longest_session: Option<SessionSpan>,
     pub completion_duration: Option<DurationSummary>,
+    pub orchestration: Orchestration,
 }
 
 #[derive(Debug, Clone)]

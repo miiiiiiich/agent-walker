@@ -1,0 +1,304 @@
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+use time::{Date, Duration};
+
+use crate::cost::usage_cost_usd;
+use crate::format::{
+    format_date, format_duration_ms, format_duration_secs, format_percent, format_tokens,
+    format_usd, short_model_name,
+};
+use crate::model::Summary;
+
+use super::REPO_URL;
+
+/// Which card to render. `Summary` is privacy-safe (no repo names); `Full`
+/// adds the per-project breakdown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    Summary,
+    Full,
+}
+
+impl Variant {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Summary => Self::Full,
+            Self::Full => Self::Summary,
+        }
+    }
+}
+
+/// Values rendered on the card, extracted once so the SVG and caption stay
+/// in sync.
+pub struct ShareCard {
+    pub(crate) variant: Variant,
+    /// Earned MGS-styled title, e.g. "Eclipse Ocelot".
+    pub(crate) codename: String,
+    pub(crate) period_days: u16,
+    pub(crate) active_days: usize,
+    pub(crate) tokens: String,
+    pub(crate) cost: String,
+    pub(crate) sessions: usize,
+    /// Period-over-period token delta: (`is_up`, "42%").
+    pub(crate) delta: Option<(bool, String)>,
+    /// Top models: (short name, share%, ratio-to-largest, `formatted_tokens`).
+    pub(crate) models: Vec<(String, String, f64, String)>,
+    /// Hour-of-day profile: heights normalized to 0..=1 plus the peak hour.
+    pub(crate) hourly: Option<(Vec<f64>, usize, String)>,
+    /// Turn-duration buckets (7 counts), (unattended, total), and formatted (p50, p90, max).
+    pub(crate) completion: Option<(Vec<usize>, usize, usize, String, String, String)>,
+    /// PARALLEL AGENTS: (active seconds at level 1/2/3/4–6/7+, % at 4+, peak).
+    pub(crate) parallel: Option<(Vec<u64>, u64, usize)>,
+    /// Busiest day, e.g. "2026-05-29 · 441.3M".
+    pub(crate) top_day: Option<String>,
+    pub(crate) longest_session: Option<String>,
+    pub(crate) grass: Grass,
+    /// (name, ratio-to-largest) — only populated for `Full`.
+    pub(crate) projects: Vec<(String, f64)>,
+}
+
+pub(crate) struct Grass {
+    pub(crate) cells: Vec<Vec<Option<usize>>>,
+}
+
+impl ShareCard {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Ratios and percentages are display-only."
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Flat extraction of every card stat in one pass."
+    )]
+    pub fn from_summary(summary: &Summary, variant: Variant) -> Self {
+        let total = summary.total_usage.token_volume();
+        let cost: f64 = summary
+            .model_daily
+            .iter()
+            .filter_map(|entry| usage_cost_usd(&entry.model, &entry.usage))
+            .sum();
+        let parallel = {
+            let levels = summary.orchestration.time_by_level;
+            let total: u64 = levels.iter().sum();
+            (total > 0).then(|| {
+                let four_plus = levels[3] + levels[4] + levels[5];
+                let four_plus_pct = (four_plus as f64 / total as f64 * 100.0).round() as u64;
+                (
+                    levels.to_vec(),
+                    four_plus_pct,
+                    summary.orchestration.peak_concurrency,
+                )
+            })
+        };
+
+        let delta = (summary.previous_total_volume > 0).then(|| {
+            let up = total >= summary.previous_total_volume;
+            let diff = total.abs_diff(summary.previous_total_volume);
+            (up, format_percent(diff, summary.previous_total_volume))
+        });
+
+        let max_model = summary
+            .models
+            .iter()
+            .map(|model| model.usage.token_volume())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let models = summary
+            .models
+            .iter()
+            .filter(|model| model.usage.token_volume() > 0)
+            .take(4)
+            .map(|model| {
+                let vol = model.usage.token_volume();
+                (
+                    short_model_name(&model.name),
+                    format_percent(vol, total.max(1)),
+                    vol as f64 / max_model as f64,
+                    format_tokens(vol),
+                )
+            })
+            .collect();
+
+        let hourly = summary.busiest_hour.map(|(peak_hour, peak_volume)| {
+            let max = summary
+                .hourly_usage
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let heights = summary
+                .hourly_usage
+                .iter()
+                .map(|value| *value as f64 / max as f64)
+                .collect();
+            (
+                heights,
+                usize::from(peak_hour),
+                format!("{peak_hour:02}:00 · {}", format_tokens(peak_volume)),
+            )
+        });
+
+        let completion = summary.completion_duration.as_ref().map(|duration| {
+            let counts: Vec<usize> = duration.buckets.iter().map(|b| b.count).collect();
+            let unattended: usize = counts.iter().skip(3).sum();
+            (
+                counts,
+                unattended,
+                duration.count,
+                format_duration_ms(duration.p50_ms),
+                format_duration_ms(duration.p90_ms),
+                format_duration_ms(duration.max_ms),
+            )
+        });
+
+        let top_day = summary.most_active_day.as_ref().map(|day| {
+            format!(
+                "{} · {}",
+                format_date(day.date),
+                format_tokens(day.usage.token_volume())
+            )
+        });
+        let longest_session = summary
+            .longest_session
+            .as_ref()
+            .map(|session| format_duration_secs(session.duration_secs()));
+
+        let max = summary
+            .projects
+            .iter()
+            .map(|project| project.usage.token_volume())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let projects = summary
+            .projects
+            .iter()
+            .take(4)
+            .map(|project| {
+                (
+                    project.name.clone(),
+                    project.usage.token_volume() as f64 / max as f64,
+                )
+            })
+            .collect();
+
+        Self {
+            variant,
+            codename: crate::codename::for_summary(summary).title(),
+            period_days: summary.period_days,
+            active_days: summary.active_days,
+            tokens: format_tokens(total),
+            cost: format_usd(cost),
+            sessions: summary.sessions,
+            delta,
+            models,
+            hourly,
+            completion,
+            parallel,
+            top_day,
+            longest_session,
+            grass: Grass::from_summary(summary),
+            projects,
+        }
+    }
+
+    /// A ready-to-post caption (X body / clipboard text).
+    pub fn caption(&self) -> String {
+        let mut stats = vec![
+            format!("{} tokens", self.tokens),
+            format!("{} API-equivalent", self.cost),
+        ];
+        if let Some((_, four_plus_pct, peak)) = &self.parallel
+            && *four_plus_pct > 0
+        {
+            stats.push(format!("{four_plus_pct}% with 4+ agents in parallel (peak {peak})"));
+        }
+        let mut caption = format!(
+            "Codename: {}\nMy last {} days with AI coding agents:\n{}.",
+            self.codename,
+            self.period_days,
+            stats.join(" · ")
+        );
+        if let Some((_, unattended, _, _, _, _)) = &self.completion
+            && *unattended > 0
+        {
+            let _ = write!(caption, "\n{unattended} turns ran 20m+ unattended.");
+        }
+        let _ = write!(
+            caption,
+            "\n\nTracked 100% locally with agent-walker — your logs never leave your machine.\nhttps://{REPO_URL}"
+        );
+        caption
+    }
+}
+
+impl Grass {
+    fn from_summary(summary: &Summary) -> Self {
+        let value_by_date: BTreeMap<Date, u64> = summary
+            .daily
+            .iter()
+            .map(|stat| (stat.date, stat.usage.token_volume()))
+            .collect();
+        let thresholds = quartiles(&value_by_date);
+
+        let mut columns: Vec<Vec<Option<usize>>> = Vec::new();
+        let mut column = vec![None; 7];
+        let mut cursor = summary.period_start;
+        while cursor <= summary.period_end {
+            let weekday = usize::from(cursor.weekday().number_days_from_sunday());
+            let value = value_by_date.get(&cursor).copied().unwrap_or(0);
+            column[weekday] = Some(heat_level(value, &thresholds));
+            if weekday == 6 {
+                columns.push(std::mem::replace(&mut column, vec![None; 7]));
+            }
+            cursor = cursor.saturating_add(Duration::days(1));
+        }
+        if column.iter().any(Option::is_some) {
+            columns.push(column);
+        }
+        Self { cells: columns }
+    }
+}
+
+fn quartiles(value_by_date: &BTreeMap<Date, u64>) -> [u64; 3] {
+    let mut active: Vec<u64> = value_by_date
+        .values()
+        .copied()
+        .filter(|value| *value > 0)
+        .collect();
+    active.sort_unstable();
+    if active.is_empty() {
+        return [0, 0, 0];
+    }
+    let at = |fraction: f64| -> u64 {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "Percentile index on a small sorted vec."
+        )]
+        let index = ((active.len() - 1) as f64 * fraction).round() as usize;
+        active[index]
+    };
+    [at(0.25), at(0.5), at(0.75)]
+}
+
+fn heat_level(value: u64, thresholds: &[u64; 3]) -> usize {
+    if value == 0 {
+        return 0;
+    }
+    1 + thresholds.iter().filter(|t| value > **t).count()
+}

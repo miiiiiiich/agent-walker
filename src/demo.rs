@@ -1,6 +1,4 @@
-//! Synthetic demo data: `--demo` renders a fully populated dashboard without
-//! reading a single real log line. Used for screenshots, recordings, and a
-//! first look before pointing the tool at real logs.
+//! Synthetic report data used when `AGENT_WALKER_DEMO=1`.
 //!
 //! Everything is generated from a fixed-seed xorshift, so the demo looks the
 //! same on every machine and run (apart from the date axis, which tracks the

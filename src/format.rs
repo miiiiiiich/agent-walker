@@ -178,10 +178,6 @@ pub fn snapshot_app(report: &AppSummary) -> String {
 }
 
 pub fn snapshot(summary: &Summary) -> String {
-    let cache_pressure = format_percent(
-        summary.total_usage.cache_read_input_tokens,
-        summary.total_usage.prompt_tokens(),
-    );
     let subagent_volume = summary
         .agents
         .iter()
@@ -206,9 +202,8 @@ pub fn snapshot(summary: &Summary) -> String {
             summary.scan_stats.parse_errors
         ),
         format!(
-            "token_volume: {} cache_pressure: {} subagent_share: {}",
+            "token_volume: {} subagent_share: {}",
             format_tokens(summary.total_usage.token_volume()),
-            cache_pressure,
             subagent_share
         ),
         format!(
@@ -218,6 +213,7 @@ pub fn snapshot(summary: &Summary) -> String {
             summary.longest_streak_days,
             summary.current_streak_days
         ),
+        format!("codename: {}", crate::codename::for_summary(summary).title()),
     ];
 
     if let Some(model) = &summary.favorite_model {
