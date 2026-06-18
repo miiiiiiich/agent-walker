@@ -44,22 +44,6 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The earned codename as a dog-tag line: gold tick, codec-green title. Only
-/// the title is shown — never the underlying scores or thresholds.
-pub(super) fn codename_line(summary: &Summary) -> Line<'static> {
-    let codename = crate::codename::for_summary(summary);
-    Line::from(vec![
-        Span::styled("▌ ", Style::default().fg(theme::GOLD)),
-        Span::styled(
-            codename.title().to_uppercase(),
-            Style::default()
-                .fg(theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   codename", Style::default().fg(theme::MUTED)),
-    ])
-}
-
 /// Progressively shed decoration, then secondary metrics, until the line fits.
 pub(super) fn hero_line(summary: &Summary, width: u16) -> Line<'static> {
     let width = usize::from(width);

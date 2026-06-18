@@ -1,4 +1,5 @@
 mod activity;
+mod badge;
 mod charts;
 mod draw;
 mod hero;
