@@ -371,15 +371,8 @@ pub(super) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'static>
         .copied()
         .max()
         .unwrap_or(0);
-    // Average concurrency over active time (band midpoints; 4–6→5, 7–9→8, 10+→11).
-    let midpoints = [1.0_f64, 2.0, 3.0, 5.0, 8.0, 11.0];
-    let weighted: f64 = orchestration
-        .time_by_level
-        .iter()
-        .zip(midpoints)
-        .map(|(secs, midpoint)| *secs as f64 * midpoint)
-        .sum();
-    let avg = weighted / total as f64;
+    // Weighted avg concurrency (computed once in the analyzer) = the CONTROL signal.
+    let avg = orchestration.avg_concurrency;
     let labels = ["1", "2", "3", "4-6", "7-9", "10+"];
     let colors = [
         theme::BLUE,

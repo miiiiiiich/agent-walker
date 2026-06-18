@@ -93,6 +93,7 @@ pub(crate) fn sample_summary() -> Summary {
         }),
         orchestration: Orchestration {
             parallel_rate: 0.62,
+            avg_concurrency: 2.5,
             peak_concurrency: 4,
             span_count: 18,
             time_by_level: [144_000, 108_000, 54_000, 36_000, 18_000, 6_000],

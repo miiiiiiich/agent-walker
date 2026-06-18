@@ -58,7 +58,7 @@ const CHICK: &str = "Chick";
 
 /// Per-style band cut-offs, descending R1..R6: a raw metric reaches the first
 /// row whose threshold it clears. R1 is intentionally unreached by current data.
-const CONTROL_PCT: [f64; 6] = [85.0, 55.0, 35.0, 18.0, 7.0, 1.0]; // parallel-rate %
+const CONTROL_AVG: [f64; 6] = [4.0, 2.5, 1.8, 1.4, 1.15, 1.02]; // weighted avg simultaneous sessions
 const SOLO_RUNS: [f64; 6] = [250.0, 60.0, 25.0, 8.0, 2.0, 1.0]; // unattended runs >=20m
 const MASS_TPD: [f64; 6] = [
     250_000_000.0,
@@ -68,7 +68,7 @@ const MASS_TPD: [f64; 6] = [
     1_000_000.0,
     100_000.0,
 ]; // tokens per active day
-const SCOUT_BREADTH: [f64; 6] = [18.0, 9.0, 6.0, 4.0, 2.0, 1.0]; // models x projects + read bonus
+const SCOUT_RESEARCH: [f64; 6] = [70.0, 50.0, 35.0, 22.0, 12.0, 3.0]; // research % of (research+build) tools
 
 /// Substance cap (total tokens, active days) needed to *hold* each row,
 /// regardless of style — stops a single-axis spike claiming a high rank.
@@ -91,33 +91,44 @@ const CHICK_MIN_DAYS: usize = 3;
 const R1_OTHER_AXES_MAX_ROW: usize = 2;
 const R1_MIN_ACTIVE_DAYS: usize = 30;
 
-/// Breadth bonus when the toolset skews review/plan-heavy (reads > writes).
-const SCOUT_READ_BONUS: u64 = 3;
-
 /// OPS is decided when the top time-band leads the second by this many points;
 /// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
-/// 6×4 animal grid: `[row R1..R6][Control, Solo, Mass, Scout]`.
+/// 6×4 animal grid: `[row R1..R6][Control, Solo, Mass, Scout]`. The 24 codenames
+/// are exactly Metal Gear Solid: Peace Walker's 24 ranks (agent-WALKER ← Peace
+/// Walker), ordered per column strongest (R1) → humblest (R6).
 const GRID: [[&str; 4]; 6] = [
-    ["Fox Hound", "Fox", "Doberman", "Hound"], // R1
-    ["Ocelot", "Wolf", "Raven", "Mantis"],     // R2
-    ["Jaguar", "Cobra", "Orca", "Octopus"],    // R3
-    ["Panther", "Hawk", "Shark", "Eagle"],     // R4
-    ["Leopard", "Mongoose", "Whale", "Owl"],   // R5
-    ["Puma", "Hyena", "Pig", "Bat"],           // R6
+    ["Foxhound", "Fox", "Doberman", "Hound"], // R1
+    ["Octopus", "Wolf", "Orca", "Hawk"],      // R2
+    ["Raven", "Eel", "Whale", "Swallow"],     // R3
+    ["Scorpion", "Piranha", "Bear", "Gull"],  // R4
+    ["Cat", "Kangaroo", "Puma", "Deer"],      // R5
+    ["Ant", "Firefly", "Butterfly", "Bee"],   // R6
 ];
 
-const READ_TOOLS: [&str; 6] = ["Read", "Grep", "Glob", "view_image", "get_app_state", "WebFetch"];
-const WRITE_TOOLS: [&str; 6] = ["Edit", "Write", "apply_patch", "exec_command", "write_stdin", "Bash"];
+/// SCOUT = "explore / research" share of (research + build) tool calls. High =
+/// investigating & reading, low = constructing. Any `mcp__*` tool also counts as
+/// research (matched by prefix in `research_calls`).
+const RESEARCH_TOOLS: [&str; 6] = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "view_image"];
+const BUILD_TOOLS: [&str; 8] = [
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "Bash",
+];
 
 // ===========================================================================
 
 struct Metrics {
-    control_pct: f64,
+    control: f64, // weighted avg simultaneous sessions
     solo_runs: f64,
     mass_tpd: f64,
-    scout_breadth: f64,
+    scout: f64, // research % of (research + build) tools
     total_tokens: u64,
     active_days: usize,
 }
@@ -157,32 +168,34 @@ fn metrics(summary: &Summary) -> Metrics {
         0.0
     };
 
-    let model_breadth = share_count(total, summary.models.iter().map(|m| m.usage.token_volume()));
-    let project_breadth =
-        share_count(total, summary.projects.iter().map(|p| p.usage.token_volume()));
-    let reads = tool_calls(summary, &READ_TOOLS);
-    let writes = tool_calls(summary, &WRITE_TOOLS);
-    let bonus = if reads > writes { SCOUT_READ_BONUS } else { 0 };
-    let scout_breadth = model_breadth.saturating_mul(project_breadth).saturating_add(bonus);
+    let research = research_calls(summary);
+    let build = tool_calls(summary, &BUILD_TOOLS);
+    let scout = if research + build > 0 {
+        research as f64 / (research + build) as f64 * 100.0
+    } else {
+        0.0
+    };
 
     Metrics {
-        control_pct: summary.orchestration.parallel_rate * 100.0,
+        control: summary.orchestration.avg_concurrency,
         solo_runs: solo_runs as f64,
         mass_tpd,
-        scout_breadth: scout_breadth as f64,
+        scout,
         total_tokens: total,
         active_days: active,
     }
 }
 
-/// Count contributors holding at least a 10% token share of the total.
-fn share_count(total: u64, parts: impl Iterator<Item = u64>) -> u64 {
-    if total == 0 {
-        return 0;
-    }
-    parts
-        .filter(|value| *value as f64 / total as f64 >= 0.10)
-        .count() as u64
+/// Research/explore tool calls: named research tools plus any `mcp__*` tool.
+fn research_calls(summary: &Summary) -> usize {
+    summary
+        .tools
+        .iter()
+        .filter(|tool| {
+            RESEARCH_TOOLS.contains(&tool.name.as_str()) || tool.name.starts_with("mcp__")
+        })
+        .map(|tool| tool.calls)
+        .sum()
 }
 
 fn tool_calls(summary: &Summary, names: &[&str]) -> usize {
@@ -201,19 +214,19 @@ fn classify(m: &Metrics) -> Option<(Style, usize)> {
     }
 
     let rows = [
-        (Style::Control, band_row(m.control_pct, &CONTROL_PCT)),
+        (Style::Control, band_row(m.control, &CONTROL_AVG)),
         (Style::Solo, band_row(m.solo_runs, &SOLO_RUNS)),
         (Style::Mass, band_row(m.mass_tpd, &MASS_TPD)),
-        (Style::Scout, band_row(m.scout_breadth, &SCOUT_BREADTH)),
+        (Style::Scout, band_row(m.scout, &SCOUT_RESEARCH)),
     ];
 
     // Column = strongest style by raw/R1-cutoff. Ties favour the earlier axis
     // (CONTROL > SOLO > MASS > SCOUT) via strict `>`.
     let strengths = [
-        (Style::Control, m.control_pct / CONTROL_PCT[0]),
+        (Style::Control, m.control / CONTROL_AVG[0]),
         (Style::Solo, m.solo_runs / SOLO_RUNS[0]),
         (Style::Mass, m.mass_tpd / MASS_TPD[0]),
-        (Style::Scout, m.scout_breadth / SCOUT_BREADTH[0]),
+        (Style::Scout, m.scout / SCOUT_RESEARCH[0]),
     ];
     let winner = strengths
         .iter()
@@ -308,10 +321,10 @@ mod tests {
 
     fn base() -> Metrics {
         Metrics {
-            control_pct: 0.0,
+            control: 1.0,
             solo_runs: 0.0,
             mass_tpd: 0.0,
-            scout_breadth: 0.0,
+            scout: 0.0,
             total_tokens: 6_000_000,
             active_days: 30,
         }
@@ -328,28 +341,28 @@ mod tests {
     }
 
     #[test]
-    fn heavy_orchestrator_lands_control_r2() {
-        // michisato: 86% parallel, low autonomy, 6.4B over 60 days.
+    fn control_dominant_lands_octopus() {
+        // Sustained parallelism (avg 3 concurrent), weak elsewhere.
         let m = Metrics {
-            control_pct: 86.0,
-            solo_runs: 10.0,
-            mass_tpd: 6_400_000_000.0 / 60.0,
-            scout_breadth: 2.0,
-            total_tokens: 6_400_000_000,
-            active_days: 60,
+            control: 3.0,
+            solo_runs: 5.0,
+            mass_tpd: 10_000_000.0,
+            scout: 10.0,
+            total_tokens: 1_000_000_000,
+            active_days: 30,
         };
         assert_eq!(classify(&m), Some((Style::Control, 2)));
-        assert_eq!(animal_for(Style::Control, 2), "Ocelot");
+        assert_eq!(animal_for(Style::Control, 2), "Octopus");
     }
 
     #[test]
-    fn night_owl_power_user_lands_solo_r2() {
-        // suzuki: low parallel, 198 unattended runs, 9.4B over 52 days.
+    fn night_owl_power_user_lands_solo_wolf() {
+        // Mostly solo (avg ~1.1) but 198 unattended runs over 9.4B/52d.
         let m = Metrics {
-            control_pct: 2.0,
+            control: 1.1,
             solo_runs: 198.0,
             mass_tpd: 9_400_000_000.0 / 52.0,
-            scout_breadth: 2.0,
+            scout: 5.0,
             total_tokens: 9_400_000_000,
             active_days: 52,
         };
@@ -358,67 +371,64 @@ mod tests {
     }
 
     #[test]
-    fn light_multi_model_user_is_capped_by_substance() {
-        // 部下: multi-model breadth but only 320M over 28 days.
+    fn research_dominant_lands_hawk() {
+        // Reads/explores far more than it builds — single repo is fine.
         let m = Metrics {
-            control_pct: 0.0,
+            control: 1.2,
+            solo_runs: 4.0,
+            mass_tpd: 10_000_000.0,
+            scout: 60.0,
+            total_tokens: 1_000_000_000,
+            active_days: 20,
+        };
+        assert_eq!(classify(&m), Some((Style::Scout, 2)));
+        assert_eq!(animal_for(Style::Scout, 2), "Hawk");
+    }
+
+    #[test]
+    fn light_user_is_capped_by_substance() {
+        // Research-leaning but only 320M over 28 days → substance caps at R4.
+        let m = Metrics {
+            control: 1.0,
             solo_runs: 0.0,
             mass_tpd: 320_000_000.0 / 28.0,
-            scout_breadth: 9.0,
+            scout: 50.0,
             total_tokens: 320_000_000,
             active_days: 28,
         };
         assert_eq!(classify(&m), Some((Style::Scout, 4)));
-        assert_eq!(animal_for(Style::Scout, 4), "Eagle");
+        assert_eq!(animal_for(Style::Scout, 4), "Gull");
     }
 
     #[test]
     fn r1_demotes_to_r2_when_one_other_axis_is_only_r3() {
-        // R1 control (>=85%), R2 solo/mass, but SCOUT only R3 (breadth 6): the
-        // compound gate requires R2+ on every other axis, so this lands Ocelot.
+        // R1 control (avg 6), R2 solo/mass, but SCOUT only R3 (research 36%):
+        // the compound gate needs R2+ on every other axis → lands Ocelot.
         let m = Metrics {
-            control_pct: 88.0,
-            solo_runs: 136.0,
-            mass_tpd: 119_000_000.0,
-            scout_breadth: 6.0,
+            control: 6.0,
+            solo_runs: 70.0,
+            mass_tpd: 60_000_000.0,
+            scout: 36.0,
             total_tokens: 8_000_000_000,
             active_days: 67,
         };
         assert_eq!(classify(&m), Some((Style::Control, 2)));
-        assert_eq!(animal_for(Style::Control, 2), "Ocelot");
-    }
-
-    #[test]
-    fn current_ceiling_user_lands_ocelot_leaving_r1_aspirational() {
-        // Real combined michisato: control 75.2%, 136 unattended runs, 119M
-        // tpd, breadth 9, 8B over 67 days — elite on all four axes (R2+), yet
-        // below the aspirational R1 cut-offs, so he sits at Ocelot (2nd) and
-        // Fox Hound (R1) stays an empty, climbable ceiling.
-        let m = Metrics {
-            control_pct: 75.2,
-            solo_runs: 136.0,
-            mass_tpd: 119_000_000.0,
-            scout_breadth: 9.0,
-            total_tokens: 8_000_000_000,
-            active_days: 67,
-        };
-        assert_eq!(classify(&m), Some((Style::Control, 2)));
-        assert_eq!(animal_for(Style::Control, 2), "Ocelot");
+        assert_eq!(animal_for(Style::Control, 2), "Octopus");
     }
 
     #[test]
     fn fox_hound_requires_r2_or_better_on_every_axis() {
         // A genuine all-rounder: R1 control, R2+ on the other three, 30+ days.
         let m = Metrics {
-            control_pct: 90.0,
+            control: 6.0,
             solo_runs: 70.0,
             mass_tpd: 60_000_000.0,
-            scout_breadth: 10.0,
+            scout: 55.0,
             total_tokens: 3_000_000_000,
             active_days: 40,
         };
         assert_eq!(classify(&m), Some((Style::Control, 1)));
-        assert_eq!(animal_for(Style::Control, 1), "Fox Hound");
+        assert_eq!(animal_for(Style::Control, 1), "Foxhound");
     }
 
     #[test]

@@ -278,9 +278,11 @@ pub struct DurationBucket {
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
     /// Fraction (0.0–1.0) of active wall-time with two or more sessions running
-    /// at once — the cross-agent "orchestration" signal (running sessions in
-    /// parallel, not any Claude-specific subagent feature).
+    /// at once. Kept for reference; the CONTROL style uses `avg_concurrency`.
     pub parallel_rate: f64,
+    /// Time-weighted mean of simultaneous sessions over active wall-time — the
+    /// CONTROL style signal (weighted by how parallel, not a ≥N cut-off).
+    pub avg_concurrency: f64,
     /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,
     /// Positive-duration session-day spans the overlap sweep considered.

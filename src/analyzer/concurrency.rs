@@ -87,8 +87,24 @@ pub(super) fn orchestration(
         0.0
     };
 
+    // Weighted concurrency: time-weighted mean of simultaneous sessions, using
+    // each band's midpoint (4–6→5, 7–9→8, 10+→11). This is the CONTROL signal —
+    // higher = more sustained orchestration, no arbitrary "≥N" cut-off.
+    let avg_concurrency = if active_secs > 0 {
+        let midpoints = [1.0_f64, 2.0, 3.0, 5.0, 8.0, 11.0];
+        let weighted: f64 = level_secs
+            .iter()
+            .zip(midpoints)
+            .map(|(secs, midpoint)| *secs as f64 * midpoint)
+            .sum();
+        weighted / active_secs as f64
+    } else {
+        0.0
+    };
+
     Orchestration {
         parallel_rate,
+        avg_concurrency,
         peak_concurrency: usize::try_from(peak.max(0)).unwrap_or(0),
         span_count,
         time_by_level: level_secs.map(|secs| u64::try_from(secs).unwrap_or(0)),
@@ -156,6 +172,8 @@ mod tests {
         assert!((result.parallel_rate - 0.5).abs() < 1e-9);
         // 1h at solo (two 30m a-only stretches) + 1h at level 2.
         assert_eq!(result.time_by_level, [3600, 3600, 0, 0, 0, 0]);
+        // weighted avg = (3600*1 + 3600*2) / 7200 = 1.5
+        assert!((result.avg_concurrency - 1.5).abs() < 1e-9);
     }
 
     #[test]
