@@ -22,7 +22,7 @@ use self::aggregates::Aggregates;
     reason = "Flat assembly of the Summary struct; splitting adds indirection without logic."
 )]
 pub fn summarize(
-    collection: Collection,
+    collection: &Collection,
     now: OffsetDateTime,
     period_days: u16,
     local_offset: UtcOffset,
@@ -32,7 +32,7 @@ pub fn summarize(
     let period_start = period_end - Duration::days(i64::from(safe_period_days) - 1);
 
     let aggregates = build_aggregates(
-        &collection,
+        collection,
         period_start,
         period_end,
         safe_period_days,
@@ -130,23 +130,42 @@ pub fn summarize(
     });
 
     let longest_session =
-        duration::longest_session_span(&collection, period_start, period_end, local_offset);
+        duration::longest_session_span(collection, period_start, period_end, local_offset);
     let completion_duration =
-        duration::completion_duration_summary(&collection, period_start, period_end, local_offset);
+        duration::completion_duration_summary(collection, period_start, period_end, local_offset);
     let orchestration =
-        concurrency::orchestration(&collection, period_start, period_end, local_offset);
+        concurrency::orchestration(collection, period_start, period_end, local_offset);
     let (longest_streak_days, current_streak_days) =
         streak::streaks(&aggregates.active_dates, period_start, period_end);
 
+    // Codename throughput is a fixed-window rate independent of the display
+    // `--days`: sum token volume over the most recent `CODENAME_WINDOW_DAYS`
+    // straight from the events (the collector loads at least that span), so a
+    // 7- or 90-day view yields the same level.
+    let codename_window_start =
+        period_end - Duration::days(crate::codename::CODENAME_WINDOW_DAYS - 1);
+    let recent_window_volume = collection
+        .usage_events
+        .iter()
+        .filter(|event| {
+            event
+                .timestamp
+                .map(|ts| ts.to_offset(local_offset).date())
+                .is_some_and(|date| date >= codename_window_start && date <= period_end)
+        })
+        .fold(0_u64, |acc, event| {
+            acc.saturating_add(event.usage.token_volume())
+        });
+
     Summary {
         provider: collection.provider,
-        generated_at: now,
         period_days: safe_period_days,
         period_start,
         period_end,
-        root: collection.root,
-        scan_stats: collection.stats,
+        root: collection.root.clone(),
+        scan_stats: collection.stats.clone(),
         total_usage: aggregates.total_usage,
+        recent_window_volume,
         daily,
         daily_sessions,
         model_daily,
@@ -157,7 +176,6 @@ pub fn summarize(
         sessions: aggregates.period_sessions.len(),
         active_days: aggregates.active_dates.len(),
         previous_total_volume: aggregates.previous_total_volume,
-        previous_sessions: aggregates.previous_sessions.len(),
         longest_streak_days,
         current_streak_days,
         most_active_day,
@@ -297,7 +315,7 @@ mod tests {
             stats: ScanStats::default(),
         };
 
-        let summary = summarize(collection, now, 7, UtcOffset::UTC);
+        let summary = summarize(&collection, now, 7, UtcOffset::UTC);
 
         assert_eq!(summary.total_usage.token_volume(), 150);
         assert_eq!(summary.models.len(), 2);
@@ -314,5 +332,49 @@ mod tests {
                 .duration_secs(),
             14_400
         );
+    }
+
+    #[test]
+    fn recent_window_volume_is_independent_of_display_days() {
+        // Four usage events at 0, 5, 20, and 40 days before period_end.
+        let now = datetime!(2026-06-30 12:00 UTC);
+        let event = |at: OffsetDateTime, tokens: u64| UsageEvent {
+            timestamp: Some(at),
+            session_id: Some("s".to_owned()),
+            model: Some("claude-opus-4-8".to_owned()),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            project: None,
+            usage: TokenUsage {
+                input_tokens: tokens,
+                ..TokenUsage::default()
+            },
+        };
+        let events = vec![
+            event(datetime!(2026-06-30 10:00 UTC), 1_000_000), // 30d + every window
+            event(datetime!(2026-06-25 10:00 UTC), 2_000_000), // 30d + 7d window
+            event(datetime!(2026-06-10 10:00 UTC), 3_000_000), // 30d, not 7d window
+            event(datetime!(2026-05-21 10:00 UTC), 4_000_000), // only the 90d display
+        ];
+        let collection = |events: Vec<UsageEvent>| Collection {
+            provider: Provider::Claude,
+            root: "/tmp".into(),
+            usage_events: events,
+            tool_events: Vec::new(),
+            session_touches: Vec::new(),
+            duration_events: Vec::new(),
+            stats: ScanStats::default(),
+        };
+
+        let week = summarize(&collection(events.clone()), now, 7, UtcOffset::UTC);
+        let quarter = summarize(&collection(events), now, 90, UtcOffset::UTC);
+
+        // The codename window is fixed at the last 30 days (06-01..06-30 = 6M),
+        // regardless of how many days the display covers.
+        assert_eq!(week.recent_window_volume, 6_000_000);
+        assert_eq!(quarter.recent_window_volume, 6_000_000);
+        // The display totals, by contrast, DO follow --days (3M vs 10M).
+        assert_eq!(week.total_usage.token_volume(), 3_000_000);
+        assert_eq!(quarter.total_usage.token_volume(), 10_000_000);
     }
 }

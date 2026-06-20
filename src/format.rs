@@ -213,7 +213,10 @@ pub fn snapshot(summary: &Summary) -> String {
             summary.longest_streak_days,
             summary.current_streak_days
         ),
-        format!("codename: {}", crate::codename::for_summary(summary).title()),
+        format!(
+            "codename: {}",
+            crate::codename::for_summary(summary).title()
+        ),
     ];
 
     if let Some(model) = &summary.favorite_model {

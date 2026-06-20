@@ -8,8 +8,9 @@
 //!
 //! Everything is a RATE or RATIO, never an absolute cumulative count, so the
 //! title does not drift just because the window changes. The level is tokens
-//! per day over the most recent 30 days (so a longer display `--days` keeps it
-//! pinned); the style axes are rates/ratios over the analysis window.
+//! per day over the most recent 30 days — computed over a fixed window
+//! regardless of the display `--days`, so 7-, 30-, or 90-day views all pin to
+//! the same level; the style axes are rates/ratios over the analysis window.
 //!
 //! All numeric cut-offs live in the one block below and are meant to be easy to
 //! retune. They are never surfaced in the UI — only the final title is — so the
@@ -21,8 +22,6 @@
     clippy::cast_sign_loss,
     reason = "Scores are display-only thresholds; approximate float math never feeds back into integer state."
 )]
-
-use time::Duration;
 
 use crate::model::Summary;
 
@@ -69,7 +68,8 @@ const CHICK: &str = "Chick";
 // reaches yet. Retune here only; nothing else hard-codes a number.
 
 /// The level always reflects the most recent N days of token throughput.
-const CODENAME_WINDOW_DAYS: i64 = 30;
+/// The analyzer fills `Summary::recent_window_volume` over this same window.
+pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
 
 /// Row (R1 top .. R6 entry) by tokens per day over the window.
 const TOKENS_PER_DAY: [f64; 6] = [
@@ -114,16 +114,67 @@ const GRID: [[&str; 4]; 6] = [
 /// SCOUT = "explore / research" share of (research + build) tool calls. High =
 /// investigating & reading, low = constructing. Any `mcp__*` tool also counts as
 /// research (matched by prefix in `research_calls`).
-const RESEARCH_TOOLS: [&str; 6] = ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "view_image"];
-const BUILD_TOOLS: [&str; 8] = [
+const RESEARCH_TOOLS: [&str; 26] = [
+    "Read",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "view_image",
+    // Codex shell commands decomposed by the collector (read/inspect side).
+    "cat",
+    "less",
+    "head",
+    "tail",
+    "grep",
+    "rg",
+    "egrep",
+    "fgrep",
+    "ls",
+    "find",
+    "fd",
+    "tree",
+    "wc",
+    "stat",
+    "file",
+    "jq",
+    "diff",
+    "sed",
+    "awk",
+    "cut",
+];
+const BUILD_TOOLS: [&str; 28] = [
     "Edit",
     "Write",
     "MultiEdit",
     "NotebookEdit",
     "apply_patch",
+    // Codex shell wrappers, kept as the fallback bucket for commands the
+    // collector could not decompose.
     "exec_command",
     "write_stdin",
     "Bash",
+    // Codex shell commands decomposed by the collector (build/mutate side).
+    "cargo",
+    "npm",
+    "npx",
+    "bun",
+    "pnpm",
+    "yarn",
+    "make",
+    "python",
+    "python3",
+    "node",
+    "go",
+    "rustc",
+    "mkdir",
+    "rm",
+    "mv",
+    "cp",
+    "touch",
+    "chmod",
+    "docker",
+    "pip",
 ];
 
 // ===========================================================================
@@ -156,10 +207,13 @@ fn metrics(summary: &Summary) -> Metrics {
     let active_days = summary.active_days;
 
     let unattended = summary.completion_duration.as_ref().map_or(0, |duration| {
+        // The duration histogram is laid out as three sub-20m buckets followed
+        // by the three 20m+ "unattended" buckets, so skipping the first three
+        // isolates the tail without coupling scoring to display label strings.
         duration
             .buckets
             .iter()
-            .filter(|bucket| matches!(bucket.label.as_str(), "20-30m" | "30-60m" | "1h+"))
+            .skip(3)
             .map(|bucket| bucket.count)
             .sum::<usize>()
     });
@@ -186,53 +240,11 @@ fn metrics(summary: &Summary) -> Metrics {
     }
 }
 
-/// Tokens per day over the most recent `CODENAME_WINDOW_DAYS`. The analyzer
-/// trims `daily` to the `--days` window, so a longer `--days` is clipped back to
-/// 30 days here (level stays pinned); a shorter one divides by the days it has.
+/// Tokens per day over the fixed codename window. `recent_window_volume` is the
+/// analyzer's last-30-day token sum, computed independently of the display
+/// `--days`, so the level is the same whether the user views 7, 30, or 90 days.
 fn tokens_per_day(summary: &Summary) -> f64 {
-    tokens_per_day_rate(
-        &summary.daily,
-        summary.period_end,
-        summary.period_days,
-        summary.total_usage.token_volume(),
-    )
-}
-
-/// Pure core of [`tokens_per_day`], split out so the window-robustness property
-/// (same rate regardless of `period_days`) is directly testable. With daily
-/// data the rate is the last-30-day sum over 30 days (or fewer if the window is
-/// shorter); the `fallback` total is only used when there is no daily breakdown,
-/// and is divided by the full window it covers.
-fn tokens_per_day_rate(
-    daily: &[crate::model::DailyStat],
-    period_end: time::Date,
-    period_days: u16,
-    fallback: u64,
-) -> f64 {
-    match window_token_sum(daily, period_end) {
-        Some(total) => {
-            let days = i64::from(period_days).clamp(1, CODENAME_WINDOW_DAYS);
-            total as f64 / days as f64
-        }
-        None => fallback as f64 / f64::from(period_days.max(1)),
-    }
-}
-
-/// Sum the token volume of daily entries within the last `CODENAME_WINDOW_DAYS`
-/// (inclusive of `period_end`). `None` when there is no daily data.
-fn window_token_sum(daily: &[crate::model::DailyStat], period_end: time::Date) -> Option<u64> {
-    if daily.is_empty() {
-        return None;
-    }
-    let cutoff = period_end - Duration::days(CODENAME_WINDOW_DAYS - 1);
-    // saturating: token counts come from untrusted logs (see lesson on Rust
-    // overflow), and a future-dated row would be outside the window.
-    Some(
-        daily
-            .iter()
-            .filter(|day| day.date >= cutoff && day.date <= period_end)
-            .fold(0_u64, |acc, day| acc.saturating_add(day.usage.token_volume())),
-    )
+    summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64
 }
 
 /// Research/explore tool calls: named research tools plus any `mcp__*` tool.
@@ -341,69 +353,6 @@ fn ops(hourly: &[u64; 24]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use time::macros::date;
-
-    fn day(date: time::Date, tokens: u64) -> crate::model::DailyStat {
-        crate::model::DailyStat {
-            date,
-            usage: crate::model::TokenUsage {
-                input_tokens: tokens,
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn window_token_sum_caps_to_30_days() {
-        let end = date!(2026 - 06 - 30);
-        // 40 days of 10 tokens each: only the most recent 30 count.
-        let daily: Vec<_> = (0..40).map(|i| day(end - Duration::days(i), 10)).collect();
-        assert_eq!(window_token_sum(&daily, end), Some(300));
-    }
-
-    #[test]
-    fn window_token_sum_cutoff_is_inclusive() {
-        let end = date!(2026 - 06 - 30);
-        // end-29 is the oldest day inside the 30-day window; end-30 is outside.
-        let inside = day(end - Duration::days(29), 5);
-        let outside = day(end - Duration::days(30), 5);
-        assert_eq!(window_token_sum(&[inside, outside], end), Some(5));
-    }
-
-    #[test]
-    fn window_token_sum_empty_is_none() {
-        assert_eq!(window_token_sum(&[], date!(2026 - 06 - 30)), None);
-    }
-
-    #[test]
-    fn tokens_per_day_is_window_robust() {
-        // The level is the core property of the rework: viewing 30 vs 90 days of
-        // the SAME recent data must yield the same per-day rate.
-        let end = date!(2026 - 06 - 30);
-        // 90 days of history, 1M/day. The most recent 30 days sum to 30M.
-        let daily: Vec<_> = (0..90).map(|i| day(end - Duration::days(i), 1_000_000)).collect();
-        let rate_30 = tokens_per_day_rate(&daily[..30], end, 30, 0);
-        let rate_90 = tokens_per_day_rate(&daily, end, 90, 0);
-        // last-30d sum (30M) / 30 in both cases, not 90M / 90.
-        assert!((rate_30 - 1_000_000.0).abs() < 1.0);
-        assert!((rate_90 - 1_000_000.0).abs() < 1.0);
-        assert!((rate_30 - rate_90).abs() < 1.0);
-    }
-
-    #[test]
-    fn tokens_per_day_short_window_divides_by_available_days() {
-        let end = date!(2026 - 06 - 30);
-        let daily: Vec<_> = (0..7).map(|i| day(end - Duration::days(i), 2_000_000)).collect();
-        // 7-day window: 14M over 7 days, not over 30.
-        assert!((tokens_per_day_rate(&daily, end, 7, 0) - 2_000_000.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn tokens_per_day_falls_back_to_full_window_rate() {
-        // No daily breakdown → total over the full window it covers.
-        let end = date!(2026 - 06 - 30);
-        assert!((tokens_per_day_rate(&[], end, 90, 900_000_000) - 10_000_000.0).abs() < 1.0);
-    }
 
     fn base() -> Metrics {
         Metrics {
@@ -510,8 +459,8 @@ mod tests {
         // Equal normalized strength, neither reaching the all-rounder bar. The
         // values give exactly equal ratios (0.30) — re-tune if bands change.
         let m = Metrics {
-            control: 1.2,        // 1.2 / 4.0 = 0.30, parallel_row R5
-            heavy_per_day: 2.4,  // 2.4 / 8.0 = 0.30, heavy_row R3
+            control: 1.2,       // 1.2 / 4.0 = 0.30, parallel_row R5
+            heavy_per_day: 2.4, // 2.4 / 8.0 = 0.30, heavy_row R3
             scout: 0.0,
             tokens_per_day: 220_000_000.0,
             active_days: 20,

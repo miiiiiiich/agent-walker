@@ -29,8 +29,7 @@ pub(super) fn longest_session_span(
 
     bounds
         .into_iter()
-        .map(|((session_id, _), (started_at, ended_at))| SessionSpan {
-            session_id: session_id.to_owned(),
+        .map(|(_, (started_at, ended_at))| SessionSpan {
             started_at,
             ended_at,
         })

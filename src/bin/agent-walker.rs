@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use agent_walker::app::{Args, run};
+use agent_walker::{Args, run};
 
 fn main() -> Result<()> {
     let args = Args::parse();

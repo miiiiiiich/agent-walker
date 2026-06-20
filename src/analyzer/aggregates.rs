@@ -18,7 +18,6 @@ pub(super) struct Aggregates {
     pub(super) active_dates: BTreeSet<Date>,
     pub(super) hourly_usage: [u64; 24],
     pub(super) previous_total_volume: u64,
-    pub(super) previous_sessions: HashSet<String>,
 }
 
 impl Aggregates {
@@ -39,9 +38,6 @@ impl Aggregates {
             self.previous_total_volume = self
                 .previous_total_volume
                 .saturating_add(event.usage.token_volume());
-            if let Some(session_id) = &event.session_id {
-                self.previous_sessions.insert(session_id.clone());
-            }
             return;
         }
         if date < period_start || date > period_end {
@@ -88,7 +84,7 @@ impl Aggregates {
             self.agent_map
                 .entry(agent_name)
                 .or_default()
-                .add_usage(&event.usage, date);
+                .add_usage(&event.usage);
         }
     }
 
@@ -116,7 +112,7 @@ impl Aggregates {
             self.agent_map
                 .entry(subagent_type.clone())
                 .or_default()
-                .add_call(date);
+                .add_call();
         }
     }
 
@@ -130,7 +126,6 @@ impl Aggregates {
     ) {
         let date = touch.timestamp.to_offset(local_offset).date();
         if date >= previous_start && date < period_start {
-            self.previous_sessions.insert(touch.session_id.clone());
             return;
         }
         if date < period_start || date > period_end {
@@ -148,20 +143,17 @@ impl Aggregates {
 #[derive(Default)]
 pub(super) struct ProjectAccumulator {
     usage: TokenUsage,
-    events: usize,
 }
 
 impl ProjectAccumulator {
     fn add(&mut self, usage: &TokenUsage) {
         self.usage.add_assign(usage);
-        self.events += 1;
     }
 
     pub(super) fn into_stat(self, name: String) -> ProjectStat {
         ProjectStat {
             name,
             usage: self.usage,
-            events: self.events,
         }
     }
 }
@@ -170,16 +162,12 @@ impl ProjectAccumulator {
 pub(super) struct ModelAccumulator {
     usage: TokenUsage,
     events: usize,
-    active_days: BTreeSet<Date>,
 }
 
 impl ModelAccumulator {
-    fn add(&mut self, usage: &TokenUsage, date: Date) {
+    fn add(&mut self, usage: &TokenUsage, _date: Date) {
         self.usage.add_assign(usage);
         self.events += 1;
-        if usage.token_volume() > 0 {
-            self.active_days.insert(date);
-        }
     }
 
     pub(super) fn into_stat(self, name: String) -> ModelStat {
@@ -187,7 +175,6 @@ impl ModelAccumulator {
             name,
             usage: self.usage,
             events: self.events,
-            active_days: self.active_days.len(),
         }
     }
 }
@@ -196,20 +183,15 @@ impl ModelAccumulator {
 pub(super) struct AgentAccumulator {
     usage: TokenUsage,
     calls: usize,
-    active_days: BTreeSet<Date>,
 }
 
 impl AgentAccumulator {
-    fn add_usage(&mut self, usage: &TokenUsage, date: Date) {
+    fn add_usage(&mut self, usage: &TokenUsage) {
         self.usage.add_assign(usage);
-        if usage.token_volume() > 0 {
-            self.active_days.insert(date);
-        }
     }
 
-    fn add_call(&mut self, date: Date) {
+    fn add_call(&mut self) {
         self.calls += 1;
-        self.active_days.insert(date);
     }
 
     pub(super) fn into_stat(self, name: String) -> AgentStat {
@@ -217,7 +199,6 @@ impl AgentAccumulator {
             name,
             usage: self.usage,
             calls: self.calls,
-            active_days: self.active_days.len(),
         }
     }
 }

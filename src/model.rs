@@ -52,12 +52,6 @@ impl TokenUsage {
             .saturating_add(self.cache_read_input_tokens)
     }
 
-    pub fn prompt_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-            .saturating_add(self.cache_read_input_tokens)
-    }
-
     pub fn add_assign(&mut self, other: &Self) {
         let add = |target: &mut u64, value: u64| *target = target.saturating_add(value);
         add(&mut self.input_tokens, other.input_tokens);
@@ -222,7 +216,6 @@ pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
     pub events: usize,
-    pub active_days: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +223,6 @@ pub struct AgentStat {
     pub name: String,
     pub usage: TokenUsage,
     pub calls: usize,
-    pub active_days: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -243,12 +235,10 @@ pub struct ToolStat {
 pub struct ProjectStat {
     pub name: String,
     pub usage: TokenUsage,
-    pub events: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionSpan {
-    pub session_id: String,
     pub started_at: OffsetDateTime,
     pub ended_at: OffsetDateTime,
 }
@@ -277,16 +267,11 @@ pub struct DurationBucket {
 
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
-    /// Fraction (0.0–1.0) of active wall-time with two or more sessions running
-    /// at once. Kept for reference; the CONTROL style uses `avg_concurrency`.
-    pub parallel_rate: f64,
     /// Time-weighted mean of simultaneous sessions over active wall-time — the
     /// CONTROL style signal (weighted by how parallel, not a ≥N cut-off).
     pub avg_concurrency: f64,
     /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,
-    /// Positive-duration session-day spans the overlap sweep considered.
-    pub span_count: usize,
     /// Active seconds spent at concurrency level 1, 2, 3, 4–6, 7–9, 10+
     /// (6 buckets). Drives the PARALLEL AGENTS distribution bar.
     pub time_by_level: [u64; 6],
@@ -295,13 +280,17 @@ pub struct Orchestration {
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub provider: Provider,
-    pub generated_at: OffsetDateTime,
     pub period_days: u16,
     pub period_start: Date,
     pub period_end: Date,
     pub root: PathBuf,
     pub scan_stats: ScanStats,
     pub total_usage: TokenUsage,
+    /// Token volume over the most recent fixed codename window (last 30 days,
+    /// inclusive of `period_end`), independent of the display `--days`. The
+    /// codename level divides this by the window length so it never drifts with
+    /// the chosen window.
+    pub recent_window_volume: u64,
     pub daily: Vec<DailyStat>,
     pub daily_sessions: Vec<DailySessions>,
     pub model_daily: Vec<ModelDailyStat>,
@@ -311,10 +300,9 @@ pub struct Summary {
     pub projects: Vec<ProjectStat>,
     pub sessions: usize,
     pub active_days: usize,
-    /// Token volume and session count over the window immediately before this
-    /// one (same length), for period-over-period deltas.
+    /// Token volume over the window immediately before this one (same length),
+    /// for period-over-period deltas.
     pub previous_total_volume: u64,
-    pub previous_sessions: usize,
     pub longest_streak_days: usize,
     pub current_streak_days: usize,
     pub most_active_day: Option<DailyStat>,

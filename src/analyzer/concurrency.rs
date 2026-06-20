@@ -6,13 +6,13 @@ use crate::model::{Collection, Orchestration};
 
 /// Reconstruct session spans from touches and sweep them for concurrency.
 ///
-/// `parallel_rate` is the share of active wall-time covered by two or more
-/// simultaneous sessions; `peak_concurrency` is the largest simultaneous
-/// count. This is the "orchestration" primitive: running many sessions at
-/// once, measurable on any agent, not a Claude-specific subagent feature.
+/// `avg_concurrency` is the time-weighted mean of simultaneous sessions and
+/// `peak_concurrency` is the largest simultaneous count. This is the
+/// "orchestration" primitive: running many sessions at once, measurable on any
+/// agent, not a Claude-specific subagent feature.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "parallel_rate is a display-only 0.0–1.0 ratio, never fed back into integer math."
+    reason = "avg_concurrency is a display-only weighted mean, never fed back into integer math."
 )]
 pub(super) fn orchestration(
     collection: &Collection,
@@ -39,12 +39,10 @@ pub(super) fn orchestration(
 
     // Only spans with real width can overlap; a single-touch session is a point.
     let mut events: Vec<(OffsetDateTime, i32)> = Vec::with_capacity(bounds.len() * 2);
-    let mut span_count = 0usize;
     for (start, end) in bounds.into_values() {
         if end <= start {
             continue;
         }
-        span_count += 1;
         events.push((start, 1));
         events.push((end, -1));
     }
@@ -59,7 +57,6 @@ pub(super) fn orchestration(
     let mut active: i32 = 0;
     let mut peak: i32 = 0;
     let mut active_secs: i64 = 0;
-    let mut parallel_secs: i64 = 0;
     let mut level_secs = [0i64; 6];
     let mut prev: Option<OffsetDateTime> = None;
     for (time, delta) in events {
@@ -67,9 +64,6 @@ pub(super) fn orchestration(
             let dur = (time - previous).whole_seconds().max(0);
             if active >= 1 {
                 active_secs += dur;
-            }
-            if active >= 2 {
-                parallel_secs += dur;
             }
             if let Some(bucket) = level_bucket(active) {
                 level_secs[bucket] += dur;
@@ -79,13 +73,6 @@ pub(super) fn orchestration(
         peak = peak.max(active);
         prev = Some(time);
     }
-
-    let parallel_rate = if active_secs > 0 {
-        // active_secs >= parallel_secs >= 0, so the ratio stays within 0.0..=1.0.
-        parallel_secs as f64 / active_secs as f64
-    } else {
-        0.0
-    };
 
     // Weighted concurrency: time-weighted mean of simultaneous sessions, using
     // each band's midpoint (4–6→5, 7–9→8, 10+→11). This is the CONTROL signal —
@@ -103,10 +90,8 @@ pub(super) fn orchestration(
     };
 
     Orchestration {
-        parallel_rate,
         avg_concurrency,
         peak_concurrency: usize::try_from(peak.max(0)).unwrap_or(0),
-        span_count,
         time_by_level: level_secs.map(|secs| u64::try_from(secs).unwrap_or(0)),
     }
 }
@@ -167,9 +152,6 @@ mod tests {
             time::UtcOffset::UTC,
         );
         assert_eq!(result.peak_concurrency, 2);
-        assert_eq!(result.span_count, 2);
-        // b's full hour overlaps; a runs 2h total => parallel 1h of 2h = 0.5.
-        assert!((result.parallel_rate - 0.5).abs() < 1e-9);
         // 1h at solo (two 30m a-only stretches) + 1h at level 2.
         assert_eq!(result.time_by_level, [3600, 3600, 0, 0, 0, 0]);
         // weighted avg = (3600*1 + 3600*2) / 7200 = 1.5
@@ -191,6 +173,7 @@ mod tests {
             time::UtcOffset::UTC,
         );
         assert_eq!(result.peak_concurrency, 1);
-        assert!(result.parallel_rate.abs() < 1e-9);
+        // No stretch ever reaches two concurrent sessions.
+        assert_eq!(result.time_by_level[1..], [0, 0, 0, 0, 0]);
     }
 }
