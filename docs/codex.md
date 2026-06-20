@@ -9,7 +9,9 @@
 - **Token usage** from `token_count` events (`last_token_usage`): input, cached
   input, output, reasoning output, total.
 - **Tools** from `response_item` payloads (`exec_command`, `apply_patch`,
-  `write_stdin`, …).
+  `write_stdin`, …). Shell executions (`exec_command` and friends) are
+  decomposed to the real command basename (`grep`, `cargo`, …) so the tool list
+  and the research/build split reflect what actually ran, not one shell bucket.
 - **Durations** from `task_complete` events (`duration_ms`) → the COMPLETION
   section.
 - **Sessions / model / project** from `session_meta` and `turn_context`.
@@ -37,10 +39,12 @@ So the Combined total adds up consistently with Claude. Two real differences
 
 ## Caveats
 
-- **`exec_command` is a shell catch-all.** It is the majority of Codex tool
-  calls; read / run / search all collapse into it. The tool mix looks
-  shell-heavy, but the commands inside are often review/read. Do not read
-  "84% exec_command" as "84% shell work."
+- **`exec_command` is decomposed to the real command.** Codex runs most
+  reads / runs / searches through a shell wrapper (`exec_command`, usually
+  `bash -lc "…"`); agent-walker extracts the effective command basename
+  (`grep`/`cat`/`cargo`/…) so the tool list and the research/build split see the
+  real work instead of one undifferentiated shell bucket. A bare `exec_command`
+  remains only when the wrapped command can't be parsed (the fallback bucket).
 - `apply_patch` = file edits.
 
 ## Cost

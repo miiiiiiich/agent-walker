@@ -36,38 +36,48 @@ reads the session logs on your disk and answers, in one screen:
 gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/agent-walker
 ```
 
-## Install
-
-```sh
-# Homebrew (installs the `agent-walker` and `agw` commands)
-brew install miiiiiiich/tap/agent-walker
-
-# Run without installing (npm / bun)
-npx agent-walker
-bunx agent-walker
-
-# Rust
-cargo install agent-walker
-```
-
 ## Use
 
+No install — `npx` / `bunx` fetch the right prebuilt binary for your platform
+and run it:
+
 ```sh
-agw             # short alias
-agent-walker    # same thing
+npx agent-walker
+# or
+bunx agent-walker
 ```
 
 | Key | Action |
 |---|---|
-| `←` `→` / `h` `l` / `Tab` | switch provider (Claude / Codex / Agy / Combined) |
+| `←` `→` / `h` `l` / `Tab` | switch provider (ordered by API-equivalent cost, heaviest first; Combined last) |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` | scroll |
 | `1`–`4` | jump to tab |
 | `r` | reload |
+| `s` | share your stats card (copy image / save to `~/Downloads`) |
 | `q` / `Esc` / `Ctrl-C` | quit |
 
-Useful flags: `--days 30` (window, default 90), `--claude-dir` /
+Useful flags: `--days 30` (analysis window, default 30), `--share <path>`
+(render the stats card to a PNG and print its caption), `--agy` (also scan
+Antigravity logs — off by default, see [What it reads](#what-it-reads)),
+`--no-cache` (rescan everything, ignore the parse cache), `--claude-dir` /
 `--codex-dir` / `--agy-dir` (non-standard log locations), `--completions zsh`
 (shell completions).
+
+## Share your codename
+
+Press `s` in the dashboard (or run `agent-walker --share card.png`) to render a
+shareable stats card. Instead of leading with a raw token count, the card reads
+*how* you work: a GitHub-style activity grid, your hour-of-day rhythm, and a
+per-model split, with parallelism and task-time as plain numbers.
+
+Your usage also earns a **codename** — one of the 24 [Metal Gear Solid: Peace
+Walker](https://en.wikipedia.org/wiki/Metal_Gear_Solid:_Peace_Walker) ranks laid
+out on a 6×4 grid. The row is your token-rate band (tokens-per-day over the last
+30 days); the column is your working style (parallel / heavy / scout, or
+all-rounder when several are high at once); the `[OPS]` prefix is your busiest
+time of day. Repository names never appear on the card — it is safe to post.
+
+![an agent-walker codename stats card](docs/card.png)
 
 ## What it reads
 
@@ -75,7 +85,7 @@ Useful flags: `--days 30` (window, default 90), `--claude-dir` /
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | opt-in with `--agy`; sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above
 explain what's read, how tokens/cache/cost are counted, and the caveats.

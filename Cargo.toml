@@ -8,8 +8,9 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/miiiiiiich/agent-walker"
 repository = "https://github.com/miiiiiiich/agent-walker"
 readme = "README.md"
-keywords = ["cli", "tui", "claude", "usage", "dashboard"]
+keywords = ["cli", "tui", "claude", "codex", "usage"]
 categories = ["command-line-utilities", "development-tools"]
+default-run = "agent-walker"
 
 [[bin]]
 name = "agent-walker"
@@ -35,7 +36,6 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 resvg = "0.47"
 arboard = "3.6.1"
-open = "5.3.5"
 
 [dev-dependencies]
 tempfile = "3.24.0"
