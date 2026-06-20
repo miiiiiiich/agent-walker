@@ -1,8 +1,8 @@
 //! API-equivalent cost estimation.
 //!
-//! Pricing comes from `LiteLLM`'s community pricing database — the same
-//! source ccusage uses, so rate changes are tracked upstream without a
-//! release. Normal runs fetch current pricing in parallel with report loading
+//! Pricing comes from `LiteLLM`'s community pricing database, so rate changes
+//! are tracked upstream without a release. Normal runs fetch current pricing
+//! in parallel with report loading
 //! and apply it before rendering or share actions. Only pricing metadata is
 //! ever fetched; no usage data leaves the machine.
 

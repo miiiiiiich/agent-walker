@@ -99,9 +99,9 @@ const CHICK_MIN_DAYS: usize = 3;
 /// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
-/// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`. The
-/// 24 codenames are exactly Metal Gear Solid: Peace Walker's 24 ranks
-/// (agent-WALKER ← Peace Walker), ordered per column strongest (R1) → humblest.
+/// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`,
+/// ordered per column strongest (R1) → humblest. The roster (and the name) nod
+/// to Peace Walker — agent-WALKER.
 const GRID: [[&str; 4]; 6] = [
     ["Foxhound", "Fox", "Doberman", "Hound"], // R1
     ["Octopus", "Wolf", "Orca", "Hawk"],      // R2

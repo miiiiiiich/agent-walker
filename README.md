@@ -56,12 +56,16 @@ bunx agent-walker
 | `s` | share your stats card (copy image / save to `~/Downloads`) |
 | `q` / `Esc` / `Ctrl-C` | quit |
 
-Useful flags: `--days 30` (analysis window, default 30), `--share <path>`
-(render the stats card to a PNG and print its caption), `--agy` (also scan
-Antigravity logs — off by default, see [What it reads](#what-it-reads)),
-`--no-cache` (rescan everything, ignore the parse cache), `--claude-dir` /
-`--codex-dir` / `--agy-dir` (non-standard log locations), `--completions zsh`
-(shell completions).
+Flags:
+
+| Flag | What it does |
+|---|---|
+| `--days <N>` | Analysis window for the graphs (default 30; the codename always uses the last 30 days) |
+| `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
+| `--agy` | Also scan Antigravity logs (off by default — see [What it reads](#what-it-reads)) |
+| `--no-cache` | Rescan every log file, ignoring the parse cache |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` | Point at non-standard log locations |
+| `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename
 
@@ -70,12 +74,14 @@ shareable stats card. Instead of leading with a raw token count, the card reads
 *how* you work: a GitHub-style activity grid, your hour-of-day rhythm, and a
 per-model split, with parallelism and task-time as plain numbers.
 
-Your usage also earns a **codename** — one of the 24 [Metal Gear Solid: Peace
-Walker](https://en.wikipedia.org/wiki/Metal_Gear_Solid:_Peace_Walker) ranks laid
-out on a 6×4 grid. The row is your token-rate band (tokens-per-day over the last
-30 days); the column is your working style (parallel / heavy / scout, or
-all-rounder when several are high at once); the `[OPS]` prefix is your busiest
-time of day. Repository names never appear on the card — it is safe to post.
+Your usage also earns a **codename** — one of 24 ranks on a 6×4 grid. The row is
+your token-rate band (tokens-per-day over the last 30 days); the column is your
+working style (parallel / heavy / scout, or all-rounder when several are high at
+once); the `[OPS]` prefix is your busiest time of day. Repository names never
+appear on the card — it is safe to post.
+
+The name — and the rank roster — are a quiet nod to a certain tactical-espionage
+classic about running an army of graded recruits. If you know, you know.
 
 ![an agent-walker codename stats card](docs/card.png)
 
@@ -116,14 +122,14 @@ indefinitely; no setting needed.
   with cache reads/writes priced separately; the rates date is shown in the
   COST panel.
 - Token totals are **cache-inclusive** (input + output + cache writes + cache
-  reads), matching `ccusage`. Because Claude Code re-sends the full context
-  every turn, ~95% of a Claude total is cache reads — real but cheaply-billed
-  context re-reads, not new work. See [docs/claude.md](docs/claude.md).
+  reads). Because Claude Code re-sends the full context every turn, ~95% of a
+  Claude total is cache reads — real but cheaply-billed context re-reads, not
+  new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens/cost are not counted** — its usage lives in an
   undocumented protobuf format. agy is activity-only; see [docs/agy.md](docs/agy.md).
-- These numbers **won't match each tool's own usage display** (Claude's `/cost`
-  bar, Codex `/status`, the vendor dashboards): they use different time windows
-  and count cache reads differently. See the per-agent pages above.
+- These numbers **won't match each agent's own in-app usage display**: those use
+  different time windows and count cache reads differently. See the per-agent
+  pages above.
 - Antigravity log timestamps carry no timezone and are assumed to be local.
 - Windows is not supported yet (log discovery relies on `$HOME`).
 

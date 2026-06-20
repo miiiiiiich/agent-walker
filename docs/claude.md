@@ -48,9 +48,9 @@ So the headline token number is a **scale** signal, not "fresh work":
   heavy user)
 - the rest is context re-reads
 
-This is why the total can be ~20–25× what a tool that excludes cache reads shows.
-agent-walker counts cache-inclusive on purpose — the same convention `ccusage`
-uses.
+This is why the total can be ~20–25× what a cache-excluding counter shows.
+agent-walker counts cache-inclusive on purpose, so the total reflects everything
+the model actually processed.
 
 > cache% is intentionally **not** surfaced as a metric: it sits near 95% for
 > everyone, so it distinguishes no one.
@@ -69,9 +69,8 @@ COST is **API-equivalent** and **cache-aware**:
 input×rate + output×rate + cache_read×cache_read_rate + cache_write×write_rate
 ```
 
-Per-model rates come from the LiteLLM pricing database (the source `ccusage`
-uses). Claude cache reads price at ≈0.1×, cache writes at 1.25× (5-minute cache)
-or 2× (1-hour cache).
+Per-model rates come from the LiteLLM pricing database. Claude cache reads price
+at ≈0.1×, cache writes at 1.25× (5-minute cache) or 2× (1-hour cache).
 
 If you are on a Claude subscription (Pro/Max), this is **not your bill** — it is
 what the same usage would cost at pay-as-you-go API rates. Use it to answer "is
