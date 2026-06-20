@@ -75,7 +75,7 @@ fn every_badge_rasterizes() {
     for animal in ANIMALS {
         let art =
             badge_art::badge_inner(animal).unwrap_or_else(|| panic!("missing badge: {animal}"));
-        // The silhouette's native space is 1024×1024 (see the potrace transform).
+        // The silhouette's native space is 1024×1024 (see the badge `<g>` transform).
         let doc = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">{}</svg>"#,
             art.replace("currentColor", "#000000")
