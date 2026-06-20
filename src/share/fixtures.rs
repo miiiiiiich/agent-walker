@@ -17,13 +17,13 @@ pub(crate) fn sample_summary() -> Summary {
     hourly[22] = 400_000;
     Summary {
         provider: Provider::Combined,
-        generated_at: time::OffsetDateTime::UNIX_EPOCH,
         period_days: 30,
         period_start: date!(2026 - 05 - 14),
         period_end: date!(2026 - 06 - 12),
         root: std::path::PathBuf::new(),
         scan_stats: ScanStats::default(),
         total_usage: usage.clone(),
+        recent_window_volume: usage.token_volume(),
         daily: Vec::new(),
         daily_sessions: Vec::new(),
         model_daily: Vec::new(),
@@ -31,7 +31,6 @@ pub(crate) fn sample_summary() -> Summary {
             name: "claude-opus-4-8".to_owned(),
             usage: usage.clone(),
             events: 10,
-            active_days: 5,
         }],
         agents: Vec::new(),
         tools: Vec::new(),
@@ -39,18 +38,15 @@ pub(crate) fn sample_summary() -> Summary {
             crate::model::ProjectStat {
                 name: "agent-walker".to_owned(),
                 usage: usage.clone(),
-                events: 50,
             },
             crate::model::ProjectStat {
                 name: "orchestra".to_owned(),
                 usage: usage.clone(),
-                events: 30,
             },
         ],
         sessions: 42,
         active_days: 30,
         previous_total_volume: 15_000_000,
-        previous_sessions: 30,
         longest_streak_days: 5,
         current_streak_days: 3,
         most_active_day: None,
@@ -92,10 +88,8 @@ pub(crate) fn sample_summary() -> Summary {
             ],
         }),
         orchestration: Orchestration {
-            parallel_rate: 0.62,
             avg_concurrency: 2.5,
             peak_concurrency: 4,
-            span_count: 18,
             time_by_level: [144_000, 108_000, 54_000, 36_000, 18_000, 6_000],
         },
     }

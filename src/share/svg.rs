@@ -310,7 +310,12 @@ fn draw_bottom(s: &mut String, card: &ShareCard) {
     };
     let (p50, p90, max, unattended) = match &card.completion {
         Some((_, un, _, p50, p90, max)) => (p50.clone(), p90.clone(), max.clone(), un.to_string()),
-        None => ("—".to_owned(), "—".to_owned(), "—".to_owned(), "—".to_owned()),
+        None => (
+            "—".to_owned(),
+            "—".to_owned(),
+            "—".to_owned(),
+            "—".to_owned(),
+        ),
     };
 
     let line_y = 520_u32;
@@ -326,7 +331,12 @@ fn draw_bottom(s: &mut String, card: &ShareCard) {
     let slot = 145_u32;
     let par_x = [LX, LX + slot, LX + 2 * slot];
     let task_x0 = LX + 3 * slot + 69;
-    let task_x = [task_x0, task_x0 + slot, task_x0 + 2 * slot, task_x0 + 3 * slot];
+    let task_x = [
+        task_x0,
+        task_x0 + slot,
+        task_x0 + 2 * slot,
+        task_x0 + 3 * slot,
+    ];
 
     section_label(s, par_x[0], label_y, "PARALLEL");
     section_label(s, task_x[0], label_y, "TASK TIME");
@@ -386,10 +396,15 @@ fn section_label(s: &mut String, x: u32, y: u32, label: &str) {
     );
 }
 
+/// Escape a string for safe inclusion in SVG element text or attribute values.
+/// Model names come from logs (untrusted), so escape quotes too — otherwise a
+/// `"` in a value would break out of an attribute and fail SVG parsing.
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn truncate_tail(text: &str, max: usize) -> String {

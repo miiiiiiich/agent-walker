@@ -132,7 +132,11 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         right_blocks.push(sections::agent_lines(summary, right_u16, 5));
     }
 
-    lines.extend(join_section_columns(&left_blocks, &right_blocks, left_width + 2));
+    lines.extend(join_section_columns(
+        &left_blocks,
+        &right_blocks,
+        left_width + 2,
+    ));
     lines
 }
 
@@ -218,7 +222,9 @@ fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'stati
             ),
             Span::styled(
                 format!(" {}", codename.animal),
-                Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];

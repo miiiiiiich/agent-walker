@@ -16,6 +16,5 @@ mod tests;
 pub use actions::{copy_image, default_save_path, save};
 pub use card::ShareCard;
 pub use raster::render_png;
-pub use svg::svg;
 
 pub(crate) const REPO_URL: &str = "github.com/miiiiiiich/agent-walker";

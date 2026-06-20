@@ -62,9 +62,13 @@ impl ShareCard {
             .sum();
         let parallel = {
             let levels = summary.orchestration.time_by_level;
-            let total: u64 = levels.iter().sum();
+            // Seconds come from untrusted logs; stay on the saturating discipline
+            // the rest of the aggregation uses, even though wall-clock can't realistically overflow.
+            let total = levels.iter().copied().fold(0u64, u64::saturating_add);
             (total > 0).then(|| {
-                let four_plus = levels[3] + levels[4] + levels[5];
+                let four_plus = levels[3]
+                    .saturating_add(levels[4])
+                    .saturating_add(levels[5]);
                 let four_plus_pct = (four_plus as f64 / total as f64 * 100.0).round() as u64;
                 (four_plus_pct, summary.orchestration.peak_concurrency)
             })
@@ -154,7 +158,9 @@ impl ShareCard {
         if let Some((four_plus_pct, peak)) = &self.parallel
             && *four_plus_pct > 0
         {
-            stats.push(format!("{four_plus_pct}% with 4+ agents in parallel (peak {peak})"));
+            stats.push(format!(
+                "{four_plus_pct}% with 4+ agents in parallel (peak {peak})"
+            ));
         }
         let mut caption = format!(
             "Codename: {}\nMy last {} days with AI coding agents:\n{}.",
@@ -184,9 +190,17 @@ impl Grass {
             .collect();
         let thresholds = quartiles(&value_by_date);
 
+        // The card's activity panel is sized for ~5 weeks, and the codename is a
+        // 30-day signal — so render only the most recent 30 days. A longer
+        // analysis window (e.g. --days 90) would otherwise overflow the grid into
+        // the neighbouring charts.
+        let start = summary
+            .period_start
+            .max(summary.period_end.saturating_sub(Duration::days(29)));
+
         let mut columns: Vec<Vec<Option<usize>>> = Vec::new();
         let mut column = vec![None; 7];
-        let mut cursor = summary.period_start;
+        let mut cursor = start;
         while cursor <= summary.period_end {
             let weekday = usize::from(cursor.weekday().number_days_from_sunday());
             let value = value_by_date.get(&cursor).copied().unwrap_or(0);

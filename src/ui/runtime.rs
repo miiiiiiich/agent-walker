@@ -71,9 +71,26 @@ pub fn run(config: Config) -> Result<()> {
     };
 
     let mut terminal = setup_terminal()?;
+    install_panic_hook();
     let run_result = run_loop(&mut terminal, &mut state);
     let restore_result = restore_terminal(&mut terminal);
     run_result.and(restore_result)
+}
+
+/// Restore the terminal on panic before the message is printed.
+///
+/// crossterm's raw mode and alternate screen survive an unwind, so a panic
+/// inside the draw/event loop would otherwise drop the user back to a dead
+/// shell — no echo, no prompt. The hook leaves the alternate screen first, then
+/// defers to the previous hook so the panic message prints on the normal screen
+/// instead of the discarded alternate buffer.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        original(info);
+    }));
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {

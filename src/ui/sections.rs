@@ -11,9 +11,9 @@ use crate::model::Summary;
 use super::theme;
 use super::utils;
 
-/// API-equivalent spend, cache-aware, with the JPY conversion that answers
-/// "is the subscription paying for itself". Shows trailing windows (today /
-/// 7d / 30d) cut from the per-day, per-model aggregates.
+/// API-equivalent spend, cache-aware, that answers "is the subscription paying
+/// for itself". Shows trailing windows (today / 7d / 30d) cut from the per-day,
+/// per-model aggregates.
 pub(super) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let label_width = utils::kv_label_width(width);
     let annotation = if width < 44 {
