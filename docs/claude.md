@@ -58,8 +58,8 @@ the model actually processed.
 ## Deduplication
 
 Claude writes the same usage line into multiple files when a session is
-forked/resumed. agent-walker dedupes by `(message.id, requestId)` so volume is
-not double-counted.
+forked/resumed. agent-walker dedupes by `message.id` so volume is not
+double-counted.
 
 ## Cost
 

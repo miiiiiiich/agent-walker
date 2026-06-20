@@ -1,4 +1,4 @@
-//! Codename: the MGS-styled vanity title derived from a usage `Summary`.
+//! Codename: a playful vanity title derived from a usage `Summary`.
 //!
 //! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Hawk". The ANIMAL encodes a 6×4
 //! grid — **ROW = token throughput (the level), COLUMN = working style**
@@ -100,8 +100,7 @@ const CHICK_MIN_DAYS: usize = 3;
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
 /// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`,
-/// ordered per column strongest (R1) → humblest. The roster (and the name) nod
-/// to Peace Walker — agent-WALKER.
+/// ordered per column strongest (R1) → humblest.
 const GRID: [[&str; 4]; 6] = [
     ["Foxhound", "Fox", "Doberman", "Hound"], // R1
     ["Octopus", "Wolf", "Orca", "Hawk"],      // R2

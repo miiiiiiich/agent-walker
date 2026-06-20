@@ -1,8 +1,9 @@
-//! Bundled codename silhouettes — the 24 Peace Walker rank badges as potrace
-//! `<g>` groups (paths with `fill="currentColor"`), embedded so the share card
-//! can paint the earned animal as a tinted background watermark with no network
-//! or filesystem access. The `currentColor` fill resolves to whatever `color`
-//! the wrapping element sets, so one asset serves every OPS tint.
+//! Bundled codename silhouettes — the 24 rank badges as inline `<g>` path
+//! groups (`fill="currentColor"`), original art generated for this project and
+//! embedded so the share card can paint the earned animal as a tinted
+//! background watermark with no network or filesystem access. The `currentColor`
+//! fill resolves to whatever `color` the wrapping element sets, so one asset
+//! serves every OPS tint.
 
 /// Inner SVG `<g>` for the codename `animal`, sized in a `0 0 1024 1024` user
 /// space, or `None` for the no-data "Chick" floor (which carries no badge).

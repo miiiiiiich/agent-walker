@@ -14,7 +14,7 @@ use super::REPO_URL;
 /// Values rendered on the card, extracted once so the SVG and caption stay
 /// in sync.
 pub struct ShareCard {
-    /// Earned MGS-styled title, e.g. "Eclipse Hawk".
+    /// Earned vanity title, e.g. "Eclipse Hawk".
     pub(crate) codename: String,
     /// Time-of-day word ("Aurora"/"Sol"/"Luna"/"Eclipse") — drives the watermark tint.
     pub(crate) ops: String,
