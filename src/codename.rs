@@ -180,11 +180,11 @@ const BUILD_TOOLS: [&str; 28] = [
 // ===========================================================================
 
 struct Metrics {
-    control: f64,        // weighted avg simultaneous sessions (parallel)
-    heavy_per_day: f64,  // 20m+ unattended runs per active day (heavy)
-    scout: f64,          // research % of (research + build) tools
-    tokens_per_day: f64, // tokens/day over the most recent window (level)
-    active_days: usize,  // active days (Chick floor + heavy rate)
+    control: f64,              // weighted avg simultaneous sessions (parallel)
+    heavy_per_day: f64,        // 20m+ unattended runs per active day (heavy)
+    scout: f64,                // research % of (research + build) tools
+    tokens_per_day: f64,       // tokens/day over the most recent window (level)
+    window_active_days: usize, // active days over the fixed 30-day window (Chick floor)
 }
 
 /// Public entry: derive the codename for a summary. Computed on demand at
@@ -236,7 +236,7 @@ fn metrics(summary: &Summary) -> Metrics {
         heavy_per_day,
         scout,
         tokens_per_day: tokens_per_day(summary),
-        active_days,
+        window_active_days: summary.recent_window_active_days,
     }
 }
 
@@ -272,7 +272,7 @@ fn tool_calls(summary: &Summary, names: &[&str]) -> usize {
 /// level; the style is the column — they are independent, so growing any axis
 /// can only raise the row (via throughput) or switch the column, never demote.
 fn classify(m: &Metrics) -> Option<(Style, usize)> {
-    if m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.active_days < CHICK_MIN_DAYS {
+    if m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS {
         return None;
     }
 
@@ -360,15 +360,25 @@ mod tests {
             heavy_per_day: 0.0,
             scout: 0.0,
             tokens_per_day: 220_000_000.0, // R2
-            active_days: 20,
+            window_active_days: 20,
         }
     }
 
     #[test]
-    fn no_data_is_chick() {
+    fn low_tokens_is_chick() {
         let m = Metrics {
             tokens_per_day: 100_000.0,
-            active_days: 2,
+            ..base()
+        };
+        assert!(classify(&m).is_none());
+    }
+
+    #[test]
+    fn short_window_active_days_is_chick() {
+        // A real 30-day user viewed at --days 1 still has a window-stable rate,
+        // but too few window-active days to score yet.
+        let m = Metrics {
+            window_active_days: 2,
             ..base()
         };
         assert!(classify(&m).is_none());
@@ -393,7 +403,7 @@ mod tests {
             heavy_per_day: 0.5,
             scout: 10.0,
             tokens_per_day: 250_000_000.0, // R2
-            active_days: 25,
+            window_active_days: 25,
         };
         assert_eq!(classify(&m), Some((Style::Control, 2)));
         assert_eq!(animal_for(Style::Control, 2), "Octopus");
@@ -407,7 +417,7 @@ mod tests {
             heavy_per_day: 4.0,
             scout: 5.0,
             tokens_per_day: 250_000_000.0,
-            active_days: 25,
+            window_active_days: 25,
         };
         assert_eq!(classify(&m), Some((Style::Solo, 2)));
         assert_eq!(animal_for(Style::Solo, 2), "Wolf");
@@ -420,7 +430,7 @@ mod tests {
             heavy_per_day: 0.2,
             scout: 60.0,
             tokens_per_day: 250_000_000.0,
-            active_days: 18,
+            window_active_days: 18,
         };
         assert_eq!(classify(&m), Some((Style::Scout, 2)));
         assert_eq!(animal_for(Style::Scout, 2), "Orca");
@@ -435,7 +445,7 @@ mod tests {
             heavy_per_day: 4.17,
             scout: 19.0,
             tokens_per_day: 220_000_000.0, // R2
-            active_days: 29,
+            window_active_days: 29,
         };
         assert_eq!(classify(&m), Some((Style::AllRounder, 2)));
         assert_eq!(animal_for(Style::AllRounder, 2), "Hawk");
@@ -448,7 +458,7 @@ mod tests {
             heavy_per_day: 10.0,
             scout: 80.0,
             tokens_per_day: 500_000_000.0, // R1
-            active_days: 28,
+            window_active_days: 28,
         };
         assert_eq!(classify(&m), Some((Style::AllRounder, 1)));
         assert_eq!(animal_for(Style::AllRounder, 1), "Hound");
@@ -463,7 +473,7 @@ mod tests {
             heavy_per_day: 2.4, // 2.4 / 8.0 = 0.30, heavy_row R3
             scout: 0.0,
             tokens_per_day: 220_000_000.0,
-            active_days: 20,
+            window_active_days: 20,
         };
         // Heavy reaches R3 but parallel only R5, so not an all-rounder; the tie
         // then resolves to the earlier axis.

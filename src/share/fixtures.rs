@@ -24,6 +24,7 @@ pub(crate) fn sample_summary() -> Summary {
         scan_stats: ScanStats::default(),
         total_usage: usage.clone(),
         recent_window_volume: usage.token_volume(),
+        recent_window_active_days: 25,
         daily: Vec::new(),
         daily_sessions: Vec::new(),
         model_daily: Vec::new(),

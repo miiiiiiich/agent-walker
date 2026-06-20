@@ -144,18 +144,23 @@ pub fn summarize(
     // 7- or 90-day view yields the same level.
     let codename_window_start =
         period_end - Duration::days(crate::codename::CODENAME_WINDOW_DAYS - 1);
-    let recent_window_volume = collection
-        .usage_events
-        .iter()
-        .filter(|event| {
-            event
-                .timestamp
-                .map(|ts| ts.to_offset(local_offset).date())
-                .is_some_and(|date| date >= codename_window_start && date <= period_end)
-        })
-        .fold(0_u64, |acc, event| {
-            acc.saturating_add(event.usage.token_volume())
-        });
+    let mut recent_window_volume = 0_u64;
+    let mut recent_active_days = std::collections::HashSet::new();
+    for event in &collection.usage_events {
+        let Some(date) = event.timestamp.map(|ts| ts.to_offset(local_offset).date()) else {
+            continue;
+        };
+        if date < codename_window_start || date > period_end {
+            continue;
+        }
+        let volume = event.usage.token_volume();
+        if volume == 0 {
+            continue;
+        }
+        recent_window_volume = recent_window_volume.saturating_add(volume);
+        recent_active_days.insert(date);
+    }
+    let recent_window_active_days = recent_active_days.len();
 
     Summary {
         provider: collection.provider,
@@ -166,6 +171,7 @@ pub fn summarize(
         scan_stats: collection.stats.clone(),
         total_usage: aggregates.total_usage,
         recent_window_volume,
+        recent_window_active_days,
         daily,
         daily_sessions,
         model_daily,

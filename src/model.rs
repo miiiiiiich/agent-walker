@@ -291,6 +291,10 @@ pub struct Summary {
     /// codename level divides this by the window length so it never drifts with
     /// the chosen window.
     pub recent_window_volume: u64,
+    /// Distinct active days within the same fixed 30-day window. Used as the
+    /// codename's data-sufficiency floor so a short `--days` view can't demote a
+    /// real user to the no-data rank.
+    pub recent_window_active_days: usize,
     pub daily: Vec<DailyStat>,
     pub daily_sessions: Vec<DailySessions>,
     pub model_daily: Vec<ModelDailyStat>,

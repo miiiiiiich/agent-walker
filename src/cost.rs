@@ -115,16 +115,16 @@ fn fetch_snapshot_json() -> Option<String> {
     .ok()
 }
 
-/// Refresh active pricing from `LiteLLM`.
+/// Refresh active pricing from `LiteLLM`. A failed fetch or parse leaves the
+/// last good snapshot in place — a transient network blip on a reload must not
+/// blank the cost panel, zero out share cards, or flip provider ordering.
 pub fn refresh_pricing() {
     let Some(serialized) = fetch_snapshot_json() else {
-        debug!("pricing refresh skipped: fetch or parse failed");
-        replace_loaded(None);
+        debug!("pricing refresh skipped: fetch or parse failed; keeping last snapshot");
         return;
     };
     let Some(snapshot) = parse_snapshot_json(&serialized) else {
-        debug!("pricing refresh skipped: generated snapshot did not parse");
-        replace_loaded(None);
+        debug!("pricing refresh skipped: generated snapshot did not parse; keeping last snapshot");
         return;
     };
     replace_loaded(Some(snapshot));

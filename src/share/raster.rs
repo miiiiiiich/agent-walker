@@ -6,12 +6,22 @@ use super::svg::svg;
 /// Rasterize the card SVG at 2x. Pure-Rust, no network; uses locally
 /// installed fonts via fontdb.
 pub(crate) fn render_pixmap(card: &ShareCard) -> Result<resvg::tiny_skia::Pixmap> {
+    use std::sync::OnceLock;
+
     use resvg::tiny_skia;
     use resvg::usvg;
 
+    // Scanning system font directories is slow; do it once and reuse the index.
+    static FONT_DB: OnceLock<usvg::fontdb::Database> = OnceLock::new();
+    let fontdb = FONT_DB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    });
+
     let svg = svg(card);
     let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    *options.fontdb_mut() = fontdb.clone();
     let tree = usvg::Tree::from_str(&svg, &options).context("parse generated SVG")?;
 
     let scale = 2.0_f32;

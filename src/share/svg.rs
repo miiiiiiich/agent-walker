@@ -408,6 +408,9 @@ fn xml_escape(text: &str) -> String {
 }
 
 fn truncate_tail(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     let count = text.chars().count();
     if count <= max {
         return text.to_owned();
