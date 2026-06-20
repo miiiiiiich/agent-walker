@@ -18,8 +18,8 @@ pub(crate) fn sample_summary() -> Summary {
     Summary {
         provider: Provider::Combined,
         generated_at: time::OffsetDateTime::UNIX_EPOCH,
-        period_days: 90,
-        period_start: date!(2026 - 03 - 15),
+        period_days: 30,
+        period_start: date!(2026 - 05 - 14),
         period_end: date!(2026 - 06 - 12),
         root: std::path::PathBuf::new(),
         scan_stats: ScanStats::default(),

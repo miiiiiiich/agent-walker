@@ -4,7 +4,6 @@ use ratatui::prelude::Color;
 
 use crate::app::Config;
 use crate::model::{AppSummary, Provider, Summary};
-use crate::share::Variant;
 
 use super::theme;
 
@@ -24,22 +23,13 @@ pub(super) struct UiState {
 
 pub(super) struct ShareModal {
     pub(super) selected: usize,
-    pub(super) variant: Variant,
 }
 
-pub(super) const SHARE_ACTIONS: [&str; 4] = [
-    "Share to X (image + caption)",
-    "Copy image",
-    "Copy caption (text)",
-    "Save image to file",
-];
+pub(super) const SHARE_ACTIONS: [&str; 2] = ["Copy image", "Save image to Downloads"];
 
 impl ShareModal {
     pub(super) fn new() -> Self {
-        Self {
-            selected: 0,
-            variant: Variant::Summary,
-        }
+        Self { selected: 0 }
     }
 }
 

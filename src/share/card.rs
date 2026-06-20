@@ -5,65 +5,37 @@ use time::{Date, Duration};
 
 use crate::cost::usage_cost_usd;
 use crate::format::{
-    format_date, format_duration_ms, format_duration_secs, format_percent, format_tokens,
-    format_usd, short_model_name,
+    format_duration_ms, format_percent, format_tokens, format_usd, short_model_name,
 };
 use crate::model::Summary;
 
 use super::REPO_URL;
 
-/// Which card to render. `Summary` is privacy-safe (no repo names); `Full`
-/// adds the per-project breakdown.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Variant {
-    Summary,
-    Full,
-}
-
-impl Variant {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Summary => "summary",
-            Self::Full => "full",
-        }
-    }
-
-    #[must_use]
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Summary => Self::Full,
-            Self::Full => Self::Summary,
-        }
-    }
-}
-
 /// Values rendered on the card, extracted once so the SVG and caption stay
 /// in sync.
 pub struct ShareCard {
-    pub(crate) variant: Variant,
-    /// Earned MGS-styled title, e.g. "Eclipse Ocelot".
+    /// Earned MGS-styled title, e.g. "Eclipse Hawk".
     pub(crate) codename: String,
+    /// Time-of-day word ("Aurora"/"Sol"/"Luna"/"Eclipse") — drives the watermark tint.
+    pub(crate) ops: String,
+    /// Grid animal ("Octopus", …) — selects the watermark silhouette.
+    pub(crate) animal: String,
     pub(crate) period_days: u16,
     pub(crate) active_days: usize,
     pub(crate) tokens: String,
     pub(crate) cost: String,
     pub(crate) sessions: usize,
-    /// Period-over-period token delta: (`is_up`, "42%").
-    pub(crate) delta: Option<(bool, String)>,
     /// Top models: (short name, share%, ratio-to-largest, `formatted_tokens`).
     pub(crate) models: Vec<(String, String, f64, String)>,
     /// Hour-of-day profile: heights normalized to 0..=1 plus the peak hour.
     pub(crate) hourly: Option<(Vec<f64>, usize, String)>,
     /// Turn-duration buckets (7 counts), (unattended, total), and formatted (p50, p90, max).
     pub(crate) completion: Option<(Vec<usize>, usize, usize, String, String, String)>,
-    /// PARALLEL AGENTS: (active seconds at level 1/2/3/4–6/7+, % at 4+, peak).
-    pub(crate) parallel: Option<(Vec<u64>, u64, usize)>,
-    /// Busiest day, e.g. "2026-05-29 · 441.3M".
-    pub(crate) top_day: Option<String>,
-    pub(crate) longest_session: Option<String>,
+    /// PARALLEL AGENTS: (% of active time at 4+ concurrent, peak concurrency).
+    pub(crate) parallel: Option<(u64, usize)>,
+    /// Time-weighted average simultaneous sessions (the CONTROL metric).
+    pub(crate) avg_concurrency: f64,
     pub(crate) grass: Grass,
-    /// (name, ratio-to-largest) — only populated for `Full`.
-    pub(crate) projects: Vec<(String, f64)>,
 }
 
 pub(crate) struct Grass {
@@ -81,7 +53,7 @@ impl ShareCard {
         clippy::too_many_lines,
         reason = "Flat extraction of every card stat in one pass."
     )]
-    pub fn from_summary(summary: &Summary, variant: Variant) -> Self {
+    pub fn from_summary(summary: &Summary) -> Self {
         let total = summary.total_usage.token_volume();
         let cost: f64 = summary
             .model_daily
@@ -94,19 +66,9 @@ impl ShareCard {
             (total > 0).then(|| {
                 let four_plus = levels[3] + levels[4] + levels[5];
                 let four_plus_pct = (four_plus as f64 / total as f64 * 100.0).round() as u64;
-                (
-                    levels.to_vec(),
-                    four_plus_pct,
-                    summary.orchestration.peak_concurrency,
-                )
+                (four_plus_pct, summary.orchestration.peak_concurrency)
             })
         };
-
-        let delta = (summary.previous_total_volume > 0).then(|| {
-            let up = total >= summary.previous_total_volume;
-            let diff = total.abs_diff(summary.previous_total_volume);
-            (up, format_percent(diff, summary.previous_total_volume))
-        });
 
         let max_model = summary
             .models
@@ -164,54 +126,22 @@ impl ShareCard {
             )
         });
 
-        let top_day = summary.most_active_day.as_ref().map(|day| {
-            format!(
-                "{} · {}",
-                format_date(day.date),
-                format_tokens(day.usage.token_volume())
-            )
-        });
-        let longest_session = summary
-            .longest_session
-            .as_ref()
-            .map(|session| format_duration_secs(session.duration_secs()));
-
-        let max = summary
-            .projects
-            .iter()
-            .map(|project| project.usage.token_volume())
-            .max()
-            .unwrap_or(0)
-            .max(1);
-        let projects = summary
-            .projects
-            .iter()
-            .take(4)
-            .map(|project| {
-                (
-                    project.name.clone(),
-                    project.usage.token_volume() as f64 / max as f64,
-                )
-            })
-            .collect();
-
+        let codename = crate::codename::for_summary(summary);
         Self {
-            variant,
-            codename: crate::codename::for_summary(summary).title(),
+            codename: codename.title(),
+            ops: codename.ops.to_owned(),
+            animal: codename.animal.to_owned(),
             period_days: summary.period_days,
             active_days: summary.active_days,
             tokens: format_tokens(total),
             cost: format_usd(cost),
             sessions: summary.sessions,
-            delta,
             models,
             hourly,
             completion,
             parallel,
-            top_day,
-            longest_session,
+            avg_concurrency: summary.orchestration.avg_concurrency,
             grass: Grass::from_summary(summary),
-            projects,
         }
     }
 
@@ -221,7 +151,7 @@ impl ShareCard {
             format!("{} tokens", self.tokens),
             format!("{} API-equivalent", self.cost),
         ];
-        if let Some((_, four_plus_pct, peak)) = &self.parallel
+        if let Some((four_plus_pct, peak)) = &self.parallel
             && *four_plus_pct > 0
         {
             stats.push(format!("{four_plus_pct}% with 4+ agents in parallel (peak {peak})"));
@@ -235,7 +165,7 @@ impl ShareCard {
         if let Some((_, unattended, _, _, _, _)) = &self.completion
             && *unattended > 0
         {
-            let _ = write!(caption, "\n{unattended} turns ran 20m+ unattended.");
+            let _ = write!(caption, "\n{unattended} turns ran 20m+.");
         }
         let _ = write!(
             caption,

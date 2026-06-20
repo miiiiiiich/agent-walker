@@ -66,9 +66,6 @@ fn handle_share_key(state: &mut UiState, code: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => {
             modal.selected = (modal.selected + SHARE_ACTIONS.len() - 1) % SHARE_ACTIONS.len();
         }
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
-            modal.variant = modal.variant.toggled();
-        }
         KeyCode::Enter => {
             let status = execute_share(state);
             state.status = status;
@@ -82,16 +79,12 @@ fn execute_share(state: &UiState) -> String {
     let Some(modal) = state.share.as_ref() else {
         return String::new();
     };
-    let card = ShareCard::from_summary(state.current_summary(), modal.variant);
-    let result = match modal.selected {
-        0 => crate::share::share_to_x(&card)
-            .map(|()| "X opened · image on clipboard — paste it in the post".to_owned()),
-        1 => crate::share::copy_image(&card).map(|()| "card image copied to clipboard".to_owned()),
-        2 => crate::share::copy_caption(&card).map(|()| "caption copied to clipboard".to_owned()),
-        _ => {
-            let path = crate::share::default_save_path();
-            crate::share::save(&card, &path).map(|()| format!("saved card to {}", path.display()))
-        }
+    let card = ShareCard::from_summary(state.current_summary());
+    let result = if modal.selected == 0 {
+        crate::share::copy_image(&card).map(|()| "card image copied to clipboard".to_owned())
+    } else {
+        let path = crate::share::default_save_path();
+        crate::share::save(&card, &path).map(|()| format!("saved card to {}", path.display()))
     };
     result.unwrap_or_else(|error| format!("share failed: {error:#}"))
 }

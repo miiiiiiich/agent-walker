@@ -3,6 +3,7 @@
 //! Used by the in-app share modal and the `--share` flag.
 
 mod actions;
+mod badge_art;
 mod card;
 mod raster;
 mod svg;
@@ -12,8 +13,8 @@ mod fixtures;
 #[cfg(test)]
 mod tests;
 
-pub use actions::{copy_caption, copy_image, default_save_path, save, share_to_x};
-pub use card::{ShareCard, Variant};
+pub use actions::{copy_image, default_save_path, save};
+pub use card::ShareCard;
 pub use raster::render_png;
 pub use svg::svg;
 
