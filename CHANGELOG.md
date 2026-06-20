@@ -19,8 +19,7 @@ Initial public release.
   activity grid, and an hour-of-day profile in the local timezone.
 - Autonomy view: a turn-duration histogram weighted toward the 20-minute-plus
   unattended range.
-- Shareable "codename" stats card — one of 24 ranks (`[OPS] [ANIMAL]`) placed on
-  a 6×4 grid by tokens-per-day and working style — that you can copy to the
+- Shareable "codename" stats card — a usage-based rank you can copy to the
   clipboard or save to `~/Downloads`. Repository names never appear on it.
 - Opt-in Antigravity CLI collection via `--agy` (activity only; its logs carry
   no token usage).

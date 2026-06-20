@@ -5,10 +5,12 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy)
 
-**A terminal dashboard for your local AI coding-agent usage** — tokens, real
-API-equivalent cost, projects, tools, and autonomy metrics, aggregated from
-the logs that Claude Code, Codex CLI, and Antigravity CLI already write to
-your machine.
+**You run AI coding agents all day. `agent-walker` is their debrief.**
+
+A local terminal dashboard built from the logs Claude Code, Codex CLI, and
+Antigravity CLI already write to your machine — tokens, real API-equivalent
+cost, projects, tools, and autonomy, a month of runs in one screen. Put in the
+work and you'll earn a codename.
 
 ![agent-walker terminal dashboard preview](docs/demo.gif)
 
@@ -74,14 +76,9 @@ shareable stats card. Instead of leading with a raw token count, the card reads
 *how* you work: a GitHub-style activity grid, your hour-of-day rhythm, and a
 per-model split, with parallelism and task-time as plain numbers.
 
-Your usage also earns a **codename** — one of 24 ranks on a 6×4 grid. The row is
-your token-rate band (tokens-per-day over the last 30 days); the column is your
-working style (parallel / heavy / scout, or all-rounder when several are high at
-once); the `[OPS]` prefix is your busiest time of day. Repository names never
-appear on the card — it is safe to post.
-
-The name — and the rank roster — are a quiet nod to a certain tactical-espionage
-classic about running an army of graded recruits. If you know, you know.
+Your usage also earns a **codename** — a rank you climb as you go. Exactly how
+it's earned is left as a puzzle; repository names never appear on the card, so
+it's safe to post.
 
 ![an agent-walker codename stats card](docs/card.png)
 
