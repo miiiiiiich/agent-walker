@@ -34,7 +34,17 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub agy_dir: Option<PathBuf>,
 
-    #[arg(long, default_value_t = 90, value_name = "DAYS")]
+    /// Also collect Antigravity (agy) logs. Off by default: Antigravity's logs
+    /// expose no token usage — it lives in an unlabeled protobuf store
+    /// (`conversations/*.db`), so counts would be misleading. The parser is kept
+    /// for when that store becomes readable.
+    #[arg(long)]
+    pub agy: bool,
+
+    /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
+    /// month of logs. The codename level is always computed from the most recent
+    /// 30 days, so a longer window only widens the graphs, not the title.
+    #[arg(long, default_value_t = 30, value_name = "DAYS")]
     pub days: u16,
 
     /// Ignore the per-file parse cache and rescan everything.
@@ -44,10 +54,6 @@ pub struct Args {
     /// Render the shareable stats card to a PNG path and print the caption.
     #[arg(long, value_name = "PATH")]
     pub share: Option<PathBuf>,
-
-    /// Include project names on the shared card (with --share).
-    #[arg(long)]
-    pub share_projects: bool,
 
     /// Print shell completions for the given shell and exit.
     #[arg(long, value_enum, value_name = "SHELL")]
@@ -77,6 +83,9 @@ pub struct Config {
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
     pub agy_dir: PathBuf,
+    /// Antigravity collection is opt-in (`--agy`); off by default because the
+    /// logs carry no token usage.
+    pub agy: bool,
     pub days: u16,
     pub use_cache: bool,
     /// Local UTC offset captured at startup (single-threaded moment), used to
@@ -103,6 +112,7 @@ pub fn run(args: Args) -> Result<()> {
         claude_dir: args.claude_dir.unwrap_or(default_claude_dir()?),
         codex_dir: args.codex_dir.unwrap_or(default_codex_dir()?),
         agy_dir: args.agy_dir.unwrap_or(default_agy_dir()?),
+        agy: args.agy,
         days: args.days,
         use_cache: !args.no_cache,
         local_offset,
@@ -110,12 +120,7 @@ pub fn run(args: Args) -> Result<()> {
 
     if let Some(path) = &args.share {
         let report = load_report(&config)?;
-        let variant = if args.share_projects {
-            crate::share::Variant::Full
-        } else {
-            crate::share::Variant::Summary
-        };
-        let card = crate::share::ShareCard::from_summary(&report.combined, variant);
+        let card = crate::share::ShareCard::from_summary(&report.combined);
         let png = crate::share::render_png(&card)?;
         std::fs::write(path, png)
             .with_context(|| format!("write share card to {}", path.display()))?;
@@ -170,14 +175,23 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
             codex::collect(&config.codex_dir, mtime_floor, config.use_cache)
                 .with_context(|| format!("collect Codex logs from {}", config.codex_dir.display()))
         });
+        // Antigravity is opt-in (`--agy`): its logs carry no token usage, so it
+        // is left out of the default report rather than skewing the totals.
         let agy_handle = scope.spawn(|| {
-            agy::collect(
-                &config.agy_dir,
-                mtime_floor,
-                config.use_cache,
-                config.local_offset,
-            )
-            .with_context(|| format!("collect Antigravity logs from {}", config.agy_dir.display()))
+            config
+                .agy
+                .then(|| {
+                    agy::collect(
+                        &config.agy_dir,
+                        mtime_floor,
+                        config.use_cache,
+                        config.local_offset,
+                    )
+                    .with_context(|| {
+                        format!("collect Antigravity logs from {}", config.agy_dir.display())
+                    })
+                })
+                .transpose()
         });
         let claude_result = claude::collect(&config.claude_dir, mtime_floor, config.use_cache)
             .with_context(|| {
@@ -189,11 +203,13 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         (codex_handle.join(), (agy_handle.join(), claude_result))
     });
 
-    let collections = vec![
+    let mut collections = vec![
         claude_result?,
         codex_result.map_err(|_| anyhow!("Codex collector thread panicked"))??,
-        agy_result.map_err(|_| anyhow!("Antigravity collector thread panicked"))??,
     ];
+    if let Some(agy) = agy_result.map_err(|_| anyhow!("Antigravity collector thread panicked"))?? {
+        collections.push(agy);
+    }
 
     let providers = collections
         .iter()

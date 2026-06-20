@@ -1,3 +1,15 @@
+//! Antigravity (`agy`) collector — **opt-in via `--agy`, off by default.**
+//!
+//! Why disabled: Antigravity's text logs (`log/*.log`, `history.jsonl`) record
+//! the model, turns, and tool confirmations but **no token usage**, so every
+//! event here carries `TokenUsage::default()` (zero). The real usage lives in
+//! `conversations/*.{db,pb}` as unlabeled protobuf blobs (table `gen_metadata`)
+//! — token-magnitude integers are present but which field is prompt / output /
+//! cached is unknown, and the schema is Google-internal and liable to change.
+//! Rather than report misleading zero-token totals, agy is left out of the
+//! default report. This parser is kept intact for the day that store becomes
+//! readable (decode `gen_metadata`, identify the token fields, fill `usage`).
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
