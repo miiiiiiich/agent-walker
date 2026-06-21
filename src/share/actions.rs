@@ -6,15 +6,13 @@ use anyhow::{Context, Result};
 use super::card::ShareCard;
 use super::raster::{render_pixmap, render_png};
 
-/// Default path for a saved card: `~/Downloads/agent-walker.png`, falling back
-/// to the home directory if there's no Downloads folder.
+/// Default path for a saved card: `<home>/Downloads/agent-walker.png`, falling
+/// back to the home directory if there's no Downloads folder. Resolves through
+/// `paths::downloads_dir` so Windows and Unix share the same code path.
 pub fn default_save_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let downloads = home.join("Downloads");
-    let dir = if downloads.is_dir() { downloads } else { home };
-    dir.join("agent-walker.png")
+    crate::paths::downloads_dir()
+        .unwrap_or_default()
+        .join("agent-walker.png")
 }
 
 /// Write the card PNG to `path`.

@@ -23,13 +23,41 @@ use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent
 const CACHE_VERSION: u32 = 7;
 
 /// Normalize a working-directory path into a project label: strip the home
-/// prefix, keep the real path separators ("/Users/me/code/app" -> "code/app").
+/// prefix, keep the real path separators ("/Users/me/code/app" -> "code/app",
+/// "C:\\Users\\me\\code\\app" -> "code\\app").
 pub fn project_from_cwd(cwd: &str) -> String {
-    let stripped = std::env::var("HOME")
+    let home = crate::paths::home_dir()
         .ok()
-        .and_then(|home| cwd.strip_prefix(&format!("{home}/")).map(ToOwned::to_owned))
-        .unwrap_or_else(|| cwd.to_owned());
-    stripped.trim_start_matches('/').to_owned()
+        .and_then(|home| home.to_str().map(ToOwned::to_owned));
+    home.and_then(|home| strip_home_prefix(cwd, &home))
+        .unwrap_or_else(|| cwd.trim_start_matches(['/', '\\']).to_owned())
+}
+
+/// Strip the home prefix and the single separator that follows it. Windows
+/// filesystems are case-insensitive, so a cwd recorded as `c:\Users\me\…`
+/// must still match a home of `C:\Users\me`; compare case-insensitively but
+/// slice the original cwd so the rest of the path keeps its real casing.
+/// Requires a path-component boundary after the prefix so that
+/// `C:\Users\metadata` does not get stripped against home `C:\Users\me`.
+#[cfg(windows)]
+fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
+    // `get` keeps us safe if `home.len()` lands inside a multi-byte UTF-8
+    // character in `cwd`; `split_at` would panic there.
+    let head = cwd.get(..home.len())?;
+    let rest = cwd.get(home.len()..)?;
+    if !head.eq_ignore_ascii_case(home) {
+        return None;
+    }
+    if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
+        return None;
+    }
+    Some(rest.trim_start_matches(['/', '\\']).to_owned())
+}
+
+#[cfg(not(windows))]
+fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
+    cwd.strip_prefix(home)
+        .map(|rest| rest.trim_start_matches(['/', '\\']).to_owned())
 }
 
 /// Events extracted from a single log file. The unit of caching: parsed once,
@@ -205,11 +233,9 @@ struct CacheEntry {
 }
 
 fn cache_path(cache_name: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
     Some(
-        PathBuf::from(home)
-            .join(".cache")
-            .join("agent-walker")
+        crate::paths::cache_dir()
+            .ok()?
             .join(format!("{cache_name}-v{CACHE_VERSION}.bin")),
     )
 }
@@ -378,6 +404,40 @@ mod tests {
             version,
             offset_seconds,
             entries: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn strip_home_prefix_unix() {
+        // Posix-only test: case-sensitive byte comparison.
+        if !cfg!(windows) {
+            assert_eq!(
+                strip_home_prefix("/Users/me/code/app", "/Users/me"),
+                Some("code/app".to_owned()),
+            );
+            // No prefix match → None so the caller falls back.
+            assert_eq!(strip_home_prefix("/var/log/x", "/Users/me"), None);
+        }
+    }
+
+    #[test]
+    fn strip_home_prefix_windows_case_insensitive() {
+        // Windows-only test: case-insensitive prefix match with backslash trim.
+        if cfg!(windows) {
+            assert_eq!(
+                strip_home_prefix(r"C:\Users\me\code\app", r"C:\Users\me"),
+                Some(r"code\app".to_owned()),
+            );
+            // Lowercase drive letter still strips.
+            assert_eq!(
+                strip_home_prefix(r"c:\users\me\code\app", r"C:\Users\me"),
+                Some(r"code\app".to_owned()),
+            );
+            // Non-boundary sibling does not strip.
+            assert_eq!(
+                strip_home_prefix(r"C:\Users\metadata", r"C:\Users\me"),
+                None
+            );
         }
     }
 

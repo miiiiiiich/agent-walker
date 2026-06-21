@@ -64,8 +64,17 @@ fn project_label(path: &Path, root: &Path) -> Option<String> {
 }
 
 fn normalize_project_name(directory: &str) -> String {
-    let home_prefix = std::env::var("HOME")
-        .map(|home| format!("{}-", home.replace('/', "-")))
+    // Claude Code names its project directories by flattening the cwd with
+    // every path separator replaced by `-`. Strip the home prefix so the label
+    // is a relative project path. Exact on macOS / Linux. Windows-native
+    // Claude Code's flattening rule (especially what happens to the `:` after
+    // the drive letter) hasn't been confirmed, so when the flattened prefix
+    // doesn't match we just fall back to the leading-`-` trim — the cwd field
+    // in the session is preferred as the project label whenever present.
+    let home_prefix = crate::paths::home_dir()
+        .ok()
+        .and_then(|home| home.to_str().map(ToOwned::to_owned))
+        .map(|home| format!("{}-", home.replace(['/', '\\'], "-")))
         .unwrap_or_default();
     let trimmed = directory
         .strip_prefix(&home_prefix)
