@@ -23,8 +23,10 @@ use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent
 const CACHE_VERSION: u32 = 7;
 
 /// Normalize a working-directory path into a project label: strip the home
-/// prefix, keep the real path separators ("/Users/me/code/app" -> "code/app",
-/// "C:\\Users\\me\\code\\app" -> "code\\app"). A session whose cwd is exactly
+/// prefix and (on Windows) normalize separators to `/` so the same repo
+/// collapses to one project key regardless of native (`\`) vs npm/Node-style
+/// (`/`) cwd. "/Users/me/code/app" -> "code/app",
+/// "C:\\Users\\me\\code\\app" -> "code/app". A session whose cwd is exactly
 /// the home directory renders as "~" rather than an empty label so the
 /// PROJECTS row has something readable.
 pub fn project_from_cwd(cwd: &str) -> String {
@@ -72,7 +74,11 @@ fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
     if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
         return None;
     }
-    Some(rest.trim_start_matches(['/', '\\']).to_owned())
+    // Normalize backslashes to forward slashes in the remainder so the same
+    // repository visited as `C:\Users\me\code\app` (native) and
+    // `C:/Users/me/code/app` (npm/Node tooling) collapses to one project key
+    // (`code/app`) instead of splitting the totals across two labels.
+    Some(rest.trim_start_matches(['/', '\\']).replace('\\', "/"))
 }
 
 /// Same shape on Unix: require a path-component boundary so that home
@@ -490,19 +496,21 @@ mod tests {
         // Windows-only test: case-insensitive prefix match with separator
         // normalization and boundary check.
         if cfg!(windows) {
-            assert_eq!(
-                strip_home_prefix(r"C:\Users\me\code\app", r"C:\Users\me"),
-                Some(r"code\app".to_owned()),
-            );
-            // Lowercase drive letter still strips.
+            // Lowercase drive letter still strips, remainder normalized.
             assert_eq!(
                 strip_home_prefix(r"c:\users\me\code\app", r"C:\Users\me"),
-                Some(r"code\app".to_owned()),
+                Some("code/app".to_owned()),
             );
             // Mixed separators (forward-slashed cwd from npm/Node tooling,
-            // backslashed home from dirs::home_dir).
+            // backslashed home from dirs::home_dir) — and the remainder is
+            // returned with normalized forward slashes so a native-style
+            // visit to the same repo also lands at `code/app`, not `code\app`.
             assert_eq!(
                 strip_home_prefix("C:/Users/me/code/app", r"C:\Users\me"),
+                Some("code/app".to_owned()),
+            );
+            assert_eq!(
+                strip_home_prefix(r"C:\Users\me\code\app", r"C:\Users\me"),
                 Some("code/app".to_owned()),
             );
             // Non-boundary sibling does not strip.
@@ -510,10 +518,11 @@ mod tests {
                 strip_home_prefix(r"C:\Users\metadata", r"C:\Users\me"),
                 None
             );
-            // Drive-root home with a trailing separator still strips.
+            // Drive-root home with a trailing separator still strips (and
+            // the remainder is normalized to forward slashes).
             assert_eq!(
                 strip_home_prefix(r"D:\code\app", r"D:\"),
-                Some(r"code\app".to_owned()),
+                Some("code/app".to_owned()),
             );
         }
     }
