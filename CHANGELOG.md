@@ -5,9 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-06-20
+## [0.2.0] - 2026-06-21
 
-Initial public release.
+First public release with the codename system and the shareable stats card.
 
 ### Added
 
@@ -26,6 +26,7 @@ Initial public release.
 - Shell completions (`--completions`) and card export (`--share <path>`).
 - Dual MIT / Apache-2.0 licensing; distributed via npm (`npx` / `bunx`), with
   GitHub Artifact Attestations on the release binaries.
+- A Japanese README (`README.ja.md`), cross-linked with the English one.
 
 ### Known limitations
 
@@ -33,4 +34,9 @@ Initial public release.
   undocumented protobuf store.
 - Windows is not yet supported; log discovery relies on `$HOME`.
 
+## [0.1.0] - 2026-06-20
+
+Initial npm packaging.
+
+[0.2.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.1.0
