@@ -5,12 +5,16 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy)
 
-**You run AI coding agents all day. `agent-walker` is their debrief.**
+**日本語: [README.ja.md](README.ja.md)**
 
-A local terminal dashboard built from the logs Claude Code, Codex CLI, and
-Antigravity CLI already write to your machine — tokens, real API-equivalent
-cost, projects, tools, and autonomy, a month of runs in one screen. Put in the
-work and you'll earn a codename.
+**Can you see where your AI agents have walked?**
+
+A local terminal dashboard built from the logs your AI coding agents already
+write to your machine — tokens, API-equivalent cost, projects, tools, and
+autonomy, a month of runs in one screen. Put in the work and you'll earn a
+codename.
+
+*Only the one watching can deter it.*
 
 ![agent-walker terminal dashboard preview](docs/demo.gif)
 
@@ -31,7 +35,8 @@ reads the session logs on your disk and answers, in one screen:
 
 - Your logs **never leave your machine**. No telemetry, no analytics.
 - The only network access is a per-run fetch of public model-pricing metadata
-  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm).
+  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm)
+  (MIT-licensed); no log content or usage data is ever sent.
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
@@ -77,8 +82,8 @@ shareable stats card. Instead of leading with a raw token count, the card reads
 per-model split, with parallelism and task-time as plain numbers.
 
 Your usage also earns a **codename** — a rank you climb as you go. Exactly how
-it's earned is left as a puzzle; repository names never appear on the card, so
-it's safe to post.
+it's earned is left as a puzzle, and repository names never appear on the
+card — just glance before you post.
 
 ![an agent-walker codename stats card](docs/card.png)
 
@@ -94,9 +99,9 @@ Each agent counts and caches tokens differently. The per-agent pages above
 explain what's read, how tokens/cache/cost are counted, and the caveats.
 
 Everything is parsed in parallel and cached per file
-(`~/.cache/agent-walker/`), so warm starts take ~100 ms even on gigabytes of
-logs. Log lines are treated as untrusted input — malformed records are
-counted and skipped, never evaluated.
+(`~/.cache/agent-walker/`), so warm starts take ~100 ms. Log lines are treated
+as untrusted input — malformed records are counted and skipped, never
+evaluated.
 
 ### Keep more than 30 days of history
 
@@ -123,7 +128,8 @@ indefinitely; no setting needed.
   Claude total is cache reads — real but cheaply-billed context re-reads, not
   new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens/cost are not counted** — its usage lives in an
-  undocumented protobuf format. agy is activity-only; see [docs/agy.md](docs/agy.md).
+  undocumented protobuf format. With `--agy` on, the Combined token total still
+  excludes it (activity only); see [docs/agy.md](docs/agy.md).
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.
