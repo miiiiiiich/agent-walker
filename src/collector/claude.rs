@@ -67,14 +67,20 @@ fn normalize_project_name(directory: &str) -> String {
     // Claude Code names its project directories by flattening the cwd with
     // every path separator replaced by `-`. Strip the home prefix so the label
     // is a relative project path. Exact on macOS / Linux. Windows-native
-    // Claude Code's flattening rule (especially what happens to the `:` after
-    // the drive letter) hasn't been confirmed, so when the flattened prefix
-    // doesn't match we just fall back to the leading-`-` trim — the cwd field
+    // Claude Code's flattening rule isn't confirmed (especially whether the
+    // drive-letter `:` is dropped or rewritten), so we sanitize the home like
+    // the directory name itself — replacing `:` as well as the separators —
+    // and trim any trailing separator first so a home such as `/home/me/` or
+    // `D:\` doesn't yield a double-hyphen prefix. When the flattened prefix
+    // still doesn't match we fall back to the leading-`-` trim; the cwd field
     // in the session is preferred as the project label whenever present.
     let home_prefix = crate::paths::home_dir()
         .ok()
         .and_then(|home| home.to_str().map(ToOwned::to_owned))
-        .map(|home| format!("{}-", home.replace(['/', '\\'], "-")))
+        .map(|home| {
+            let trimmed = home.trim_end_matches(['/', '\\']);
+            format!("{}-", trimmed.replace([':', '/', '\\'], "-"))
+        })
         .unwrap_or_default();
     let trimmed = directory
         .strip_prefix(&home_prefix)

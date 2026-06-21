@@ -24,13 +24,21 @@ const CACHE_VERSION: u32 = 7;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix, keep the real path separators ("/Users/me/code/app" -> "code/app",
-/// "C:\\Users\\me\\code\\app" -> "code\\app").
+/// "C:\\Users\\me\\code\\app" -> "code\\app"). A session whose cwd is exactly
+/// the home directory renders as "~" rather than an empty label so the
+/// PROJECTS row has something readable.
 pub fn project_from_cwd(cwd: &str) -> String {
     let home = crate::paths::home_dir()
         .ok()
         .and_then(|home| home.to_str().map(ToOwned::to_owned));
-    home.and_then(|home| strip_home_prefix(cwd, &home))
-        .unwrap_or_else(|| cwd.trim_start_matches(['/', '\\']).to_owned())
+    let stripped = home
+        .and_then(|home| strip_home_prefix(cwd, &home))
+        .unwrap_or_else(|| cwd.trim_start_matches(['/', '\\']).to_owned());
+    if stripped.is_empty() {
+        "~".to_owned()
+    } else {
+        stripped
+    }
 }
 
 /// Strip the home prefix and the single separator that follows it. Windows
@@ -44,6 +52,13 @@ pub fn project_from_cwd(cwd: &str) -> String {
 /// get stripped against home `C:\Users\me`.
 #[cfg(windows)]
 fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
+    // Trim any trailing separator on `home` (e.g. a drive-root home like
+    // `D:\`) so `home.len()` doesn't include the separator and the boundary
+    // check below stays meaningful.
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return None;
+    }
     // `get` keeps us safe if `home.len()` lands inside a multi-byte UTF-8
     // character in `cwd`; `split_at` would panic there.
     let head = cwd.get(..home.len())?;
@@ -65,6 +80,12 @@ fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
 /// `tadata/app` (an attribution bug the previous `{home}/` prefix avoided).
 #[cfg(not(windows))]
 fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
+    // Trim any trailing slash on `home` so the boundary check below isn't
+    // defeated when `dirs::home_dir` returns `/home/me/`.
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return None;
+    }
     let rest = cwd.strip_prefix(home)?;
     if !rest.is_empty() && !rest.starts_with('/') {
         return None;
@@ -290,13 +311,12 @@ fn store_cache(cache_name: &str, cache: &CacheFile) {
     };
     let temp = path.with_extension("tmp");
     if fs::write(&temp, bytes).is_ok() {
-        // `fs::rename` on Windows refuses to overwrite an existing
-        // destination, so the cache file would never advance and every active
-        // user would reparse every log on every run. Remove the stale cache
-        // first (failure is harmless — the rename below reports the real
-        // outcome). Unix POSIX rename already overwrites atomically; the
-        // extra unlink there is a no-op on a missing path.
-        let _ = fs::remove_file(&path);
+        // `std::fs::rename` is atomic on Unix and uses
+        // `MoveFileExW + MOVEFILE_REPLACE_EXISTING` on Windows, so the
+        // destination is overwritten on both platforms without an explicit
+        // unlink. Removing the file first would break the Unix atomicity
+        // guarantee and momentarily leave the cache missing for concurrent
+        // readers.
         let _ = fs::rename(&temp, &path);
     }
 }
@@ -440,6 +460,28 @@ mod tests {
             // "tadata/app" for "/Users/metadata/app").
             assert_eq!(strip_home_prefix("/Users/metadata/app", "/Users/me"), None);
             assert_eq!(strip_home_prefix("/Users/me-work/app", "/Users/me"), None);
+            // Trailing slash on home still strips cleanly.
+            assert_eq!(
+                strip_home_prefix("/Users/me/code", "/Users/me/"),
+                Some("code".to_owned()),
+            );
+            // Cwd equal to home returns empty (the caller substitutes "~").
+            assert_eq!(
+                strip_home_prefix("/Users/me", "/Users/me"),
+                Some(String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn project_from_cwd_renames_home_to_tilde() {
+        // When the cwd resolves to the home directory itself, the project
+        // label is "~" rather than the empty string.
+        if !cfg!(windows) {
+            // Cannot easily inject a fake home; only verify the empty-string
+            // fallback path through a leading-slash cwd that the home strip
+            // would not match (so the trim-only branch runs) is never empty.
+            assert_eq!(project_from_cwd("/"), "~");
         }
     }
 
@@ -467,6 +509,11 @@ mod tests {
             assert_eq!(
                 strip_home_prefix(r"C:\Users\metadata", r"C:\Users\me"),
                 None
+            );
+            // Drive-root home with a trailing separator still strips.
+            assert_eq!(
+                strip_home_prefix(r"D:\code\app", r"D:\"),
+                Some(r"code\app".to_owned()),
             );
         }
     }
