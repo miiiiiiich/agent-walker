@@ -74,7 +74,7 @@ Flags:
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--agy` | Also scan Antigravity logs (off by default — see [What it reads](#what-it-reads)) |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
-| `--claude-dir` / `--codex-dir` / `--agy-dir` | Point at non-standard log locations |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set) |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename

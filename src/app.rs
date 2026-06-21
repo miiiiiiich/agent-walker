@@ -263,17 +263,15 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
 }
 
 fn default_claude_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?.join(".claude").join("projects"))
+    Ok(crate::paths::claude_home()?.join("projects"))
 }
 
 fn default_codex_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?.join(".codex").join("sessions"))
+    Ok(crate::paths::codex_home()?.join("sessions"))
 }
 
 fn default_agy_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?
-        .join(".gemini")
-        .join("antigravity-cli"))
+    crate::paths::agy_home()
 }
 
 fn demo_enabled() -> bool {

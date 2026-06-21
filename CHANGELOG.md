@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `%USERPROFILE%` (`.claude\projects`, `.codex\sessions`,
   `.gemini\antigravity-cli`).
 - CI now exercises `cargo test` on `windows-latest` alongside macOS and Linux.
+- Honor `CODEX_HOME` (Codex CLI's official override) and `CLAUDE_CONFIG_DIR`
+  (Claude Code's de-facto override) so users with relocated agent state still
+  see their usage instead of a blank dashboard.
 
 ### Changed
 
