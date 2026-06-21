@@ -35,7 +35,8 @@ First public release with the codename system and the shareable stats card.
 ### Added
 
 - Terminal dashboard aggregating local AI coding-agent logs (Claude Code and
-  Codex CLI), parsed in parallel and cached per file for ~100 ms warm starts.
+  Codex CLI), parsed in parallel and cached per file so warm starts only
+  reparse files whose `(mtime, size)` changed.
 - API-equivalent cost windows (today / 7d / 30d / period), cache-aware and
   priced from the LiteLLM pricing database.
 - Per-repository token breakdown, stacked per-model daily bars, a GitHub-style
@@ -43,7 +44,8 @@ First public release with the codename system and the shareable stats card.
 - Autonomy view: a turn-duration histogram weighted toward the 20-minute-plus
   unattended range.
 - Shareable "codename" stats card — a usage-based rank you can copy to the
-  clipboard or save to `~/Downloads`. Repository names never appear on it.
+  clipboard or save to your OS Downloads folder. Repository names never
+  appear on it.
 - Opt-in Antigravity CLI collection via `--agy` (activity only; its logs carry
   no token usage).
 - Shell completions (`--completions`) and card export (`--share <path>`).

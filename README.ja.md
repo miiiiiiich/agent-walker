@@ -3,7 +3,6 @@
 [![CI](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml/badge.svg)](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#ライセンス)
 [![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
-[![No telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#プライバシー)
 
 **English: [README.md](README.md)**
 
@@ -26,8 +25,8 @@ AI エージェントがマシンに残すログから作る、ローカルの�
 
 ## プライバシー
 
-- ログは**マシンの外に出ない**。テレメトリも分析もなし。
-- 唯一の通信は、公開モデル価格メタデータの取得（[LiteLLM 価格DB](https://github.com/BerriAI/litellm)・MIT ライセンス）。ログ内容も利用状況も一切送らない。
+- ログは**マシンの外に出ない** — 利用状況やエラーをサーバーに送ることはしない。
+- 唯一の outbound 通信は、ダッシュボードがレポートを読み込み・再読み込みするときに発行する、公開モデル価格メタデータ（[LiteLLM 価格DB](https://github.com/BerriAI/litellm)・MIT ライセンス）への `GET`。ログ内容も利用状況も送らないが、`git pull` と同じく GitHub の CDN 側からは IP が見える。気になるならファイアウォールで遮断する／オフラインで使う。
 - リリースバイナリは [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations) 付き：
 
 ```sh
@@ -36,7 +35,7 @@ gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/age
 
 ## 使う
 
-インストール不要 — `npx` / `bunx` が環境に合ったバイナリを取ってきて実行：
+インストール不要 — `npx` / `bunx` がプラットフォーム（macOS arm64/x64・Linux arm64/x64 GNU・Windows x64）に合ったバイナリを取ってきて実行：
 
 ```sh
 npx agent-walker
@@ -50,14 +49,14 @@ bunx agent-walker
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` | スクロール |
 | `1`–`4` | タブへジャンプ |
 | `r` | リロード |
-| `s` | カードを共有（画像コピー / `~/Downloads` に保存） |
+| `s` | カードを共有（画像コピー / OS の Downloads フォルダに保存） |
 | `q` / `Esc` / `Ctrl-C` | 終了 |
 
 フラグ：
 
 | フラグ | 何をする |
 |---|---|
-| `--days <N>` | グラフの集計期間（既定 30。codename は常に直近 30 日） |
+| `--days <N>` | グラフの集計期間（既定 30。codename のトークン量レベルは常に直近 30 日からとるので、`--days` を変えても rank はぶれない） |
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
 | `--agy` | Antigravity も読む（既定オフ） |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
@@ -82,7 +81,7 @@ bunx agent-walker
 
 各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
 
-並列パース＋ファイル単位キャッシュ（`~/.cache/agent-walker/`）で warm start は ~100ms。ログは信頼しない入力として扱い、壊れた行は数えてスキップ（評価はしない）。
+並列パース＋ファイル単位キャッシュ（`~/.cache/agent-walker/`）で、warm start は `(mtime, size)` が変わったログファイルだけ再パースする。ログは信頼しない入力として扱い、壊れた行は数えてスキップ（評価はしない）。
 
 ### 30日より前も残すには
 
@@ -96,8 +95,8 @@ Claude Code は既定で**約30日でトランスクリプトを整理する**�
 
 ### 注意・制約
 
-- コストは **API 換算の見積もり**（実請求ではない）。LiteLLM の価格、キャッシュ読み書きは別レート。日付は COST パネルに表示。
-- トークンは**キャッシュ込み**（入力 + 出力 + キャッシュ書込 + 読込）。Claude は毎ターン全コンテキストを再送するので、合計の約95%はキャッシュ読込＝安価な再読込で、新規の作業量とは別物。
+- コストは **API 換算の見積もり**（実請求ではない）。LiteLLM の価格、キャッシュ読み書きは別レート。pricing fetch 日付は、pricing が読めて端末幅に余裕があるとき COST パネルに表示される。
+- トークンは**キャッシュ込み**（入力 + 出力 + キャッシュ書込 + 読込）。Claude は毎ターン全コンテキストを再送するので、ヘビーに使うほど合計の大部分はキャッシュ読込＝安価な再読込で、新規の作業量とは別物。
 - **Antigravity はトークン/コスト非計上**（中身不明な protobuf）。`--agy` 時も Combined の合計トークンには加算されない（活動のみ反映）。
 - 各エージェント自身の利用表示とは一致しない（集計の窓やキャッシュの数え方が違う）。
 - Antigravity のログのタイムスタンプはタイムゾーンなし＝ローカル想定。
