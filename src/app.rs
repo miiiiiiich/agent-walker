@@ -109,9 +109,14 @@ pub fn run(args: Args) -> Result<()> {
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let config = Config {
         demo: demo_enabled(),
-        claude_dir: args.claude_dir.unwrap_or(default_claude_dir()?),
-        codex_dir: args.codex_dir.unwrap_or(default_codex_dir()?),
-        agy_dir: args.agy_dir.unwrap_or(default_agy_dir()?),
+        // `map_or_else(default, Ok)` keeps the default lazy, so a `--claude-dir`
+        // / `--codex-dir` / `--agy-dir` override on the CLI still works even
+        // when `dirs::home_dir()` can't resolve (sandbox / no `$HOME` /
+        // `%USERPROFILE%`). Eagerly calling `default_*_dir()?` would short-
+        // circuit before the CLI override ever got a chance.
+        claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
+        codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
+        agy_dir: args.agy_dir.map_or_else(default_agy_dir, Ok)?,
         agy: args.agy,
         days: args.days,
         use_cache: !args.no_cache,

@@ -8,6 +8,7 @@
 //! the ones each tool itself reads; see `claude_home` / `codex_home` for the
 //! per-tool notes.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -22,9 +23,11 @@ pub fn home_dir() -> Result<PathBuf> {
 /// otherwise call `fallback()`. The fallback is lazy so `home_dir()` (which
 /// can itself fail) is never invoked when an env override is in effect — that
 /// lets a user with no resolvable home still point agent-walker at their
-/// relocated agent state via the env variable. Split out so the env logic can
-/// be tested without mutating process environment variables.
-fn resolve_root<F>(env_value: Option<&str>, fallback: F) -> Result<PathBuf>
+/// relocated agent state via the env variable. Takes an `OsString` (not a
+/// `String`) so a path with non-UTF-8 bytes — legal on Unix — round-trips
+/// instead of being silently dropped. Split out so the env logic can be
+/// tested without mutating process environment variables.
+fn resolve_root<F>(env_value: Option<OsString>, fallback: F) -> Result<PathBuf>
 where
     F: FnOnce() -> Result<PathBuf>,
 {
@@ -42,7 +45,7 @@ where
 /// agent-walker doesn't disagree with users who relocate their config; if
 /// Anthropic ever changes the contract we simply fall back to `~/.claude`.
 pub fn claude_home() -> Result<PathBuf> {
-    resolve_root(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(), || {
+    resolve_root(std::env::var_os("CLAUDE_CONFIG_DIR"), || {
         Ok(home_dir()?.join(".claude"))
     })
 }
@@ -52,7 +55,7 @@ pub fn claude_home() -> Result<PathBuf> {
 /// `CODEX_HOME` overrides it if set — this is the official variable
 /// documented at <https://developers.openai.com/codex/environment-variables>.
 pub fn codex_home() -> Result<PathBuf> {
-    resolve_root(std::env::var("CODEX_HOME").ok().as_deref(), || {
+    resolve_root(std::env::var_os("CODEX_HOME"), || {
         Ok(home_dir()?.join(".codex"))
     })
 }
@@ -92,7 +95,9 @@ mod tests {
         // The closure must NOT run when an env override is in effect — that's
         // what lets users with an unresolvable home still point us at their
         // relocated state via `CODEX_HOME` / `CLAUDE_CONFIG_DIR`.
-        let result = resolve_root(Some("/srv/codex"), || panic!("fallback must not be called"));
+        let result = resolve_root(Some(OsString::from("/srv/codex")), || {
+            panic!("fallback must not be called")
+        });
         assert_eq!(result.unwrap(), PathBuf::from("/srv/codex"));
     }
 
@@ -107,7 +112,9 @@ mod tests {
         // An empty value is almost always a misconfigured env (`CODEX_HOME=`
         // in a shell script clears it); treat it like unset rather than
         // pointing the tool at the current working directory.
-        let result = resolve_root(Some(""), || Ok(PathBuf::from("/home/me/.codex")));
+        let result = resolve_root(Some(OsString::new()), || {
+            Ok(PathBuf::from("/home/me/.codex"))
+        });
         assert_eq!(result.unwrap(), PathBuf::from("/home/me/.codex"));
     }
 
@@ -115,5 +122,20 @@ mod tests {
     fn resolve_root_propagates_fallback_error() {
         let result: Result<PathBuf> = resolve_root(None, || Err(anyhow!("home not found")));
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_root_preserves_non_utf8_env_path() {
+        // Unix paths can contain non-UTF-8 bytes. The earlier `env::var`-based
+        // path silently dropped these into the fallback; `env::var_os` round-
+        // trips them so the override still wins.
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = vec![b'/', b't', b'm', b'p', b'/', 0xff, 0xfe, b'/', b'x'];
+        let raw = OsString::from_vec(bytes.clone());
+        let result = resolve_root(Some(raw.clone()), || {
+            panic!("fallback must not be called for a non-UTF-8 path")
+        });
+        assert_eq!(result.unwrap(), PathBuf::from(raw));
     }
 }
