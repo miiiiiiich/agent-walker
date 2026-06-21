@@ -1,9 +1,20 @@
+//! Antigravity (`agy`) collector — **opt-in via `--agy`, off by default.**
+//!
+//! Why disabled: Antigravity's text logs (`log/*.log`, `history.jsonl`) record
+//! the model, turns, and tool confirmations but **no token usage**, so every
+//! event here carries `TokenUsage::default()` (zero). The real usage lives in
+//! `conversations/*.{db,pb}` as unlabeled protobuf blobs (table `gen_metadata`)
+//! — token-magnitude integers are present but which field is prompt / output /
+//! cached is unknown, and the schema is Google-internal and liable to change.
+//! Rather than report misleading zero-token totals, agy is left out of the
+//! default report. This parser is kept intact for the day that store becomes
+//! readable (decode `gen_metadata`, identify the token fields, fill `usage`).
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::Result;
 use serde_json::Value;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
@@ -19,10 +30,10 @@ pub fn collect(
     mtime_floor: Option<SystemTime>,
     use_cache: bool,
     local_offset: UtcOffset,
-) -> Result<Collection> {
+) -> Collection {
     let mut collection = Collection::new(Provider::Agy, root.to_path_buf());
     if !root.exists() {
-        return Ok(collection);
+        return collection;
     }
 
     let mut files = Vec::new();
@@ -40,22 +51,22 @@ pub fn collect(
         ));
     }
 
-    let per_file = parse_files_cached(use_cache.then_some("agy"), &files, |path| {
+    let per_file = parse_files_cached(use_cache.then_some("agy"), &files, local_offset, |path| {
         parse_file(path, local_offset)
     });
     merge_into(&mut collection, per_file);
-    Ok(collection)
+    collection
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     if path.file_name().is_some_and(|name| name == "history.jsonl") {
-        parse_history_file(path)
+        parse_history_file(path, local_offset)
     } else {
         parse_log_file(path, local_offset)
     }
 }
 
-fn parse_history_file(path: &Path) -> Option<FileEvents> {
+fn parse_history_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let reader = BufReader::new(file);
@@ -73,6 +84,9 @@ fn parse_history_file(path: &Path) -> Option<FileEvents> {
             events.parse_errors += 1;
             continue;
         };
+        // history.jsonl timestamps are Unix epoch milliseconds. A line without a
+        // usable timestamp can't be placed on the activity timeline, so count it
+        // as a parse error rather than dropping it silently.
         let Some(timestamp) =
             value
                 .get("timestamp")
@@ -81,6 +95,7 @@ fn parse_history_file(path: &Path) -> Option<FileEvents> {
                     OffsetDateTime::from_unix_timestamp(timestamp_ms / 1_000).ok()
                 })
         else {
+            events.parse_errors += 1;
             continue;
         };
         let session_id = string_field(&value, "conversationId")
@@ -91,7 +106,7 @@ fn parse_history_file(path: &Path) -> Option<FileEvents> {
         });
     }
 
-    events.compress_touches();
+    events.compress_touches(local_offset);
     Some(events)
 }
 
@@ -167,7 +182,7 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
     }
 
-    events.compress_touches();
+    events.compress_touches(local_offset);
     Some(events)
 }
 
@@ -287,8 +302,7 @@ mod tests {
         )
         .expect("log fixture should be written");
 
-        let collection =
-            collect(temp.path(), None, false, UtcOffset::UTC).expect("collection should succeed");
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 2);
         assert_eq!(collection.usage_events.len(), 1);

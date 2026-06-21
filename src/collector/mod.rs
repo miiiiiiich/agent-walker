@@ -9,12 +9,18 @@ use std::time::SystemTime;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use time::{Date, OffsetDateTime};
+use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::debug;
 
 use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent, UsageEvent};
 
-const CACHE_VERSION: u32 = 6;
+/// Bumped to 7 when session-touch compression moved from UTC to local-day
+/// bucketing: cached `FileEvents` carry compressed touches that depend on the
+/// local offset. A cache is now invalidated by EITHER a version bump OR a
+/// changed `local_offset` (recorded in `CacheFile::offset_seconds`), so a
+/// machine-TZ change is detected and the cache rebuilt automatically — no
+/// `--no-cache` needed. The per-file key remains (mtime, size).
+const CACHE_VERSION: u32 = 7;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix, keep the real path separators ("/Users/me/code/app" -> "code/app").
@@ -53,16 +59,25 @@ pub struct KeyedToolEvent {
 }
 
 impl FileEvents {
-    /// Compress raw session touches: per (session, date) only the first and
-    /// last touch matter for sessions / active-day / span aggregation.
+    /// Compress raw session touches: per (session, local date) only the first
+    /// and last touch matter for sessions / active-day / span aggregation.
     /// Keeps memory and cache size bounded for 100k-line session files.
-    pub fn compress_touches(&mut self) {
+    ///
+    /// Bucketing uses the local-offset date to match the analyzer, which buckets
+    /// concurrency / longest-session / daily-sessions by local day. The result
+    /// therefore depends on `local_offset`; cached `FileEvents` embed this
+    /// interpretation (the cache is keyed on file mtime/size, so a machine-TZ
+    /// change is not reflected automatically — rerun with `--no-cache`).
+    pub fn compress_touches(&mut self, local_offset: UtcOffset) {
         if self.session_touches.len() <= 2 {
             return;
         }
         let mut bounds: HashMap<(String, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
         for touch in self.session_touches.drain(..) {
-            let key = (touch.session_id, touch.timestamp.date());
+            let key = (
+                touch.session_id,
+                touch.timestamp.to_offset(local_offset).date(),
+            );
             bounds
                 .entry(key)
                 .and_modify(|(start, end)| {
@@ -173,6 +188,12 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
     version: u32,
+    /// Local UTC offset (seconds) the cached events were compressed under.
+    /// `compress_touches` buckets touches by local day, so a cache built in a
+    /// different timezone would silently misplace boundary-day touches; a
+    /// mismatch here invalidates the whole cache, same as a version bump.
+    #[serde(default)]
+    offset_seconds: i32,
     entries: HashMap<PathBuf, CacheEntry>,
 }
 
@@ -193,7 +214,14 @@ fn cache_path(cache_name: &str) -> Option<PathBuf> {
     )
 }
 
-fn load_cache(cache_name: &str) -> CacheFile {
+/// A cached file is reusable only when both the format version and the
+/// local-offset it was compressed under match the current run; a mismatch in
+/// either means the compressed touches could be misplaced, so it is discarded.
+fn cache_is_reusable(cache: &CacheFile, offset_seconds: i32) -> bool {
+    cache.version == CACHE_VERSION && cache.offset_seconds == offset_seconds
+}
+
+fn load_cache(cache_name: &str, offset_seconds: i32) -> CacheFile {
     let Some(path) = cache_path(cache_name) else {
         return CacheFile::default();
     };
@@ -201,9 +229,9 @@ fn load_cache(cache_name: &str) -> CacheFile {
         return CacheFile::default();
     };
     match bincode::deserialize::<CacheFile>(&bytes) {
-        Ok(cache) if cache.version == CACHE_VERSION => cache,
+        Ok(cache) if cache_is_reusable(&cache, offset_seconds) => cache,
         _ => {
-            debug!(path = %path.display(), "discarding stale or corrupt cache");
+            debug!(path = %path.display(), "discarding stale, corrupt, or offset-changed cache");
             CacheFile::default()
         }
     }
@@ -229,16 +257,21 @@ fn store_cache(cache_name: &str, cache: &CacheFile) {
 }
 
 /// Parse `files` through `parse`, reusing cached per-file results when the
-/// file is byte-identical to the last run ((mtime, size) match). Cache misses
-/// are parsed in parallel; results are returned in `files` order so that
-/// downstream deduplication stays deterministic. `cache_name: None` disables
-/// the on-disk cache (tests, ad-hoc directories).
+/// file is byte-identical to the last run ((mtime, size) match) AND the cache
+/// was built under the same `local_offset` (compressed touches are
+/// offset-dependent). Cache misses are parsed in parallel; results are returned
+/// in `files` order so that downstream deduplication stays deterministic.
+/// `cache_name: None` disables the on-disk cache (tests, ad-hoc directories).
 pub fn parse_files_cached(
     cache_name: Option<&str>,
     files: &[PathBuf],
+    local_offset: UtcOffset,
     parse: impl Fn(&Path) -> Option<FileEvents> + Sync,
 ) -> Vec<(PathBuf, Option<FileEvents>)> {
-    let cache = cache_name.map(load_cache).unwrap_or_default();
+    let offset_seconds = local_offset.whole_seconds();
+    let cache = cache_name
+        .map(|name| load_cache(name, offset_seconds))
+        .unwrap_or_default();
 
     let parsed: Vec<(PathBuf, Option<FileEvents>, Option<FileStamp>)> = files
         .par_iter()
@@ -257,6 +290,7 @@ pub fn parse_files_cached(
 
     let mut next = CacheFile {
         version: CACHE_VERSION,
+        offset_seconds,
         entries: HashMap::with_capacity(parsed.len()),
     };
     let mut results = Vec::with_capacity(parsed.len());
@@ -333,4 +367,29 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
     collection.stats.usage_events = collection.usage_events.len();
     collection.stats.tool_events = collection.tool_events.len();
     collection.stats.duration_events = collection.duration_events.len();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_with(version: u32, offset_seconds: i32) -> CacheFile {
+        CacheFile {
+            version,
+            offset_seconds,
+            entries: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn cache_invalidated_on_offset_or_version_change() {
+        let jst = 9 * 3600; // +09:00 in seconds
+
+        // Same version and offset: reusable.
+        assert!(cache_is_reusable(&cache_with(CACHE_VERSION, jst), jst));
+        // Offset changed (e.g. the machine moved timezones): discard.
+        assert!(!cache_is_reusable(&cache_with(CACHE_VERSION, jst), 0));
+        // Version changed: discard regardless of offset.
+        assert!(!cache_is_reusable(&cache_with(CACHE_VERSION - 1, jst), jst));
+    }
 }

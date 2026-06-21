@@ -3,10 +3,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::Result;
 use serde_json::Value;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
     FileEvents, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached,
@@ -21,19 +20,22 @@ pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
     use_cache: bool,
-) -> Result<Collection> {
+    local_offset: UtcOffset,
+) -> Collection {
     let mut collection = Collection::new(Provider::Codex, root.to_path_buf());
     if !root.exists() {
-        return Ok(collection);
+        return collection;
     }
 
     let files = list_files(root, "jsonl", mtime_floor, &mut collection.stats);
-    let per_file = parse_files_cached(use_cache.then_some("codex"), &files, parse_file);
+    let per_file = parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
+        parse_file(path, local_offset)
+    });
     merge_into(&mut collection, per_file);
-    Ok(collection)
+    collection
 }
 
-fn parse_file(path: &Path) -> Option<FileEvents> {
+fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let mut current_session_id = fallback_session_id(path);
@@ -79,6 +81,7 @@ fn parse_file(path: &Path) -> Option<FileEvents> {
             current_session_id.as_ref(),
             current_model.as_ref(),
             current_project.as_deref(),
+            line_index,
             &mut events,
         );
         collect_duration_event(&value, timestamp, current_session_id.as_ref(), &mut events);
@@ -92,16 +95,21 @@ fn parse_file(path: &Path) -> Option<FileEvents> {
         );
     }
 
-    events.compress_touches();
+    events.compress_touches(local_offset);
     Some(events)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Per-line parse context; bundling into a struct adds noise for one caller."
+)]
 fn collect_usage_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
     model: Option<&String>,
     project: Option<&str>,
+    line_index: usize,
     events: &mut FileEvents,
 ) {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
@@ -120,8 +128,26 @@ fn collect_usage_event(
     let Some(usage) = parse_token_usage(last_usage) else {
         return;
     };
+    // `info.last_token_usage` is the delta for the most recent turn, NOT the
+    // running `info.total_token_usage` cumulative. Summing one usage event per
+    // token_count line therefore yields the session total — do not also add the
+    // cumulative field, or every turn would be double-counted.
+    // Dedup key for accidental session-file duplicates (e.g. a copied rollout):
+    // (session, timestamp, line_index) is a stable per-event identifier. A
+    // copied file reproduces all three, so the duplicate is merged away; two
+    // distinct turns within one file differ in line_index (and usually
+    // timestamp), so both survive even if their usage numbers happen to match.
+    // Only keyed when both session_id and timestamp are present; otherwise None
+    // (count every event).
+    let key = match (session_id, timestamp) {
+        (Some(sid), Some(ts)) => Some(format!(
+            "codex:{sid}:{ts}:{line_index}",
+            ts = ts.unix_timestamp_nanos(),
+        )),
+        _ => None,
+    };
     events.usage_events.push(KeyedUsageEvent {
-        key: None,
+        key,
         event: UsageEvent {
             timestamp,
             session_id: session_id.cloned(),
@@ -169,8 +195,17 @@ fn collect_tool_event(
     if value.get("type").and_then(Value::as_str) != Some("response_item") {
         return;
     }
-    let Some(tool_name) = string_path(value, &["payload", "name"]) else {
+    let Some(raw_name) = string_path(value, &["payload", "name"]) else {
         return;
+    };
+    // Codex runs most reads and writes through a generic shell wrapper
+    // (`exec_command` etc., usually `bash -lc "..."`); resolving the wrapper to
+    // the real command basename lets the codename's research/build classifier
+    // see `grep`/`cargo` instead of one undifferentiated "exec" bucket.
+    let tool_name = if is_shell_wrapper(&raw_name) {
+        exec_command_basename(value).unwrap_or(raw_name)
+    } else {
+        raw_name
     };
     let key = string_path(value, &["payload", "call_id"]).unwrap_or_else(|| {
         format!(
@@ -190,6 +225,127 @@ fn collect_tool_event(
             source_kind: SourceKind::Main,
         },
     });
+}
+
+/// Codex tool names that wrap an arbitrary shell command rather than naming a
+/// concrete operation. These are the ones worth decomposing.
+fn is_shell_wrapper(name: &str) -> bool {
+    matches!(
+        name,
+        "exec_command" | "shell" | "local_shell" | "unified_exec"
+    )
+}
+
+/// Resolve a shell-wrapper tool call to the basename of the command it actually
+/// ran. Reads `payload.arguments` (a JSON string), pulls `command` (or `cmd` as
+/// a fallback; array or string), unwraps a `bash -c "<script>"` shape to the
+/// script's first token, skips run-prefixes (`env`/`sudo`/…) and variable
+/// assignments, and strips the path. Returns `None` when anything is
+/// unrecognized, so the caller keeps the original wrapper name as a fallback.
+fn exec_command_basename(value: &Value) -> Option<String> {
+    let arguments = string_path(value, &["payload", "arguments"])?;
+    let parsed = serde_json::from_str::<Value>(&arguments).ok()?;
+    let command = parsed.get("command").or_else(|| parsed.get("cmd"))?;
+    let tokens = command_tokens(command)?;
+    let effective = effective_command(&tokens)?;
+    basename(&effective)
+}
+
+/// Normalize `command` into a token vector: a JSON array of strings, or a plain
+/// string split on whitespace.
+fn command_tokens(command: &Value) -> Option<Vec<String>> {
+    match command {
+        Value::Array(items) => {
+            let tokens: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect();
+            (!tokens.is_empty()).then_some(tokens)
+        }
+        Value::String(text) => {
+            let tokens: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
+            (!tokens.is_empty()).then_some(tokens)
+        }
+        _ => None,
+    }
+}
+
+/// True for a short-option cluster that ends with `c` semantics — i.e. starts
+/// with a single `-`, is not a `--long` flag, and contains `c` (`-c`, `-lc`,
+/// `-lic`, `-euc`). Excludes `--norc` and friends, which merely contain `c`.
+fn is_shell_command_flag(token: &str) -> bool {
+    token.starts_with('-') && !token.starts_with("--") && token.contains('c')
+}
+
+/// Run-prefixes that wrap the real command and should be skipped when looking
+/// for the effective command (`sudo cargo build` -> cargo).
+const RUN_PREFIXES: [&str; 4] = ["env", "sudo", "time", "nice"];
+
+/// A leading variable assignment (`FOO=bar`): an identifier, `=`, then a value.
+fn is_var_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Pick the token that names the real command. For a `bash -c "<script>"`
+/// wrapper, that is the first token of the script; otherwise it is the first
+/// real token after any run-prefix (`env`/`sudo`/`time`/`nice`) and leading
+/// variable assignments.
+fn effective_command(tokens: &[String]) -> Option<String> {
+    let first = tokens.first()?;
+    let is_shell = matches!(
+        basename(first).as_deref(),
+        Some("bash" | "sh" | "zsh" | "dash")
+    );
+    if is_shell
+        && let Some(flag_index) = tokens.iter().skip(1).position(|t| is_shell_command_flag(t))
+    {
+        // `position` is relative to the skipped slice; +1 realigns to `tokens`,
+        // and the script string is the token right after the flag.
+        let script = tokens.get(flag_index + 2)?;
+        return script
+            .split_whitespace()
+            .next()
+            .map(trim_quotes)
+            .map(ToOwned::to_owned);
+    }
+
+    // Not a shell wrapper: skip run-prefixes and `FOO=bar` assignments to reach
+    // the real command (`sudo cargo build` -> cargo, `env FOO=1 grep` -> grep).
+    let effective = tokens.iter().find(|token| {
+        let bare = trim_quotes(token);
+        !is_var_assignment(bare) && !RUN_PREFIXES.contains(&basename(bare).as_deref().unwrap_or(""))
+    })?;
+    Some(trim_quotes(effective).to_owned())
+}
+
+/// Strip a single matching pair of surrounding quotes (`"grep"` / `'grep'`).
+fn trim_quotes(token: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = token
+            .strip_prefix(quote)
+            .and_then(|t| t.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    token
+}
+
+/// Basename of a command token (`/usr/bin/grep` -> `grep`). Gives up on shapes
+/// that aren't a plain command word — a leading `(` subshell or a `FOO=bar`
+/// assignment — so the caller falls back to the wrapper name.
+fn basename(command: &str) -> Option<String> {
+    let command = trim_quotes(command);
+    if command.is_empty() || command.starts_with('(') || command.contains('=') {
+        return None;
+    }
+    let base = command.rsplit('/').next()?;
+    (!base.is_empty()).then(|| base.to_owned())
 }
 
 fn parse_token_usage(value: &Value) -> Option<TokenUsage> {
@@ -298,7 +454,7 @@ mod tests {
         )
         .expect("fixture should be written");
 
-        let collection = collect(temp.path(), None, false).expect("collection should succeed");
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.usage_events.len(), 1);
@@ -309,5 +465,99 @@ mod tests {
         assert_eq!(collection.tool_events[0].tool_name, "exec_command");
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 12_345);
+    }
+
+    /// Each `token_count` line carries a (session, timestamp, `line_index`)
+    /// dedup key. A copied session file reproduces all three, so the duplicate
+    /// file is merged away — but two distinct turns inside one file differ in
+    /// `line_index` and both survive, even though their usage numbers are
+    /// identical here. So the two-turn file copied twice yields 2 events (not 4,
+    /// and not 1).
+    #[test]
+    fn deduplicates_copies_but_keeps_distinct_turns() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        // Two turns with identical usage but distinct timestamps and lines.
+        let lines = concat!(
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n"
+        );
+        fs::write(day.join("rollout-original.jsonl"), lines).expect("fixture should be written");
+        fs::write(day.join("rollout-copy.jsonl"), lines).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 2);
+        // 2 distinct turns survive; the copied file is deduplicated away.
+        assert_eq!(collection.usage_events.len(), 2);
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 220);
+    }
+
+    /// Shell-wrapper tool calls (`exec_command` etc.) are decomposed to the real
+    /// command basename so the codename's research/build split can see it;
+    /// unrecognized arguments fall back to the wrapper name unchanged.
+    #[test]
+    fn decomposes_exec_command_to_real_command_basename() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        let exec = |call: &str, args: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{{"type":"function_call","call_id":"{call}","name":"exec_command","arguments":{args}}}}}"#,
+            )
+        };
+        // `arguments` is a JSON *string*, so the inner JSON is serde-encoded.
+        let arg = |inner: &str| serde_json::Value::String(inner.to_owned()).to_string();
+        let mut body = String::from(
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+        );
+        body.push('\n');
+        for (call, inner) in [
+            ("c1", r#"{"command":["bash","-lc","grep -rn foo src"]}"#),
+            ("c2", r#"{"command":["cargo","build"]}"#),
+            ("c3", r"not json"),
+            ("c4", r#"{"command":["/usr/bin/cat","README.md"]}"#),
+            ("c5", r#"{"command":["bash","-c","grep x"]}"#),
+            ("c6", r#"{"command":["sudo","cargo","build"]}"#),
+            ("c7", r#"{"command":["env","FOO=1","grep","x"]}"#),
+            ("c8", r#"{"command":["bash","--norc","-lc","cat y"]}"#),
+            ("c9", r#"{"cmd":"ls -la"}"#),
+        ] {
+            body.push_str(&exec(call, &arg(inner)));
+            body.push('\n');
+        }
+        fs::write(day.join("rollout-session.jsonl"), body).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let names: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|event| event.tool_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "grep",         // bash -lc "grep -rn foo src"
+                "cargo",        // cargo build
+                "exec_command", // non-JSON args -> wrapper fallback
+                "cat",          // /usr/bin/cat -> basename
+                "grep",         // bash -c "grep x"
+                "cargo",        // sudo cargo build -> skip the sudo prefix
+                "grep",         // env FOO=1 grep x -> skip env + assignment
+                "cat",          // bash --norc -lc "cat y" -> --norc is not the -c flag
+                "ls",           // {"cmd":"ls -la"} -> cmd fallback field
+            ]
+        );
     }
 }

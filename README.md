@@ -5,12 +5,18 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
 [![No telemetry](https://img.shields.io/badge/telemetry-none-brightgreen.svg)](#privacy)
 
-**A terminal dashboard for your local AI coding-agent usage** — tokens, real
-API-equivalent cost, projects, tools, and autonomy metrics, aggregated from
-the logs that Claude Code, Codex CLI, and Antigravity CLI already write to
-your machine.
+**日本語: [README.ja.md](README.ja.md)**
 
-![demo — synthetic data via `--demo`](docs/demo.gif)
+**Can you see where your AI agents have walked?**
+
+A local terminal dashboard built from the logs your AI coding agents already
+write to your machine — tokens, API-equivalent cost, projects, tools, and
+autonomy, a month of runs in one screen. Put in the work and you'll earn a
+codename.
+
+*Only the one watching can deter it.*
+
+![agent-walker terminal dashboard preview](docs/demo.gif)
 
 ## Why
 
@@ -28,61 +34,74 @@ reads the session logs on your disk and answers, in one screen:
 ## Privacy
 
 - Your logs **never leave your machine**. No telemetry, no analytics.
-- The only network access is a daily fetch of public model-pricing metadata
-  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm),
-  cached locally. `--offline` disables all network access.
+- The only network access is a per-run fetch of public model-pricing metadata
+  from [LiteLLM's pricing database](https://github.com/BerriAI/litellm)
+  (MIT-licensed); no log content or usage data is ever sent.
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
 gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/agent-walker
 ```
 
-## Install
-
-```sh
-# Homebrew (installs the `agent-walker` and `agw` commands)
-brew install miiiiiiich/tap/agent-walker
-
-# Run without installing (npm / bun)
-npx agent-walker
-bunx agent-walker
-
-# Rust
-cargo install agent-walker
-```
-
 ## Use
 
+No install — `npx` / `bunx` fetch the right prebuilt binary for your platform
+and run it:
+
 ```sh
-agw             # short alias
-agent-walker    # same thing
+npx agent-walker
+# or
+bunx agent-walker
 ```
 
 | Key | Action |
 |---|---|
-| `←` `→` / `h` `l` / `Tab` | switch provider (Claude / Codex / Agy / Combined) |
+| `←` `→` / `h` `l` / `Tab` | switch provider (ordered by API-equivalent cost, heaviest first; Combined last) |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` | scroll |
 | `1`–`4` | jump to tab |
 | `r` | reload |
+| `s` | share your stats card (copy image / save to `~/Downloads`) |
 | `q` / `Esc` / `Ctrl-C` | quit |
 
-Useful flags: `--days 30` (window, default 90), `--demo` (synthetic demo
-dashboard — no logs read; all screenshots here use it), `--offline`,
-`--claude-dir` / `--codex-dir` / `--agy-dir` (non-standard log locations),
-`--completions zsh` (shell completions).
+Flags:
+
+| Flag | What it does |
+|---|---|
+| `--days <N>` | Analysis window for the graphs (default 30; the codename always uses the last 30 days) |
+| `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
+| `--agy` | Also scan Antigravity logs (off by default — see [What it reads](#what-it-reads)) |
+| `--no-cache` | Rescan every log file, ignoring the parse cache |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` | Point at non-standard log locations |
+| `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
+
+## Share your codename
+
+Press `s` in the dashboard (or run `agent-walker --share card.png`) to render a
+shareable stats card. Instead of leading with a raw token count, the card reads
+*how* you work: a GitHub-style activity grid, your hour-of-day rhythm, and a
+per-model split, with parallelism and task-time as plain numbers.
+
+Your usage also earns a **codename** — a rank you climb as you go. Exactly how
+it's earned is left as a puzzle, and repository names never appear on the
+card — just glance before you post.
+
+![an agent-walker codename stats card](docs/card.png)
 
 ## What it reads
 
 | Agent | Location | Notes |
 |---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | sessions and tool flow (no token data in its logs) |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
+| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | opt-in with `--agy`; sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+
+Each agent counts and caches tokens differently. The per-agent pages above
+explain what's read, how tokens/cache/cost are counted, and the caveats.
 
 Everything is parsed in parallel and cached per file
-(`~/.cache/agent-walker/`), so warm starts take ~100 ms even on gigabytes of
-logs. Log lines are treated as untrusted input — malformed records are
-counted and skipped, never evaluated.
+(`~/.cache/agent-walker/`), so warm starts take ~100 ms. Log lines are treated
+as untrusted input — malformed records are counted and skipped, never
+evaluated.
 
 ### Keep more than 30 days of history
 
@@ -104,6 +123,16 @@ indefinitely; no setting needed.
   cost on metered pricing), not your actual bill. Rates come from LiteLLM
   with cache reads/writes priced separately; the rates date is shown in the
   COST panel.
+- Token totals are **cache-inclusive** (input + output + cache writes + cache
+  reads). Because Claude Code re-sends the full context every turn, ~95% of a
+  Claude total is cache reads — real but cheaply-billed context re-reads, not
+  new work. See [docs/claude.md](docs/claude.md).
+- **Antigravity tokens/cost are not counted** — its usage lives in an
+  undocumented protobuf format. With `--agy` on, the Combined token total still
+  excludes it (activity only); see [docs/agy.md](docs/agy.md).
+- These numbers **won't match each agent's own in-app usage display**: those use
+  different time windows and count cache reads differently. See the per-agent
+  pages above.
 - Antigravity log timestamps carry no timezone and are assumed to be local.
 - Windows is not supported yet (log discovery relies on `$HOME`).
 

@@ -1,11 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+mod aggregates;
+mod concurrency;
+mod duration;
+mod projects;
+mod streak;
+
+use std::collections::BTreeMap;
 
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
 use crate::model::{
-    AgentStat, Collection, DailySessions, DailyStat, DurationBucket, DurationSummary,
-    ModelDailyStat, ModelStat, ProjectStat, SessionSpan, SourceKind, Summary, TokenUsage, ToolStat,
+    Collection, DailySessions, DailyStat, ModelDailyStat, Summary, TokenUsage, ToolStat,
 };
+
+use self::aggregates::Aggregates;
 
 /// Summarize a collection over the trailing window. All timestamps are
 /// normalized to `local_offset` before day/hour bucketing so that daily and
@@ -15,7 +22,7 @@ use crate::model::{
     reason = "Flat assembly of the Summary struct; splitting adds indirection without logic."
 )]
 pub fn summarize(
-    collection: Collection,
+    collection: &Collection,
     now: OffsetDateTime,
     period_days: u16,
     local_offset: UtcOffset,
@@ -25,7 +32,7 @@ pub fn summarize(
     let period_start = period_end - Duration::days(i64::from(safe_period_days) - 1);
 
     let aggregates = build_aggregates(
-        &collection,
+        collection,
         period_start,
         period_end,
         safe_period_days,
@@ -113,7 +120,7 @@ pub fn summarize(
         .into_iter()
         .map(|(name, accumulator)| accumulator.into_stat(name))
         .collect::<Vec<_>>();
-    strip_common_project_prefix(&mut projects);
+    projects::strip_common_project_prefix(&mut projects);
     projects.sort_by(|left, right| {
         right
             .usage
@@ -122,21 +129,49 @@ pub fn summarize(
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    let longest_session = longest_session_span(&collection, period_start, period_end, local_offset);
+    let longest_session =
+        duration::longest_session_span(collection, period_start, period_end, local_offset);
     let completion_duration =
-        completion_duration_summary(&collection, period_start, period_end, local_offset);
+        duration::completion_duration_summary(collection, period_start, period_end, local_offset);
+    let orchestration =
+        concurrency::orchestration(collection, period_start, period_end, local_offset);
     let (longest_streak_days, current_streak_days) =
-        streaks(&aggregates.active_dates, period_start, period_end);
+        streak::streaks(&aggregates.active_dates, period_start, period_end);
+
+    // Codename throughput is a fixed-window rate independent of the display
+    // `--days`: sum token volume over the most recent `CODENAME_WINDOW_DAYS`
+    // straight from the events (the collector loads at least that span), so a
+    // 7- or 90-day view yields the same level.
+    let codename_window_start =
+        period_end - Duration::days(crate::codename::CODENAME_WINDOW_DAYS - 1);
+    let mut recent_window_volume = 0_u64;
+    let mut recent_active_days = std::collections::HashSet::new();
+    for event in &collection.usage_events {
+        let Some(date) = event.timestamp.map(|ts| ts.to_offset(local_offset).date()) else {
+            continue;
+        };
+        if date < codename_window_start || date > period_end {
+            continue;
+        }
+        let volume = event.usage.token_volume();
+        if volume == 0 {
+            continue;
+        }
+        recent_window_volume = recent_window_volume.saturating_add(volume);
+        recent_active_days.insert(date);
+    }
+    let recent_window_active_days = recent_active_days.len();
 
     Summary {
         provider: collection.provider,
-        generated_at: now,
         period_days: safe_period_days,
         period_start,
         period_end,
-        root: collection.root,
-        scan_stats: collection.stats,
+        root: collection.root.clone(),
+        scan_stats: collection.stats.clone(),
         total_usage: aggregates.total_usage,
+        recent_window_volume,
+        recent_window_active_days,
         daily,
         daily_sessions,
         model_daily,
@@ -147,7 +182,6 @@ pub fn summarize(
         sessions: aggregates.period_sessions.len(),
         active_days: aggregates.active_dates.len(),
         previous_total_volume: aggregates.previous_total_volume,
-        previous_sessions: aggregates.previous_sessions.len(),
         longest_streak_days,
         current_streak_days,
         most_active_day,
@@ -156,6 +190,7 @@ pub fn summarize(
         favorite_model,
         longest_session,
         completion_duration,
+        orchestration,
     }
 }
 
@@ -195,30 +230,6 @@ fn build_aggregates(
     aggregates
 }
 
-/// Drop dash-separated prefix segments shared by every project name
-/// ("alice/work/api" / "alice/blog" -> "work/api" / "blog") so the
-/// distinctive tail survives narrow columns.
-fn strip_common_project_prefix(projects: &mut [ProjectStat]) {
-    if projects.len() < 2 {
-        return;
-    }
-    loop {
-        let Some(first_segment) = projects[0].name.split('-').next().map(ToOwned::to_owned) else {
-            return;
-        };
-        let prefix = format!("{first_segment}-");
-        let all_share = projects
-            .iter()
-            .all(|project| project.name.starts_with(&prefix) && project.name.len() > prefix.len());
-        if !all_share {
-            return;
-        }
-        for project in projects.iter_mut() {
-            project.name = project.name[prefix.len()..].to_owned();
-        }
-    }
-}
-
 fn init_daily_usage(period_start: Date, period_days: u16) -> BTreeMap<Date, TokenUsage> {
     (0..period_days)
         .map(|offset| {
@@ -230,353 +241,14 @@ fn init_daily_usage(period_start: Date, period_days: u16) -> BTreeMap<Date, Toke
         .collect()
 }
 
-fn longest_session_span(
-    collection: &Collection,
-    period_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-) -> Option<SessionSpan> {
-    // Span per (session, local day): resumed sessions reuse their id across
-    // days, so a raw per-session min/max would report multi-day "sessions".
-    let mut bounds: HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
-    for touch in &collection.session_touches {
-        let date = touch.timestamp.to_offset(local_offset).date();
-        if date < period_start || date > period_end {
-            continue;
-        }
-        bounds
-            .entry((touch.session_id.as_str(), date))
-            .and_modify(|(start, end)| {
-                *start = (*start).min(touch.timestamp);
-                *end = (*end).max(touch.timestamp);
-            })
-            .or_insert((touch.timestamp, touch.timestamp));
-    }
-
-    bounds
-        .into_iter()
-        .map(|((session_id, _), (started_at, ended_at))| SessionSpan {
-            session_id: session_id.to_owned(),
-            started_at,
-            ended_at,
-        })
-        .max_by_key(SessionSpan::duration_secs)
-}
-
-fn completion_duration_summary(
-    collection: &Collection,
-    period_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-) -> Option<DurationSummary> {
-    let mut values = collection
-        .duration_events
-        .iter()
-        .filter(|event| {
-            event.timestamp.is_none_or(|timestamp| {
-                let date = timestamp.to_offset(local_offset).date();
-                date >= period_start && date <= period_end
-            })
-        })
-        .map(|event| event.duration_ms)
-        .filter(|duration_ms| *duration_ms > 0)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
-    Some(DurationSummary {
-        count: values.len(),
-        p50_ms: percentile_ms(&values, 50),
-        p90_ms: percentile_ms(&values, 90),
-        p95_ms: percentile_ms(&values, 95),
-        max_ms: *values.last().unwrap_or(&0),
-        buckets: duration_buckets(&values),
-    })
-}
-
-fn percentile_ms(sorted_values: &[u64], percentile: usize) -> u64 {
-    let rank = sorted_values.len().saturating_mul(percentile).div_ceil(100);
-    let index = rank.saturating_sub(1).min(sorted_values.len() - 1);
-    sorted_values[index]
-}
-
-fn duration_buckets(sorted_values: &[u64]) -> Vec<DurationBucket> {
-    const SECOND: u64 = 1_000;
-    const MINUTE: u64 = 60 * SECOND;
-    // Weighted toward the autonomy range: in 90 days of real data ~96% of
-    // turns finish under 20m, so the short side gets three coarse buckets
-    // and the 20m+ tail (the "can it run unattended" signal) gets four.
-    const BUCKETS: [(&str, u64, u64); 7] = [
-        ("<2m", 0, 2 * MINUTE),
-        ("2-10m", 2 * MINUTE, 10 * MINUTE),
-        ("10-20m", 10 * MINUTE, 20 * MINUTE),
-        ("20-30m", 20 * MINUTE, 30 * MINUTE),
-        ("30-45m", 30 * MINUTE, 45 * MINUTE),
-        ("45m-1h", 45 * MINUTE, 60 * MINUTE),
-        ("1h+", 60 * MINUTE, u64::MAX),
-    ];
-
-    BUCKETS
-        .iter()
-        .map(|(label, start, end)| DurationBucket {
-            label: (*label).to_owned(),
-            count: sorted_values
-                .iter()
-                .filter(|value| **value >= *start && **value < *end)
-                .count(),
-        })
-        .collect()
-}
-
-fn streaks(active_dates: &BTreeSet<Date>, period_start: Date, period_end: Date) -> (usize, usize) {
-    let mut longest = 0;
-    let mut current_run = 0;
-    let mut date = period_start;
-    while date <= period_end {
-        if active_dates.contains(&date) {
-            current_run += 1;
-            longest = longest.max(current_run);
-        } else {
-            current_run = 0;
-        }
-        date += Duration::days(1);
-    }
-
-    let mut current = 0;
-    let mut cursor = period_end;
-    while cursor >= period_start && active_dates.contains(&cursor) {
-        current += 1;
-        cursor -= Duration::days(1);
-    }
-
-    (longest, current)
-}
-
-#[derive(Default)]
-struct Aggregates {
-    total_usage: TokenUsage,
-    daily_usage: BTreeMap<Date, TokenUsage>,
-    model_daily_usage: BTreeMap<(Date, String), TokenUsage>,
-    model_map: HashMap<String, ModelAccumulator>,
-    agent_map: HashMap<String, AgentAccumulator>,
-    tool_map: HashMap<String, usize>,
-    project_map: HashMap<String, ProjectAccumulator>,
-    period_sessions: HashSet<String>,
-    daily_session_ids: BTreeMap<Date, HashSet<String>>,
-    active_dates: BTreeSet<Date>,
-    hourly_usage: [u64; 24],
-    previous_total_volume: u64,
-    previous_sessions: HashSet<String>,
-}
-
-impl Aggregates {
-    fn add_usage_event(
-        &mut self,
-        event: &crate::model::UsageEvent,
-        period_start: Date,
-        period_end: Date,
-        previous_start: Date,
-        local_offset: UtcOffset,
-    ) {
-        let Some(timestamp) = event.timestamp else {
-            return;
-        };
-        let timestamp = timestamp.to_offset(local_offset);
-        let date = timestamp.date();
-        if date >= previous_start && date < period_start {
-            self.previous_total_volume = self
-                .previous_total_volume
-                .saturating_add(event.usage.token_volume());
-            if let Some(session_id) = &event.session_id {
-                self.previous_sessions.insert(session_id.clone());
-            }
-            return;
-        }
-        if date < period_start || date > period_end {
-            return;
-        }
-
-        self.total_usage.add_assign(&event.usage);
-        if event.usage.token_volume() > 0 {
-            self.active_dates.insert(date);
-        }
-        if let Some(daily) = self.daily_usage.get_mut(&date) {
-            daily.add_assign(&event.usage);
-        }
-        let hour = usize::from(timestamp.hour());
-        self.hourly_usage[hour] =
-            self.hourly_usage[hour].saturating_add(event.usage.token_volume());
-
-        if let Some(session_id) = &event.session_id {
-            self.period_sessions.insert(session_id.clone());
-        }
-
-        let model_name = event.model.clone().unwrap_or_else(|| "unknown".to_owned());
-        self.model_map
-            .entry(model_name.clone())
-            .or_default()
-            .add(&event.usage, date);
-        self.model_daily_usage
-            .entry((date, model_name))
-            .or_default()
-            .add_assign(&event.usage);
-
-        if let Some(project) = &event.project {
-            self.project_map
-                .entry(project.clone())
-                .or_default()
-                .add(&event.usage);
-        }
-
-        if event.source_kind == SourceKind::Subagent || event.attribution_agent.is_some() {
-            let agent_name = event
-                .attribution_agent
-                .clone()
-                .unwrap_or_else(|| "subagent".to_owned());
-            self.agent_map
-                .entry(agent_name)
-                .or_default()
-                .add_usage(&event.usage, date);
-        }
-    }
-
-    fn add_tool_event(
-        &mut self,
-        event: &crate::model::ToolEvent,
-        period_start: Date,
-        period_end: Date,
-        local_offset: UtcOffset,
-    ) {
-        let Some(timestamp) = event.timestamp else {
-            return;
-        };
-        let date = timestamp.to_offset(local_offset).date();
-        if date < period_start || date > period_end {
-            return;
-        }
-        *self.tool_map.entry(event.tool_name.clone()).or_default() += 1;
-        if let Some(session_id) = &event.session_id {
-            self.period_sessions.insert(session_id.clone());
-        }
-        if event.tool_name == "Agent"
-            && let Some(subagent_type) = &event.subagent_type
-        {
-            self.agent_map
-                .entry(subagent_type.clone())
-                .or_default()
-                .add_call(date);
-        }
-    }
-
-    fn add_session_touch(
-        &mut self,
-        touch: &crate::model::SessionTouch,
-        period_start: Date,
-        period_end: Date,
-        previous_start: Date,
-        local_offset: UtcOffset,
-    ) {
-        let date = touch.timestamp.to_offset(local_offset).date();
-        if date >= previous_start && date < period_start {
-            self.previous_sessions.insert(touch.session_id.clone());
-            return;
-        }
-        if date < period_start || date > period_end {
-            return;
-        }
-        self.active_dates.insert(date);
-        self.period_sessions.insert(touch.session_id.clone());
-        self.daily_session_ids
-            .entry(date)
-            .or_default()
-            .insert(touch.session_id.clone());
-    }
-}
-
-#[derive(Default)]
-struct ProjectAccumulator {
-    usage: TokenUsage,
-    events: usize,
-}
-
-impl ProjectAccumulator {
-    fn add(&mut self, usage: &TokenUsage) {
-        self.usage.add_assign(usage);
-        self.events += 1;
-    }
-
-    fn into_stat(self, name: String) -> ProjectStat {
-        ProjectStat {
-            name,
-            usage: self.usage,
-            events: self.events,
-        }
-    }
-}
-
-#[derive(Default)]
-struct ModelAccumulator {
-    usage: TokenUsage,
-    events: usize,
-    active_days: BTreeSet<Date>,
-}
-
-impl ModelAccumulator {
-    fn add(&mut self, usage: &TokenUsage, date: Date) {
-        self.usage.add_assign(usage);
-        self.events += 1;
-        if usage.token_volume() > 0 {
-            self.active_days.insert(date);
-        }
-    }
-
-    fn into_stat(self, name: String) -> ModelStat {
-        ModelStat {
-            name,
-            usage: self.usage,
-            events: self.events,
-            active_days: self.active_days.len(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct AgentAccumulator {
-    usage: TokenUsage,
-    calls: usize,
-    active_days: BTreeSet<Date>,
-}
-
-impl AgentAccumulator {
-    fn add_usage(&mut self, usage: &TokenUsage, date: Date) {
-        self.usage.add_assign(usage);
-        if usage.token_volume() > 0 {
-            self.active_days.insert(date);
-        }
-    }
-
-    fn add_call(&mut self, date: Date) {
-        self.calls += 1;
-        self.active_days.insert(date);
-    }
-
-    fn into_stat(self, name: String) -> AgentStat {
-        AgentStat {
-            name,
-            usage: self.usage,
-            calls: self.calls,
-            active_days: self.active_days.len(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::model::{Provider, ScanStats, SessionTouch, UsageEvent};
+    use crate::model::{
+        Collection, Provider, ScanStats, SessionTouch, SourceKind, TokenUsage, UsageEvent,
+    };
 
     #[test]
     fn aggregates_models_agents_tools_and_streaks() {
@@ -649,7 +321,7 @@ mod tests {
             stats: ScanStats::default(),
         };
 
-        let summary = summarize(collection, now, 7, UtcOffset::UTC);
+        let summary = summarize(&collection, now, 7, UtcOffset::UTC);
 
         assert_eq!(summary.total_usage.token_volume(), 150);
         assert_eq!(summary.models.len(), 2);
@@ -666,5 +338,49 @@ mod tests {
                 .duration_secs(),
             14_400
         );
+    }
+
+    #[test]
+    fn recent_window_volume_is_independent_of_display_days() {
+        // Four usage events at 0, 5, 20, and 40 days before period_end.
+        let now = datetime!(2026-06-30 12:00 UTC);
+        let event = |at: OffsetDateTime, tokens: u64| UsageEvent {
+            timestamp: Some(at),
+            session_id: Some("s".to_owned()),
+            model: Some("claude-opus-4-8".to_owned()),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            project: None,
+            usage: TokenUsage {
+                input_tokens: tokens,
+                ..TokenUsage::default()
+            },
+        };
+        let events = vec![
+            event(datetime!(2026-06-30 10:00 UTC), 1_000_000), // 30d + every window
+            event(datetime!(2026-06-25 10:00 UTC), 2_000_000), // 30d + 7d window
+            event(datetime!(2026-06-10 10:00 UTC), 3_000_000), // 30d, not 7d window
+            event(datetime!(2026-05-21 10:00 UTC), 4_000_000), // only the 90d display
+        ];
+        let collection = |events: Vec<UsageEvent>| Collection {
+            provider: Provider::Claude,
+            root: "/tmp".into(),
+            usage_events: events,
+            tool_events: Vec::new(),
+            session_touches: Vec::new(),
+            duration_events: Vec::new(),
+            stats: ScanStats::default(),
+        };
+
+        let week = summarize(&collection(events.clone()), now, 7, UtcOffset::UTC);
+        let quarter = summarize(&collection(events), now, 90, UtcOffset::UTC);
+
+        // The codename window is fixed at the last 30 days (06-01..06-30 = 6M),
+        // regardless of how many days the display covers.
+        assert_eq!(week.recent_window_volume, 6_000_000);
+        assert_eq!(quarter.recent_window_volume, 6_000_000);
+        // The display totals, by contrast, DO follow --days (3M vs 10M).
+        assert_eq!(week.total_usage.token_volume(), 3_000_000);
+        assert_eq!(quarter.total_usage.token_volume(), 10_000_000);
     }
 }

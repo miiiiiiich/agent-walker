@@ -3,10 +3,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::Result;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
     FileEvents, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached,
@@ -25,21 +24,25 @@ pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
     use_cache: bool,
-) -> Result<Collection> {
+    local_offset: UtcOffset,
+) -> Collection {
     let mut collection = Collection::new(Provider::Claude, root.to_path_buf());
     if !root.exists() {
-        return Ok(collection);
+        return collection;
     }
 
     let files: Vec<_> = list_files(root, "jsonl", mtime_floor, &mut collection.stats)
         .into_iter()
         .filter(|path| !is_noise_path(path))
         .collect();
-    let per_file = parse_files_cached(use_cache.then_some("claude"), &files, |path| {
-        parse_file(path, root)
-    });
+    let per_file = parse_files_cached(
+        use_cache.then_some("claude"),
+        &files,
+        local_offset,
+        |path| parse_file(path, root, local_offset),
+    );
     merge_into(&mut collection, per_file);
-    Ok(collection)
+    collection
 }
 
 fn is_noise_path(path: &Path) -> bool {
@@ -71,7 +74,7 @@ fn normalize_project_name(directory: &str) -> String {
     trimmed.to_owned()
 }
 
-fn parse_file(path: &Path, root: &Path) -> Option<FileEvents> {
+fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let source_kind = path_source_kind(path);
@@ -136,7 +139,7 @@ fn parse_file(path: &Path, root: &Path) -> Option<FileEvents> {
     }
 
     push_turn_duration(turn_start, last_activity, &mut events);
-    events.compress_touches();
+    events.compress_touches(local_offset);
     Some(events)
 }
 
@@ -417,7 +420,7 @@ mod tests {
         )
         .expect("subagent fixture should be written");
 
-        let collection = collect(temp.path(), None, false).expect("collection should succeed");
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 2);
         assert_eq!(collection.usage_events.len(), 2);
@@ -439,7 +442,7 @@ mod tests {
         )
         .expect("fixture should be written");
 
-        let collection = collect(temp.path(), None, false).expect("collection should succeed");
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(collection.usage_events.len(), 1);
@@ -455,7 +458,7 @@ mod tests {
         )
         .expect("fixture should be written");
 
-        let collection = collect(temp.path(), None, false).expect("collection should succeed");
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.tool_events.len(), 1);
@@ -472,8 +475,7 @@ mod tests {
         .expect("fixture should be written");
 
         let future = SystemTime::now() + std::time::Duration::from_secs(3600);
-        let collection =
-            collect(temp.path(), Some(future), false).expect("collection should succeed");
+        let collection = collect(temp.path(), Some(future), false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 0);
         assert!(collection.usage_events.is_empty());

@@ -1,6 +1,6 @@
 [package]
 name = "agent-walker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Local AI coding-agent usage dashboard — tokens, cost, projects, autonomy."
@@ -8,8 +8,9 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/miiiiiiich/agent-walker"
 repository = "https://github.com/miiiiiiich/agent-walker"
 readme = "README.md"
-keywords = ["cli", "tui", "claude", "usage", "dashboard"]
+keywords = ["cli", "tui", "claude", "codex", "usage"]
 categories = ["command-line-utilities", "development-tools"]
+default-run = "agent-walker"
 
 [[bin]]
 name = "agent-walker"
@@ -33,6 +34,8 @@ ureq = "2.12.1"
 time = { version = "0.3.44", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+resvg = "0.47"
+arboard = "3.6.1"
 
 [dev-dependencies]
 tempfile = "3.24.0"
