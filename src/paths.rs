@@ -8,7 +8,7 @@
 //! the ones each tool itself reads; see `claude_home` / `codex_home` for the
 //! per-tool notes.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 
@@ -18,13 +18,19 @@ pub fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow!("could not locate the user home directory"))
 }
 
-/// Pure helper: if `env_value` is `Some` use it as the root, otherwise fall
-/// back to `home.join(fallback_subdir)`. Split out so the env logic can be
-/// tested without mutating process environment variables.
-fn resolve_root(env_value: Option<&str>, home: &Path, fallback_subdir: &str) -> PathBuf {
+/// Pure helper: if `env_value` is a non-empty `Some` use it as the root,
+/// otherwise call `fallback()`. The fallback is lazy so `home_dir()` (which
+/// can itself fail) is never invoked when an env override is in effect — that
+/// lets a user with no resolvable home still point agent-walker at their
+/// relocated agent state via the env variable. Split out so the env logic can
+/// be tested without mutating process environment variables.
+fn resolve_root<F>(env_value: Option<&str>, fallback: F) -> Result<PathBuf>
+where
+    F: FnOnce() -> Result<PathBuf>,
+{
     match env_value {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => home.join(fallback_subdir),
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => fallback(),
     }
 }
 
@@ -36,11 +42,9 @@ fn resolve_root(env_value: Option<&str>, home: &Path, fallback_subdir: &str) -> 
 /// agent-walker doesn't disagree with users who relocate their config; if
 /// Anthropic ever changes the contract we simply fall back to `~/.claude`.
 pub fn claude_home() -> Result<PathBuf> {
-    Ok(resolve_root(
-        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
-        &home_dir()?,
-        ".claude",
-    ))
+    resolve_root(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(), || {
+        Ok(home_dir()?.join(".claude"))
+    })
 }
 
 /// Root directory Codex CLI reads. Defaults to `~/.codex`.
@@ -48,11 +52,9 @@ pub fn claude_home() -> Result<PathBuf> {
 /// `CODEX_HOME` overrides it if set — this is the official variable
 /// documented at <https://developers.openai.com/codex/environment-variables>.
 pub fn codex_home() -> Result<PathBuf> {
-    Ok(resolve_root(
-        std::env::var("CODEX_HOME").ok().as_deref(),
-        &home_dir()?,
-        ".codex",
-    ))
+    resolve_root(std::env::var("CODEX_HOME").ok().as_deref(), || {
+        Ok(home_dir()?.join(".codex"))
+    })
 }
 
 /// Root directory Antigravity CLI reads. No env override is known; the value
@@ -86,21 +88,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_root_uses_env_when_set() {
-        let home = PathBuf::from("/home/me");
-        assert_eq!(
-            resolve_root(Some("/srv/codex"), &home, ".codex"),
-            PathBuf::from("/srv/codex"),
-        );
+    fn resolve_root_uses_env_when_set_without_touching_fallback() {
+        // The closure must NOT run when an env override is in effect — that's
+        // what lets users with an unresolvable home still point us at their
+        // relocated state via `CODEX_HOME` / `CLAUDE_CONFIG_DIR`.
+        let result = resolve_root(Some("/srv/codex"), || panic!("fallback must not be called"));
+        assert_eq!(result.unwrap(), PathBuf::from("/srv/codex"));
     }
 
     #[test]
-    fn resolve_root_falls_back_to_home_when_env_missing() {
-        let home = PathBuf::from("/home/me");
-        assert_eq!(
-            resolve_root(None, &home, ".codex"),
-            PathBuf::from("/home/me/.codex"),
-        );
+    fn resolve_root_falls_back_when_env_missing() {
+        let result = resolve_root(None, || Ok(PathBuf::from("/home/me/.codex")));
+        assert_eq!(result.unwrap(), PathBuf::from("/home/me/.codex"));
     }
 
     #[test]
@@ -108,10 +107,13 @@ mod tests {
         // An empty value is almost always a misconfigured env (`CODEX_HOME=`
         // in a shell script clears it); treat it like unset rather than
         // pointing the tool at the current working directory.
-        let home = PathBuf::from("/home/me");
-        assert_eq!(
-            resolve_root(Some(""), &home, ".codex"),
-            PathBuf::from("/home/me/.codex"),
-        );
+        let result = resolve_root(Some(""), || Ok(PathBuf::from("/home/me/.codex")));
+        assert_eq!(result.unwrap(), PathBuf::from("/home/me/.codex"));
+    }
+
+    #[test]
+    fn resolve_root_propagates_fallback_error() {
+        let result: Result<PathBuf> = resolve_root(None, || Err(anyhow!("home not found")));
+        assert!(result.is_err());
     }
 }
