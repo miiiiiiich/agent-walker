@@ -134,7 +134,9 @@ indefinitely; no setting needed.
   different time windows and count cache reads differently. See the per-agent
   pages above.
 - Antigravity log timestamps carry no timezone and are assumed to be local.
-- Windows is not supported yet (log discovery relies on `$HOME`).
+- Windows binaries are published from 0.3 onward; the dashboard runs in
+  Windows Terminal / PowerShell and reads logs from `%USERPROFILE%`. WSL
+  installs work too — paths just stay in their Linux form.
 
 ## License
 

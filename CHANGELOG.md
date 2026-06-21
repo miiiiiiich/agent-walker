@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-21
+
+### Added
+
+- Windows support. Prebuilt binaries are now published for
+  `x86_64-pc-windows-msvc`, and the dashboard discovers logs under
+  `%USERPROFILE%` (`.claude\projects`, `.codex\sessions`,
+  `.gemini\antigravity-cli`).
+- CI now exercises `cargo test` on `windows-latest` alongside macOS and Linux.
+
+### Changed
+
+- Path resolution went through `dirs::home_dir`, so no part of the codebase
+  reads `HOME` directly anymore. WSL installs keep working with their existing
+  Linux-style paths.
+
 ## [0.2.1] - 2026-06-21
 
 ### Changed
@@ -39,12 +55,12 @@ First public release with the codename system and the shareable stats card.
 
 - Antigravity token and cost figures are not counted — its usage lives in an
   undocumented protobuf store.
-- Windows is not yet supported; log discovery relies on `$HOME`.
 
 ## [0.1.0] - 2026-06-20
 
 Initial npm packaging.
 
+[0.3.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.0
 [0.2.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.1.0

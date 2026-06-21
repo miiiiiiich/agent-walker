@@ -101,7 +101,7 @@ Claude Code は既定で**約30日でトランスクリプトを整理する**�
 - **Antigravity はトークン/コスト非計上**（中身不明な protobuf）。`--agy` 時も Combined の合計トークンには加算されない（活動のみ反映）。
 - 各エージェント自身の利用表示とは一致しない（集計の窓やキャッシュの数え方が違う）。
 - Antigravity のログのタイムスタンプはタイムゾーンなし＝ローカル想定。
-- Windows 未対応（ログ探索が `$HOME` 依存）。
+- Windows バイナリは 0.3 以降で配布。Windows Terminal / PowerShell で動き、ログは `%USERPROFILE%` から読む。WSL でもそのまま動く（パスは Linux 形式のまま）。
 
 ## ライセンス
 
