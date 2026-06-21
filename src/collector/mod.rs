@@ -37,15 +37,21 @@ pub fn project_from_cwd(cwd: &str) -> String {
 /// filesystems are case-insensitive, so a cwd recorded as `c:\Users\me\…`
 /// must still match a home of `C:\Users\me`; compare case-insensitively but
 /// slice the original cwd so the rest of the path keeps its real casing.
-/// Requires a path-component boundary after the prefix so that
-/// `C:\Users\metadata` does not get stripped against home `C:\Users\me`.
+/// Backslashes and forward slashes are equivalent on Windows, so the prefix
+/// match normalizes both to `/` before comparing — npm/Node tooling often
+/// records cwds with forward slashes even on Windows. Requires a path-
+/// component boundary after the prefix so that `C:\Users\metadata` does not
+/// get stripped against home `C:\Users\me`.
 #[cfg(windows)]
 fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
     // `get` keeps us safe if `home.len()` lands inside a multi-byte UTF-8
     // character in `cwd`; `split_at` would panic there.
     let head = cwd.get(..home.len())?;
     let rest = cwd.get(home.len()..)?;
-    if !head.eq_ignore_ascii_case(home) {
+    if !head
+        .replace('\\', "/")
+        .eq_ignore_ascii_case(&home.replace('\\', "/"))
+    {
         return None;
     }
     if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
@@ -54,10 +60,16 @@ fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
     Some(rest.trim_start_matches(['/', '\\']).to_owned())
 }
 
+/// Same shape on Unix: require a path-component boundary so that home
+/// `/Users/me` does not silently strip a cwd like `/Users/metadata/app` into
+/// `tadata/app` (an attribution bug the previous `{home}/` prefix avoided).
 #[cfg(not(windows))]
 fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
-    cwd.strip_prefix(home)
-        .map(|rest| rest.trim_start_matches(['/', '\\']).to_owned())
+    let rest = cwd.strip_prefix(home)?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    Some(rest.trim_start_matches('/').to_owned())
 }
 
 /// Events extracted from a single log file. The unit of caching: parsed once,
@@ -278,6 +290,13 @@ fn store_cache(cache_name: &str, cache: &CacheFile) {
     };
     let temp = path.with_extension("tmp");
     if fs::write(&temp, bytes).is_ok() {
+        // `fs::rename` on Windows refuses to overwrite an existing
+        // destination, so the cache file would never advance and every active
+        // user would reparse every log on every run. Remove the stale cache
+        // first (failure is harmless — the rename below reports the real
+        // outcome). Unix POSIX rename already overwrites atomically; the
+        // extra unlink there is a no-op on a missing path.
+        let _ = fs::remove_file(&path);
         let _ = fs::rename(&temp, &path);
     }
 }
@@ -409,7 +428,7 @@ mod tests {
 
     #[test]
     fn strip_home_prefix_unix() {
-        // Posix-only test: case-sensitive byte comparison.
+        // Posix-only test: case-sensitive byte comparison with boundary check.
         if !cfg!(windows) {
             assert_eq!(
                 strip_home_prefix("/Users/me/code/app", "/Users/me"),
@@ -417,12 +436,17 @@ mod tests {
             );
             // No prefix match → None so the caller falls back.
             assert_eq!(strip_home_prefix("/var/log/x", "/Users/me"), None);
+            // Non-boundary sibling does not strip (would otherwise yield
+            // "tadata/app" for "/Users/metadata/app").
+            assert_eq!(strip_home_prefix("/Users/metadata/app", "/Users/me"), None);
+            assert_eq!(strip_home_prefix("/Users/me-work/app", "/Users/me"), None);
         }
     }
 
     #[test]
     fn strip_home_prefix_windows_case_insensitive() {
-        // Windows-only test: case-insensitive prefix match with backslash trim.
+        // Windows-only test: case-insensitive prefix match with separator
+        // normalization and boundary check.
         if cfg!(windows) {
             assert_eq!(
                 strip_home_prefix(r"C:\Users\me\code\app", r"C:\Users\me"),
@@ -432,6 +456,12 @@ mod tests {
             assert_eq!(
                 strip_home_prefix(r"c:\users\me\code\app", r"C:\Users\me"),
                 Some(r"code\app".to_owned()),
+            );
+            // Mixed separators (forward-slashed cwd from npm/Node tooling,
+            // backslashed home from dirs::home_dir).
+            assert_eq!(
+                strip_home_prefix("C:/Users/me/code/app", r"C:\Users\me"),
+                Some("code/app".to_owned()),
             );
             // Non-boundary sibling does not strip.
             assert_eq!(

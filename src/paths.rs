@@ -20,10 +20,14 @@ pub fn cache_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".cache").join("agent-walker"))
 }
 
-/// Default save directory for the share card. Prefers `<home>/Downloads` when
-/// it exists, otherwise the home directory itself.
+/// Default save directory for the share card. `dirs::download_dir` consults
+/// the OS-native location (Known Folders on Windows, `NSDownloadsDirectory`
+/// on macOS, XDG on Linux), so a non-English or relocated Downloads folder
+/// still resolves correctly. Falls back to the home directory when the OS
+/// doesn't report a Downloads location.
 pub fn downloads_dir() -> Result<PathBuf> {
     let home = home_dir()?;
-    let downloads = home.join("Downloads");
-    Ok(if downloads.is_dir() { downloads } else { home })
+    Ok(dirs::download_dir()
+        .filter(|path| path.is_dir())
+        .unwrap_or(home))
 }
