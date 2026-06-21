@@ -9,10 +9,10 @@
 /// space, or `None` for the no-data "Chick" floor (which carries no badge).
 pub(crate) fn badge_inner(animal: &str) -> Option<&'static str> {
     let svg = match animal {
-        "Foxhound" => include_str!("../../assets/badges/foxhound.svg"),
+        "Hound" => include_str!("../../assets/badges/hound.svg"),
         "Fox" => include_str!("../../assets/badges/fox.svg"),
         "Doberman" => include_str!("../../assets/badges/doberman.svg"),
-        "Hound" => include_str!("../../assets/badges/hound.svg"),
+        "Lion" => include_str!("../../assets/badges/lion.svg"),
         "Octopus" => include_str!("../../assets/badges/octopus.svg"),
         "Wolf" => include_str!("../../assets/badges/wolf.svg"),
         "Orca" => include_str!("../../assets/badges/orca.svg"),

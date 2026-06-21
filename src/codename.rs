@@ -63,9 +63,12 @@ const CHICK: &str = "Chick";
 // ===== Tunable thresholds — single source of truth =========================
 // Every axis is a rate or ratio, so the title is window-robust. The level is
 // tokens/day over the most recent 30 days (longer `--days` is clipped back, so
-// the level stays pinned even while graphs span 90 days). Calibrated so the
-// heaviest real users sit at R2, leaving R1 as aspirational headroom nobody
-// reaches yet. Retune here only; nothing else hard-codes a number.
+// the level stays pinned even while graphs span 90 days). Token counts are
+// cache-inclusive and ~90%+ cache reads for nearly everyone, so the bar is set
+// on gross throughput rather than pricing cache separately. Calibrated so a
+// heavy power user (top low-single-digit %) lands around R3, leaving R2 and R1
+// as headroom for the rare documented extremes. Retune here only; nothing else
+// hard-codes a number.
 
 /// The level always reflects the most recent N days of token throughput.
 /// The analyzer fills `Summary::recent_window_volume` over this same window.
@@ -73,11 +76,11 @@ pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
 
 /// Row (R1 top .. R6 entry) by tokens per day over the window.
 const TOKENS_PER_DAY: [f64; 6] = [
-    400_000_000.0, // R1
-    200_000_000.0, // R2
-    80_000_000.0,  // R3
-    25_000_000.0,  // R4
-    6_000_000.0,   // R5
+    750_000_000.0, // R1
+    400_000_000.0, // R2
+    150_000_000.0, // R3
+    45_000_000.0,  // R4
+    12_000_000.0,  // R5
     500_000.0,     // R6
 ];
 
@@ -102,12 +105,12 @@ const OPS_DOMINANCE_PT: f64 = 15.0;
 /// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`,
 /// ordered per column strongest (R1) → humblest.
 const GRID: [[&str; 4]; 6] = [
-    ["Foxhound", "Fox", "Doberman", "Hound"], // R1
-    ["Octopus", "Wolf", "Orca", "Hawk"],      // R2
-    ["Raven", "Eel", "Whale", "Swallow"],     // R3
-    ["Scorpion", "Piranha", "Bear", "Gull"],  // R4
-    ["Cat", "Kangaroo", "Puma", "Deer"],      // R5
-    ["Ant", "Firefly", "Butterfly", "Bee"],   // R6
+    ["Hound", "Fox", "Doberman", "Lion"],    // R1
+    ["Octopus", "Wolf", "Orca", "Hawk"],     // R2
+    ["Raven", "Eel", "Whale", "Swallow"],    // R3
+    ["Scorpion", "Piranha", "Bear", "Gull"], // R4
+    ["Cat", "Kangaroo", "Puma", "Deer"],     // R5
+    ["Ant", "Firefly", "Butterfly", "Bee"],  // R6
 ];
 
 /// SCOUT = "explore / research" share of (research + build) tool calls. High =
@@ -358,7 +361,7 @@ mod tests {
             control: 1.0,
             heavy_per_day: 0.0,
             scout: 0.0,
-            tokens_per_day: 220_000_000.0, // R2
+            tokens_per_day: 200_000_000.0, // R3
             window_active_days: 20,
         }
     }
@@ -401,7 +404,7 @@ mod tests {
             control: 3.0,
             heavy_per_day: 0.5,
             scout: 10.0,
-            tokens_per_day: 250_000_000.0, // R2
+            tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
         assert_eq!(classify(&m), Some((Style::Control, 2)));
@@ -415,7 +418,7 @@ mod tests {
             control: 1.0,
             heavy_per_day: 4.0,
             scout: 5.0,
-            tokens_per_day: 250_000_000.0,
+            tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
         assert_eq!(classify(&m), Some((Style::Solo, 2)));
@@ -428,7 +431,7 @@ mod tests {
             control: 1.2,
             heavy_per_day: 0.2,
             scout: 60.0,
-            tokens_per_day: 250_000_000.0,
+            tokens_per_day: 450_000_000.0, // R2
             window_active_days: 18,
         };
         assert_eq!(classify(&m), Some((Style::Scout, 2)));
@@ -443,7 +446,7 @@ mod tests {
             control: 3.35,
             heavy_per_day: 4.17,
             scout: 19.0,
-            tokens_per_day: 220_000_000.0, // R2
+            tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
         };
         assert_eq!(classify(&m), Some((Style::AllRounder, 2)));
@@ -451,16 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn apex_all_rounder_is_hound() {
+    fn apex_all_rounder_is_lion() {
         let m = Metrics {
             control: 5.0,
             heavy_per_day: 10.0,
             scout: 80.0,
-            tokens_per_day: 500_000_000.0, // R1
+            tokens_per_day: 800_000_000.0, // R1
             window_active_days: 28,
         };
         assert_eq!(classify(&m), Some((Style::AllRounder, 1)));
-        assert_eq!(animal_for(Style::AllRounder, 1), "Hound");
+        assert_eq!(animal_for(Style::AllRounder, 1), "Lion");
     }
 
     #[test]

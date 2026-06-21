@@ -2,7 +2,7 @@
 //! the ACTIVITY grass. Source PNGs are pre-thresholded to pure black/white so
 //! faint gray frame artifacts don't fill the whole box when downscaled.
 
-pub(super) const FOXHOUND: &str = "\
+pub(super) const FALLBACK: &str = "\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣤⣤⡀⠀⠀\n\
@@ -51,6 +51,19 @@ pub(super) const HOUND: &str = "\
 ⠀⠐⠤⣺⡿⣻⡟⠁⠀⠀⠀⠀⠸⣯⠃⠀⠀⠀⠀⠀\n\
 ⠀⠀⢸⠋⠀⢻⠀⠀⠀⠀⠀⠀⠀⡿⡄⠀⠀⠀⠀⠀\n\
 ⠀⠀⠘⠂⠀⠀⠙⠀⠀⠀⠀⠀⠀⠛⠛⠀⠀⠀⠀⠀\n\
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
+";
+
+pub(super) const LION: &str = "\
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣤⣶⣄⠀⠀⠀\n\
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⡿⠶⠀\n\
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⣿⣿⣿⠳⠀⠀\n\
+⠀⠀⠀⠀⢀⣤⣶⣶⣾⣿⣿⣿⣿⣿⣿⣿⣿⠃⠀⠀\n\
+⠀⢀⡀⢠⢋⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠋⠀⠀⠀\n\
+⠀⢟⣡⠇⣸⣿⠟⠙⣿⠏⠈⢹⣿⠟⣿⣧⠀⠀⠀⠀\n\
+⠀⠀⠀⣸⣏⠀⠀⠘⢿⣀⠀⢸⣿⠀⠈⣿⣄⠀⠀⠀\n\
+⠀⠀⠀⠈⠉⠀⠀⠀⠈⠉⠁⠈⠛⠁⠀⠈⠉⠁⠀⠀\n\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
 ";
 
@@ -319,6 +332,7 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
         "Fox" => FOX,
         "Doberman" => DOBERMAN,
         "Hound" => HOUND,
+        "Lion" => LION,
         "Octopus" => OCTOPUS,
         "Wolf" => WOLF,
         "Orca" => ORCA,
@@ -339,6 +353,6 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
         "Firefly" => FIREFLY,
         "Butterfly" => BUTTERFLY,
         "Bee" => BEE,
-        _ => FOXHOUND,
+        _ => FALLBACK,
     }
 }

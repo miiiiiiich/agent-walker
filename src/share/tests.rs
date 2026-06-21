@@ -4,10 +4,10 @@ use super::{REPO_URL, ShareCard, badge_art, render_png};
 
 /// The 24 codename animals (matches `codename::GRID`); Chick carries no badge.
 const ANIMALS: [&str; 24] = [
-    "Foxhound",
+    "Hound",
     "Fox",
     "Doberman",
-    "Hound",
+    "Lion",
     "Octopus",
     "Wolf",
     "Orca",
