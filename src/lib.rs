@@ -34,6 +34,7 @@ mod cost;
 mod demo;
 mod format;
 mod model;
+mod paths;
 mod share;
 mod ui;
 

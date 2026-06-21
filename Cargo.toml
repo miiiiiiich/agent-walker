@@ -1,6 +1,6 @@
 [package]
 name = "agent-walker"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Local AI coding-agent usage dashboard — tokens, cost, projects, autonomy."
@@ -26,6 +26,7 @@ bincode = "1.3.3"
 clap = { version = "4.5.53", features = ["derive"] }
 clap_complete = "4.5.60"
 crossterm = "0.29.0"
+dirs = "5.0.1"
 ratatui = "0.30.1"
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
