@@ -2,14 +2,19 @@
 //!
 //! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Hawk". The ANIMAL encodes a 6×4
 //! grid — **ROW = token throughput (the level), COLUMN = working style**
-//! (`Control` = parallel / `Solo` = heavy / `Scout` = neither / `AllRounder`
-//! = parallel + heavy + multi-model) — so one word carries both how much and
-//! what kind. OPS is the dominant time-of-day. "Chick" is the no-data floor.
+//! (`Control` = parallel / `Solo` = autonomy-led / `Scout` = neither /
+//! `AllRounder` = parallel + autonomy + multi-model) — so one word carries both
+//! how much and what kind. OPS is the dominant time-of-day. "Chick" is the
+//! no-data floor.
 //!
-//! ROW and STYLE are independent: ROW is volume (tokens/day over the most
-//! recent 30 days, fixed regardless of the display `--days`), while STYLE uses
-//! flat per-axis thresholds that don't change with the row. The style axes are
-//! rates/ratios over the analysis window.
+//! ROW and STYLE are independent: ROW is volume (tokens/day over the most recent
+//! 30 days, fixed regardless of the display `--days`), while STYLE uses flat
+//! per-axis thresholds that don't change with the row. The style axes are
+//! *ratios* (share of time at 2+ concurrent, share of completions that ran long,
+//! provider balance), not magnitudes — magnitudes rise with volume and would
+//! collapse the top rows into one style, whereas ratios measure *how* you work
+//! independently of *how much*. STYLE is also whole-person: it's measured across
+//! every agent combined, so running several agents at once counts as parallel.
 //!
 //! All numeric cut-offs live in the one block below and are meant to be easy to
 //! retune. They are never surfaced in the UI — only the final title is — so the
@@ -22,19 +27,19 @@
     reason = "Scores are display-only thresholds; approximate float math never feeds back into integer state."
 )]
 
-use crate::model::Summary;
+use crate::model::{DurationSummary, Orchestration, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
-    /// Parallel — many sessions running at once.
+    /// Parallel — a large share of time spent at 2+ concurrent sessions.
     Control,
-    /// Heavy — runs many long, unattended tasks.
+    /// Autonomy-led — a large share of completions ran 20m+ unattended.
     Solo,
-    /// Neither parallel nor heavy — a plain / general way of working.
+    /// Neither parallel nor autonomy-led — a plain / general way of working.
     Scout,
-    /// Parallel AND heavy AND multi-model at once — the orchestration profile.
-    /// The displayed row still comes from token throughput, so a low-throughput
-    /// all-rounder lands at a low row. Rare by construction.
+    /// Parallel AND autonomy-led AND multi-model at once — the orchestration
+    /// profile. The displayed row still comes from token throughput, so a
+    /// low-throughput all-rounder lands at a low row. Rare by construction.
     AllRounder,
 }
 
@@ -76,6 +81,14 @@ pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
 // ROW is volume; STYLE is how you work. They are independent — STYLE uses a
 // single flat threshold per axis that does NOT change with the row, so "what
 // kind of user" reads the same whether you're R1 or R6.
+//
+// Crucially the STYLE axes are *ratios / intensities*, not magnitudes. Magnitude
+// axes (avg concurrency, long-runs-per-day) rise mechanically with volume — to
+// reach a high row you must orchestrate, so a count-based axis would mark every
+// heavy user parallel+heavy and collapse the top rows into one style. Ratios
+// (share of time at 2+ concurrent, share of completions that ran long) measure
+// *how* you work regardless of *how much*, so the column stays discriminative at
+// every row.
 
 /// ROW (R1 top .. R6 entry) by tokens per day over the window. Volume only.
 const TOKENS_PER_DAY: [f64; 6] = [
@@ -87,16 +100,21 @@ const TOKENS_PER_DAY: [f64; 6] = [
     500_000.0,     // R6
 ];
 
-/// STYLE thresholds — single flat cut-offs, row-independent.
-/// Parallel: weighted-average simultaneous sessions. At/above this you "run
-/// things in parallel".
-const PARALLEL_MIN: f64 = 1.8;
-/// Solo: 20m+ unattended completions per active day. At/above this you "leave
-/// long tasks running".
-const SOLO_MIN: f64 = 1.8;
+/// STYLE thresholds — flat, row-independent, all volume-normalised.
+/// Parallel: share of active wall-time spent at 2+ concurrent sessions.
+const PARALLEL_MIN: f64 = 0.40;
+/// Autonomy (Solo): share of task completions that ran 20m+ unattended.
+const AUTONOMY_MIN: f64 = 0.10;
 /// Multi-model: the smaller provider's share of `Claude`+`Codex` volume.
 /// At/above this you're not leaning on a single model. Required for `AllRounder`.
-const MULTI_MIN: f64 = 0.05;
+const MULTI_MIN: f64 = 0.10;
+
+/// Low-sample guards: a ratio is only trusted with enough underneath it, so a
+/// thin sample (one long run, a few minutes of activity) can't read as a
+/// full-blown style. Below these the axis reads as 0.
+const PARALLEL_MIN_ACTIVE_SECS: u64 = 2 * 60 * 60; // 2h of measured active time
+const AUTONOMY_MIN_COMPLETIONS: usize = 20; // total completions to trust the ratio
+const AUTONOMY_MIN_LONG: usize = 3; // and at least this many long ones
 
 /// Below either floor the user is "Chick" (no real data yet).
 const CHICK_MIN_TOKENS_PER_DAY: f64 = 500_000.0;
@@ -121,8 +139,8 @@ const GRID: [[&str; 4]; 6] = [
 // ===========================================================================
 
 struct Metrics {
-    control: f64,              // weighted avg simultaneous sessions (parallel)
-    heavy_per_day: f64,        // 20m+ unattended runs per active day (heavy)
+    parallel_share: f64,       // share of active time at 2+ concurrent (CONTROL)
+    autonomy_ratio: f64,       // share of completions that ran 20m+ (SOLO)
     multi_model_share: f64,    // smaller provider's share of Claude+Codex volume
     tokens_per_day: f64,       // tokens/day over the most recent window (level)
     window_active_days: usize, // active days over the fixed 30-day window (Chick floor)
@@ -134,20 +152,19 @@ pub fn for_summary(summary: &Summary) -> Codename {
     for_summary_styled(summary, summary)
 }
 
-/// Like [`for_summary`], but the multi-model signal is taken from `style_src`
-/// while everything else — parallel, heavy, the row, the OPS prefix, the Chick
-/// floor — comes from `summary` itself.
+/// Like [`for_summary`], but the working-style word is taken from `style_src`
+/// while the row, the OPS prefix, and the Chick floor come from `summary`.
 ///
-/// The UI passes the combined summary as `style_src`. Parallel and heavy stay
-/// per-tab so a tab reflects how that agent is actually run (a tool you never
-/// parallelise won't read as `AllRounder`). Only the multi-model axis is a
-/// cross-tool trait the per-provider summaries can't see — they leave it at 0 —
-/// so it's sourced from the combined summary. A tab thus earns `AllRounder` only
-/// when you genuinely run *that* agent in parallel for long stretches and you're
-/// multi-model overall. When `summary` is the combined one this is identical to
-/// [`for_summary`].
+/// The UI passes the combined summary as `style_src`. STYLE is a whole-person
+/// trait: parallel, autonomy, and multi-model are all measured across *every*
+/// agent at once (Claude + Codex + Antigravity + whatever's added later), since
+/// running several agents in parallel is itself orchestration and shouldn't be
+/// invisible just because no single tool was driven in parallel. So a provider
+/// tab shows your overall working style at that tab's own volume row — the animal
+/// changes by tier, the style word stays your identity. When `summary` is the
+/// combined one this is identical to [`for_summary`].
 pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
-    let mut m = metrics(summary);
+    let m = metrics(summary);
     if is_chick(&m) {
         return Codename {
             ops: "Eclipse",
@@ -155,9 +172,7 @@ pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
         };
     }
     let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
-    // Multi-model is the only cross-tool axis; borrow it from the combined view.
-    m.multi_model_share = style_src.recent_window_provider_min_share;
-    let style = style_of(&m);
+    let style = style_of(&metrics(style_src));
     Codename {
         ops: ops(&summary.hourly_usage),
         animal: animal_for(style, row),
@@ -165,32 +180,69 @@ pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
 }
 
 fn metrics(summary: &Summary) -> Metrics {
-    let active_days = summary.active_days;
-
-    let unattended = summary.completion_duration.as_ref().map_or(0, |duration| {
-        // The duration histogram is laid out as three sub-20m buckets followed
-        // by the three 20m+ "unattended" buckets, so skipping the first three
-        // isolates the tail without coupling scoring to display label strings.
-        duration
-            .buckets
-            .iter()
-            .skip(3)
-            .map(|bucket| bucket.count)
-            .sum::<usize>()
-    });
-    let heavy_per_day = if active_days > 0 {
-        unattended as f64 / active_days as f64
-    } else {
-        0.0
-    };
-
     Metrics {
-        control: summary.orchestration.avg_concurrency,
-        heavy_per_day,
+        parallel_share: parallel_share(&summary.orchestration),
+        autonomy_ratio: autonomy_ratio(summary.completion_duration.as_ref()),
         multi_model_share: summary.recent_window_provider_min_share,
         tokens_per_day: tokens_per_day(summary),
         window_active_days: summary.recent_window_active_days,
     }
+}
+
+/// Share of active wall-time spent at 2+ concurrent sessions — the parallel
+/// (CONTROL) axis. Volume-normalised: a hand-driver sits at concurrency 1, a
+/// fan-out operator spends most of their time at 2+, regardless of total tokens.
+/// Guarded: under a couple of hours of measured activity the ratio is too noisy
+/// to trust, so it reads as 0 (not parallel).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Display-only share; seconds never approach f64's exact-integer limit in practice."
+)]
+fn parallel_share(orch: &Orchestration) -> f64 {
+    let active = orch
+        .time_by_level
+        .iter()
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    if active < PARALLEL_MIN_ACTIVE_SECS {
+        return 0.0;
+    }
+    // Bucket 0 is concurrency-1 (solo); everything after it is 2+ concurrent.
+    let parallel = orch
+        .time_by_level
+        .iter()
+        .skip(1)
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    parallel as f64 / active as f64
+}
+
+/// Share of task completions that ran 20m+ unattended — the autonomy (SOLO)
+/// axis. A ratio, not a per-day count, so heavy interactive use doesn't read as
+/// autonomous just because the absolute number of long runs grows with volume.
+/// Guarded: needs a minimum number of completions (and a few long ones) before
+/// the ratio is trusted, so a single long run on a thin sample can't read as
+/// fully autonomous.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Display-only share; completion counts never approach f64's exact-integer limit."
+)]
+fn autonomy_ratio(duration: Option<&DurationSummary>) -> f64 {
+    let Some(duration) = duration else {
+        return 0.0;
+    };
+    // The histogram is three sub-20m buckets then three 20m+ buckets, so skipping
+    // the first three isolates the long tail without coupling to label strings.
+    let long: usize = duration
+        .buckets
+        .iter()
+        .skip(3)
+        .map(|bucket| bucket.count)
+        .sum();
+    if duration.count < AUTONOMY_MIN_COMPLETIONS || long < AUTONOMY_MIN_LONG {
+        return 0.0;
+    }
+    long as f64 / duration.count as f64
 }
 
 /// Tokens per day over the fixed codename window. `recent_window_volume` is the
@@ -209,24 +261,24 @@ fn is_chick(m: &Metrics) -> bool {
 /// The displayed row still comes from token throughput, so a low-throughput
 /// all-rounder lands at a low row.
 ///
-/// - `AllRounder` — parallel AND heavy AND multi-model. The orchestration
-///   profile: many at once, long unattended runs, and not on a single model.
-/// - `Control` — parallel but not heavy (or both, but single-model).
-/// - `Solo` — heavy but not parallel.
+/// - `AllRounder` — parallel AND autonomous AND multi-model. The orchestration
+///   profile: lots at once, long unattended runs, and not on a single model.
+/// - `Control` — parallel but not autonomy-led (or both, but single-model).
+/// - `Solo` — autonomy-led but not parallel.
 /// - `Scout` — neither: a plain / general way of working.
 fn style_of(m: &Metrics) -> Style {
-    let parallel = m.control >= PARALLEL_MIN;
-    let heavy = m.heavy_per_day >= SOLO_MIN;
+    let parallel = m.parallel_share >= PARALLEL_MIN;
+    let heavy = m.autonomy_ratio >= AUTONOMY_MIN;
     let multi = m.multi_model_share >= MULTI_MIN;
 
     match (parallel, heavy) {
         (true, true) if multi => Style::AllRounder,
         // Both specialised but single-model: fall to the stronger of the two.
-        // Cross-multiplied form of `heavy/SOLO_MIN > control/PARALLEL_MIN` —
-        // avoids float division and stays correct if the thresholds ever diverge
-        // or go to zero. Ties favour Control.
+        // Cross-multiplied form of `autonomy/AUTONOMY_MIN > parallel/PARALLEL_MIN`
+        // — avoids float division and stays correct if the thresholds ever
+        // diverge or go to zero. Ties favour Control.
         (true, true) => {
-            if m.heavy_per_day * PARALLEL_MIN > m.control * SOLO_MIN {
+            if m.autonomy_ratio * PARALLEL_MIN > m.parallel_share * AUTONOMY_MIN {
                 Style::Solo
             } else {
                 Style::Control
@@ -305,8 +357,8 @@ mod tests {
 
     fn base() -> Metrics {
         Metrics {
-            control: 1.0,
-            heavy_per_day: 0.0,
+            parallel_share: 0.0,
+            autonomy_ratio: 0.0,
             multi_model_share: 0.0,
             tokens_per_day: 200_000_000.0, // R3
             window_active_days: 20,
@@ -337,7 +389,7 @@ mod tests {
     fn row_is_token_rate_not_style() {
         // High parallel but a trickle of tokens → entry row (R6), Control col.
         let m = Metrics {
-            control: 3.0,
+            parallel_share: 0.8,
             tokens_per_day: 1_000_000.0, // R6
             ..base()
         };
@@ -347,10 +399,10 @@ mod tests {
 
     #[test]
     fn parallel_only_lands_control() {
-        // Parallel over the bar, heavy under it → Control regardless of model mix.
+        // Parallel over the bar, autonomy under it → Control regardless of model mix.
         let m = Metrics {
-            control: 3.0,
-            heavy_per_day: 0.5,
+            parallel_share: 0.8,
+            autonomy_ratio: 0.02,
             multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
@@ -361,10 +413,10 @@ mod tests {
 
     #[test]
     fn heavy_only_lands_solo() {
-        // Many long unattended runs per day, low concurrency → Solo.
+        // Most completions ran long, low concurrency share → Solo.
         let m = Metrics {
-            control: 1.0,
-            heavy_per_day: 4.0,
+            parallel_share: 0.1,
+            autonomy_ratio: 0.5,
             multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
@@ -375,11 +427,11 @@ mod tests {
 
     #[test]
     fn neither_axis_lands_scout() {
-        // Plain / general use: not parallel, not heavy. Multi-model alone does
-        // not promote out of Scout.
+        // Plain / general use: not parallel, not autonomy-led. Multi-model alone
+        // does not promote out of Scout.
         let m = Metrics {
-            control: 1.2,
-            heavy_per_day: 0.2,
+            parallel_share: 0.2,
+            autonomy_ratio: 0.02,
             multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 18,
@@ -390,10 +442,10 @@ mod tests {
 
     #[test]
     fn parallel_heavy_and_multi_is_all_rounder() {
-        // Parallel AND heavy AND multi-model → the orchestration profile.
+        // Parallel AND autonomous AND multi-model → the orchestration profile.
         let m = Metrics {
-            control: 3.35,
-            heavy_per_day: 4.17,
+            parallel_share: 0.6,
+            autonomy_ratio: 0.3,
             multi_model_share: 0.10,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
@@ -407,8 +459,8 @@ mod tests {
         // Both axes clear the bar, but everything came from one provider → it
         // falls to the stronger single axis instead of AllRounder.
         let m = Metrics {
-            control: 3.35,       // 3.35 / 1.8 = 1.86
-            heavy_per_day: 4.17, // 4.17 / 1.8 = 2.32 (stronger)
+            parallel_share: 0.6, // 0.6 / 0.40 = 1.50
+            autonomy_ratio: 0.3, // 0.3 / 0.10 = 3.00 (stronger)
             multi_model_share: 0.0,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
@@ -419,8 +471,8 @@ mod tests {
     #[test]
     fn apex_all_rounder_is_lion() {
         let m = Metrics {
-            control: 5.0,
-            heavy_per_day: 10.0,
+            parallel_share: 0.8,
+            autonomy_ratio: 0.5,
             multi_model_share: 0.3,
             tokens_per_day: 800_000_000.0, // R1
             window_active_days: 28,
@@ -431,32 +483,24 @@ mod tests {
 
     #[test]
     fn multi_model_just_under_threshold_is_not_all_rounder() {
-        // 4% minority share is below the 5% multi bar → not AllRounder even
-        // with both implementation axes cleared.
+        // 9% minority share is below the 10% multi bar → not AllRounder even with
+        // both implementation axes cleared. With equal normalised
+        // parallel/autonomy strength the tie falls to Control.
         let m = Metrics {
-            control: 3.0,
-            heavy_per_day: 3.0,
-            multi_model_share: 0.04,
+            parallel_share: 0.6,  // 0.6 / 0.40 = 1.5
+            autonomy_ratio: 0.15, // 0.15 / 0.10 = 1.5 (tie)
+            multi_model_share: 0.09,
             tokens_per_day: 450_000_000.0,
             window_active_days: 25,
         };
-        // Not AllRounder (multi under bar); with equal normalised parallel/heavy
-        // strength the tie falls to Control.
         assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Control));
     }
 
-    /// A combined summary that lands `AllRounder` R1 (`Lion`): parallel, heavy,
-    /// multi-model, top-row volume.
+    /// A combined summary that lands `AllRounder` R1 (`Lion`). `sample_summary`
+    /// already carries a parallel (≈0.61 of time at 2+) and autonomous (≈0.15 of
+    /// completions 20m+) profile; add the multi-model balance and top-row volume.
     fn all_rounder_combined() -> Summary {
         let mut s = crate::share::fixtures::sample_summary();
-        s.orchestration.avg_concurrency = 3.0; // parallel
-        s.active_days = 30;
-        if let Some(duration) = s.completion_duration.as_mut() {
-            // tail (20m+) buckets → unattended 60 / 30 days = 2.0/day ≥ SOLO_MIN
-            duration.buckets[3].count = 30;
-            duration.buckets[4].count = 20;
-            duration.buckets[5].count = 10;
-        }
         s.recent_window_provider_min_share = 0.2; // multi-model
         s.recent_window_volume = 800_000_000 * CODENAME_WINDOW_DAYS as u64; // R1
         s.recent_window_active_days = 29;
@@ -469,41 +513,35 @@ mod tests {
     }
 
     #[test]
-    fn parallel_heavy_tab_reaches_all_rounder_via_src_multi() {
-        // A parallel + heavy single-provider tab has multi-model share 0 on its
-        // own, so alone it can't be AllRounder. Borrowing the combined multi
-        // signal lets it reach AllRounder at its own row → R3 = Swallow.
+    fn tab_shows_combined_style_at_own_row() {
+        // STYLE is whole-person (from the combined summary); only the row is
+        // per-tab. A lower-volume tab of an AllRounder shows the AllRounder column
+        // at its own row → R3 = Swallow.
         let combined = all_rounder_combined();
-        let mut tab = combined.clone(); // keeps parallel (3.0) + heavy (2.0/day)
+        let mut tab = combined.clone();
         tab.provider = crate::model::Provider::Claude;
-        tab.recent_window_provider_min_share = 0.0; // single provider in isolation
         tab.recent_window_volume = 200_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
 
         assert_eq!(for_summary_styled(&tab, &combined).animal, "Swallow");
-        // Scored alone it is not AllRounder (no multi-model share).
-        assert_ne!(for_summary(&tab).animal, "Swallow");
     }
 
     #[test]
-    fn non_parallel_tab_is_not_all_rounder_even_with_multi_src() {
-        // The Codex-tab case: you barely parallelise that agent. Even though the
-        // combined view is AllRounder, parallel/heavy are read per-tab, so a tab
-        // that is neither stays Scout — it does not inherit AllRounder.
+    fn non_parallel_tab_still_inherits_combined_style() {
+        // Even a tab you never parallelise inherits the combined style word —
+        // parallelism is measured across all agents at once, so the per-agent
+        // breakdown doesn't override your whole-person identity. R3 AllRounder =
+        // Swallow, regardless of this tab's own (flat) concurrency.
         let combined = all_rounder_combined();
         let mut tab = combined.clone();
-        tab.orchestration.avg_concurrency = 1.0; // not parallel
+        tab.orchestration.time_by_level = [10_000, 0, 0, 0, 0, 0]; // 0% at 2+ alone
         if let Some(duration) = tab.completion_duration.as_mut() {
-            duration.buckets[3].count = 0; // and not heavy
+            duration.buckets[3].count = 0; // and no long runs alone
             duration.buckets[4].count = 0;
             duration.buckets[5].count = 0;
         }
-        tab.recent_window_provider_min_share = 0.0;
         tab.recent_window_volume = 200_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
 
-        assert_eq!(
-            for_summary_styled(&tab, &combined).animal,
-            animal_for(Style::Scout, 3),
-        );
+        assert_eq!(for_summary_styled(&tab, &combined).animal, "Swallow");
     }
 
     #[test]

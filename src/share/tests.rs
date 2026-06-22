@@ -111,22 +111,17 @@ fn caption_includes_headline_and_repo() {
 #[test]
 fn card_codename_uses_style_source() {
     // The shared card's codename must match the tab badge: a provider tab card
-    // takes its style from the Total summary, not the provider alone.
+    // takes its style from the Total summary, not the provider alone. sample_summary
+    // already has a parallel + autonomous profile; make it multi-model + top row so
+    // the combined view is AllRounder, then build a lower-volume tab from it.
     let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
     let mut combined = sample_summary();
-    combined.orchestration.avg_concurrency = 3.0; // parallel
-    combined.active_days = 30;
-    if let Some(duration) = combined.completion_duration.as_mut() {
-        duration.buckets[3].count = 30; // 60 unattended / 30 days = 2.0/day → heavy
-        duration.buckets[4].count = 20;
-        duration.buckets[5].count = 10;
-    }
-    combined.recent_window_provider_min_share = 0.2; // multi-model
+    combined.recent_window_provider_min_share = 0.2; // multi-model → AllRounder
     combined.recent_window_volume = 800_000_000 * window; // R1
     combined.recent_window_active_days = 29;
 
     let mut tab = combined.clone();
-    tab.recent_window_provider_min_share = 0.0; // provider alone can't be AllRounder
+    tab.recent_window_provider_min_share = 0.0; // provider alone isn't multi-model
     tab.recent_window_volume = 200_000_000 * window; // R3
 
     let styled = ShareCard::from_summary_styled(&tab, &combined);

@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how people actually run their agents. **Most people's codename will change.**
   The exact rule stays undisclosed by design — the title is the only thing
   surfaced.
-- Each provider tab's working-style word now reflects how you run that agent,
-  with its animal scaled by that provider's volume. The all-rounder style can be
-  earned on any tab — including the per-provider ones — not just the Total.
+- The working-style word now reads how you work across *all* your agents
+  combined (so running several at once counts), and is measured so it doesn't
+  simply climb with volume. It's the same word on every tab — your identity —
+  while each tab's animal is scaled by that provider's volume.
 - Renamed the "Combined" tab to "Total".
 - Provider tabs are now data-driven: only agents you actually use get a tab, and
   they're ordered by how much you use them (most-used first, Total last). An
