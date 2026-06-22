@@ -4,6 +4,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Wait three days before opening a PR for a fresh release. A brand-new
+    # version is the riskiest window for a typosquat or a compromised
+    # publish (the `xz-utils` style of incident); this gives the ecosystem
+    # time to flag it before it lands here. Major bumps wait a week.
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
@@ -11,3 +18,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
