@@ -43,6 +43,18 @@ pub(crate) struct Grass {
 }
 
 impl ShareCard {
+    /// Build a card for `summary`. The codename uses `summary` as its own style
+    /// source — correct for the combined/Total summary, which is what the CLI
+    /// `--share` path passes.
+    pub fn from_summary(summary: &Summary) -> Self {
+        Self::from_summary_styled(summary, summary)
+    }
+
+    /// Like [`Self::from_summary`], but the codename's working-style word is
+    /// taken from `style_src` (the combined/Total summary) while the rest of the
+    /// card describes `summary`. The interactive share path uses this so a
+    /// provider tab's card shows the same codename as the tab's badge — only the
+    /// combined summary carries the multi-model signal an `AllRounder` needs.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -53,7 +65,7 @@ impl ShareCard {
         clippy::too_many_lines,
         reason = "Flat extraction of every card stat in one pass."
     )]
-    pub fn from_summary(summary: &Summary) -> Self {
+    pub fn from_summary_styled(summary: &Summary, style_src: &Summary) -> Self {
         let total = summary.total_usage.token_volume();
         let cost: f64 = summary
             .model_daily
@@ -130,7 +142,7 @@ impl ShareCard {
             )
         });
 
-        let codename = crate::codename::for_summary(summary);
+        let codename = crate::codename::for_summary_styled(summary, style_src);
         Self {
             codename: codename.title(),
             ops: codename.ops.to_owned(),
