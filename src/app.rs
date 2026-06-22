@@ -82,7 +82,10 @@ pub struct Config {
     pub demo: bool,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
-    pub agy_dir: PathBuf,
+    /// Resolved only when `agy` is on. Skipping the home/default lookup here
+    /// lets agent-walker still start in environments where `dirs::home_dir()`
+    /// can't resolve, as long as the user isn't asking for Antigravity data.
+    pub agy_dir: Option<PathBuf>,
     /// Antigravity collection is opt-in (`--agy`); off by default because the
     /// logs carry no token usage.
     pub agy: bool,
@@ -109,9 +112,21 @@ pub fn run(args: Args) -> Result<()> {
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let config = Config {
         demo: demo_enabled(),
-        claude_dir: args.claude_dir.unwrap_or(default_claude_dir()?),
-        codex_dir: args.codex_dir.unwrap_or(default_codex_dir()?),
-        agy_dir: args.agy_dir.unwrap_or(default_agy_dir()?),
+        // `map_or_else(default, Ok)` keeps the default lazy, so a `--claude-dir`
+        // / `--codex-dir` / `--agy-dir` override on the CLI still works even
+        // when `dirs::home_dir()` can't resolve (sandbox / no `$HOME` /
+        // `%USERPROFILE%`). Eagerly calling `default_*_dir()?` would short-
+        // circuit before the CLI override ever got a chance.
+        claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
+        codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
+        // agy is opt-in via --agy; if it's off we never need agy_dir, so
+        // skip the home lookup entirely. A --agy-dir without --agy is
+        // preserved verbatim (cheap, no resolution) but ignored downstream.
+        agy_dir: if args.agy {
+            Some(args.agy_dir.map_or_else(default_agy_dir, Ok)?)
+        } else {
+            args.agy_dir
+        },
         agy: args.agy,
         days: args.days,
         use_cache: !args.no_cache,
@@ -216,14 +231,13 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         // Antigravity is opt-in (`--agy`): its logs carry no token usage, so it
         // is left out of the default report rather than skewing the totals.
         let agy_handle = scope.spawn(|| {
-            config.agy.then(|| {
-                agy::collect(
-                    &config.agy_dir,
-                    mtime_floor,
-                    config.use_cache,
-                    config.local_offset,
-                )
-            })
+            // `config.agy` and `config.agy_dir` agree by construction: when
+            // `agy` is true `agy_dir` is `Some`; when it's false we skip both.
+            config
+                .agy
+                .then_some(config.agy_dir.as_ref())
+                .flatten()
+                .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
         });
         let claude_collection = claude::collect(
             &config.claude_dir,
@@ -263,17 +277,15 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
 }
 
 fn default_claude_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?.join(".claude").join("projects"))
+    Ok(crate::paths::claude_home()?.join("projects"))
 }
 
 fn default_codex_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?.join(".codex").join("sessions"))
+    Ok(crate::paths::codex_home()?.join("sessions"))
 }
 
 fn default_agy_dir() -> Result<PathBuf> {
-    Ok(crate::paths::home_dir()?
-        .join(".gemini")
-        .join("antigravity-cli"))
+    crate::paths::agy_home()
 }
 
 fn demo_enabled() -> bool {

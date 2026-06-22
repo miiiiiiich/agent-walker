@@ -60,7 +60,7 @@ bunx agent-walker
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
 | `--agy` | Antigravity も読む（既定オフ） |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
-| `--claude-dir` / `--codex-dir` / `--agy-dir` | 非標準のログ場所を指定 |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` も自動で読む） |
 | `--completions <shell>` | シェル補完を出力して終了 |
 
 ## codename を共有
