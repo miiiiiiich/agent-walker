@@ -113,38 +113,16 @@ const GRID: [[&str; 4]; 6] = [
     ["Ant", "Firefly", "Butterfly", "Bee"],  // R6
 ];
 
-/// SCOUT = "explore / research" share of (research + build) tool calls. High =
-/// investigating & reading, low = constructing. Any `mcp__*` tool also counts as
+/// SCOUT = share of *outward* knowledge lookups in (research + build) tool
+/// calls. High = pulling in external context (web, MCP, image content), low =
+/// constructing. Reading or grepping local source is intentionally NOT
+/// counted: every implementation pass starts by reading what's there, so
+/// folding `Read`/`Grep`/`Glob` (and the shell equivalents) into "research"
+/// flips the verdict for heavy implementers — the more code they read before
+/// editing, the more "Scout" they look. We keep the axis narrow to "went
+/// outside the repo for information". Any `mcp__*` tool also counts as
 /// research (matched by prefix in `research_calls`).
-const RESEARCH_TOOLS: [&str; 26] = [
-    "Read",
-    "Grep",
-    "Glob",
-    "WebFetch",
-    "WebSearch",
-    "view_image",
-    // Codex shell commands decomposed by the collector (read/inspect side).
-    "cat",
-    "less",
-    "head",
-    "tail",
-    "grep",
-    "rg",
-    "egrep",
-    "fgrep",
-    "ls",
-    "find",
-    "fd",
-    "tree",
-    "wc",
-    "stat",
-    "file",
-    "jq",
-    "diff",
-    "sed",
-    "awk",
-    "cut",
-];
+const RESEARCH_TOOLS: [&str; 3] = ["WebFetch", "WebSearch", "view_image"];
 const BUILD_TOOLS: [&str; 28] = [
     "Edit",
     "Write",
@@ -464,6 +442,28 @@ mod tests {
         };
         assert_eq!(classify(&m), Some((Style::AllRounder, 1)));
         assert_eq!(animal_for(Style::AllRounder, 1), "Lion");
+    }
+
+    #[test]
+    fn research_tools_are_outward_lookups_only() {
+        // Reading or grepping local source is the entry point for *building*,
+        // not a signal of being a scout. Folding `Read` / `Grep` / `Glob` (and
+        // the shell equivalents) into the SCOUT axis flipped the verdict for
+        // heavy implementers — the more code they read before editing, the
+        // more Scout they looked. Keep the axis narrow to "went outside the
+        // repo for information".
+        for forbidden in ["Read", "Grep", "Glob", "cat", "grep", "ls", "find", "rg"] {
+            assert!(
+                !RESEARCH_TOOLS.contains(&forbidden),
+                "{forbidden} must not count toward SCOUT",
+            );
+        }
+        for outward in ["WebFetch", "WebSearch", "view_image"] {
+            assert!(
+                RESEARCH_TOOLS.contains(&outward),
+                "{outward} should count toward SCOUT",
+            );
+        }
     }
 
     #[test]

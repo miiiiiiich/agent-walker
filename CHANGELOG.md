@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-22
+
+### Changed
+
+- Narrow the codename's SCOUT axis to outward knowledge lookups
+  (`WebFetch` / `WebSearch` / `view_image` plus any `mcp__*` tool). Reading
+  or grepping local source — `Read` / `Grep` / `Glob` and the shell
+  equivalents — is no longer treated as "research", because every
+  implementation pass starts by reading what's there and folding those
+  calls into SCOUT was misclassifying heavy implementers. Most users keep
+  their codename; the change only matters for the borderline between a
+  Scout title and a Control / Solo / AllRounder one.
+
 ## [0.3.0] - 2026-06-21
 
 ### Added
@@ -65,6 +78,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.3.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.0
 [0.2.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.1
 [0.2.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.0
