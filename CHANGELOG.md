@@ -10,13 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Narrow the codename's SCOUT axis to outward knowledge lookups
-  (`WebFetch` / `WebSearch` / `view_image` plus any `mcp__*` tool). Reading
-  or grepping local source — `Read` / `Grep` / `Glob` and the shell
-  equivalents — is no longer treated as "research", because every
-  implementation pass starts by reading what's there and folding those
-  calls into SCOUT was misclassifying heavy implementers. Most users keep
-  their codename; the change only matters for the borderline between a
-  Scout title and a Control / Solo / AllRounder one.
+  (`WebFetch` / `WebSearch` / `view_image` / Codex's `web_search`, plus any
+  `mcp__*` tool). Reading or grepping local source — `Read` / `Grep` /
+  `Glob` and the shell equivalents — is no longer treated as "research",
+  because every implementation pass starts by reading what's there and
+  folding those calls into SCOUT was misclassifying heavy implementers.
+  Most users keep their codename; the change only matters for the
+  borderline between a Scout title and a Control / Solo / AllRounder one.
+- Swap **Puma** (now R3 Solo) and **Eel** (now R5 Scout) in the codename
+  grid. The animal hierarchy now matches everyone's intuition — a top
+  feline outranks an eel. Users whose row × style happened to land in
+  either cell will see their codename word change accordingly.
 
 ## [0.3.0] - 2026-06-21
 

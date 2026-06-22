@@ -107,9 +107,9 @@ const OPS_DOMINANCE_PT: f64 = 15.0;
 const GRID: [[&str; 4]; 6] = [
     ["Hound", "Fox", "Doberman", "Lion"],    // R1
     ["Octopus", "Wolf", "Orca", "Hawk"],     // R2
-    ["Raven", "Eel", "Whale", "Swallow"],    // R3
+    ["Raven", "Puma", "Whale", "Swallow"],   // R3
     ["Scorpion", "Piranha", "Bear", "Gull"], // R4
-    ["Cat", "Kangaroo", "Puma", "Deer"],     // R5
+    ["Cat", "Kangaroo", "Eel", "Deer"],      // R5
     ["Ant", "Firefly", "Butterfly", "Bee"],  // R6
 ];
 
