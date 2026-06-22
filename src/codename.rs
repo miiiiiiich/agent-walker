@@ -1,20 +1,21 @@
 //! Codename: a playful vanity title derived from a usage `Summary`.
 //!
 //! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Hawk". The ANIMAL encodes a 6×4
-//! grid — **ROW = token throughput (the level), COLUMN = working style**
-//! (`Control` = parallel / `Solo` = autonomy-led / `Scout` = neither /
-//! `AllRounder` = parallel + autonomy + multi-model) — so one word carries both
-//! how much and what kind. OPS is the dominant time-of-day. "Chick" is the
-//! no-data floor.
+//! grid — **ROW = token throughput (how much), COLUMN = AI-mastery tier (how
+//! well)**. The four ascending tiers are `Scout` → `Control` → `Solo` →
+//! `AllRounder`, so one word carries both how much and how skilfully. OPS is the dominant
+//! time-of-day. "Chick" is the no-data floor.
 //!
-//! ROW and STYLE are independent: ROW is volume (tokens/day over the most recent
-//! 30 days, fixed regardless of the display `--days`), while STYLE uses flat
-//! per-axis thresholds that don't change with the row. The style axes are
-//! *ratios* (share of time at 2+ concurrent, share of completions that ran long,
-//! provider balance), not magnitudes — magnitudes rise with volume and would
-//! collapse the top rows into one style, whereas ratios measure *how* you work
-//! independently of *how much*. STYLE is also whole-person: it's measured across
-//! every agent combined, so running several agents at once counts as parallel.
+//! ROW and the mastery score are independent: ROW is volume (tokens/day over the
+//! most recent 30 days, fixed regardless of the display `--days`). The mastery
+//! score is a blend of *ratios* (share of time at 2+ concurrent, share of
+//! completions that ran long, provider balance), not magnitudes — magnitudes
+//! rise with volume and would collapse the top rows into one tier, whereas ratios
+//! measure *how* you work independently of *how much*. One ordered score (rather
+//! than a 2×2 of binary axes) keeps people spread across tiers instead of piling
+//! at the "casual" and "does-everything" corners. The score is also whole-person:
+//! measured across every agent combined, so running several agents at once counts
+//! as parallel.
 //!
 //! All numeric cut-offs live in the one block below and are meant to be easy to
 //! retune. They are never surfaced in the UI — only the final title is — so the
@@ -31,15 +32,18 @@ use crate::model::{DurationSummary, Orchestration, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
-    /// Parallel — a large share of time spent at 2+ concurrent sessions.
+    // The four variants are ascending AI-mastery tiers, not independent
+    // archetypes: Scout < Control < Solo < AllRounder. They name the cell column;
+    // the row stays token volume.
+    /// Mastery tier 2 of 4.
     Control,
-    /// Autonomy-led — a large share of completions ran 20m+ unattended.
+    /// Mastery tier 3 of 4.
     Solo,
-    /// Neither parallel nor autonomy-led — a plain / general way of working.
+    /// Mastery tier 1 of 4 (lowest) — a plain / general way of working.
     Scout,
-    /// Parallel AND autonomy-led AND multi-model at once — the orchestration
-    /// profile. The displayed row still comes from token throughput, so a
-    /// low-throughput all-rounder lands at a low row. Rare by construction.
+    /// Mastery tier 4 of 4 (highest) — drives agents most skilfully. The row
+    /// still comes from token throughput, so a low-throughput master lands at a
+    /// low row.
     AllRounder,
 }
 
@@ -100,14 +104,23 @@ const TOKENS_PER_DAY: [f64; 6] = [
     500_000.0,     // R6
 ];
 
-/// STYLE thresholds — flat, row-independent, all volume-normalised.
-/// Parallel: share of active wall-time spent at 2+ concurrent sessions.
-const PARALLEL_MIN: f64 = 0.40;
-/// Autonomy (Solo): share of task completions that ran 20m+ unattended.
-const AUTONOMY_MIN: f64 = 0.10;
-/// Multi-model: the smaller provider's share of `Claude`+`Codex` volume.
-/// At/above this you're not leaning on a single model. Required for `AllRounder`.
-const MULTI_MIN: f64 = 0.10;
+// STYLE is one ordered "AI-mastery" score in 0..1 — a blend of volume-independent
+// ratios for *how skilfully* the agents are driven — split into 4 ascending tiers
+// (Scout < Control < Solo < AllRounder). One ordered score (not a 2×2 of binary
+// axes) is what keeps the distribution from collapsing into just "casual" and
+// "does-everything": people spread along the blend instead of piling at two
+// corners. Each component is scaled so its "fully maxed" value clamps to 1.0.
+
+/// 60%+ of active time at 2+ concurrent sessions reads as fully parallel.
+const PARALLEL_FULL: f64 = 0.60;
+/// 30%+ of completions running 20m+ reads as fully autonomy-led.
+const AUTONOMY_FULL: f64 = 0.30;
+/// 25%+ minority provider share (≈ an even Claude/Codex split) reads as fully
+/// multi-model. The share itself maxes at 0.5 (a perfect split).
+const MULTI_FULL: f64 = 0.25;
+/// Tier cut-offs on the 0..1 mastery score: below `[0]` = `Scout`, then
+/// `Control`, `Solo`, and `[2]`+ = `AllRounder`.
+const MASTERY_TIERS: [f64; 3] = [0.20, 0.45, 0.70];
 
 /// Low-sample guards: a ratio is only trusted with enough underneath it, so a
 /// thin sample (one long run, a few minutes of activity) can't read as a
@@ -124,9 +137,11 @@ const CHICK_MIN_DAYS: usize = 3;
 /// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
-/// 6×4 animal grid: `[row R1..R6][Control, Solo, Scout, AllRounder]`. The row
-/// is volume; the column is working style. Scout is the no-specialization
-/// column (neither parallel nor heavy), so it reads as the "general" use.
+/// 6×4 animal grid: `[row R1..R6][Control, Solo, Scout, AllRounder]`. The row is
+/// volume; the column is the mastery tier. The array column order is historical
+/// (`Control, Solo, Scout, AllRounder`); `animal_for` maps each ascending tier
+/// to its column, so the *ascending* mastery order is Scout → Control → Solo →
+/// AllRounder (the apex, e.g. Lion at R1). Animal placements are unchanged.
 const GRID: [[&str; 4]; 6] = [
     ["Hound", "Fox", "Doberman", "Lion"],    // R1
     ["Octopus", "Wolf", "Orca", "Hawk"],     // R2
@@ -251,36 +266,34 @@ fn is_chick(m: &Metrics) -> bool {
     m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS
 }
 
-/// The working-style column — how the agents are run, independent of volume.
-/// The displayed row still comes from token throughput, so a low-throughput
-/// all-rounder lands at a low row.
-///
-/// - `AllRounder` — parallel AND autonomous AND multi-model. The orchestration
-///   profile: lots at once, long unattended runs, and not on a single model.
-/// - `Control` — parallel but not autonomy-led (or both, but single-model).
-/// - `Solo` — autonomy-led but not parallel.
-/// - `Scout` — neither: a plain / general way of working.
-fn style_of(m: &Metrics) -> Style {
-    let parallel = m.parallel_share >= PARALLEL_MIN;
-    let heavy = m.autonomy_ratio >= AUTONOMY_MIN;
-    let multi = m.multi_model_share >= MULTI_MIN;
+/// The AI-mastery score in `0..1`: how skilfully the agents are driven, blended
+/// from volume-independent ratios so it reads "how well" not "how much". v1 is an
+/// even average of three components, each scaled so its `*_FULL` value maxes at
+/// 1.0: parallelism, autonomy, and model balance. (Harness leverage — skill /
+/// MCP / subagent density — is a candidate fourth component but needs a
+/// non-brittle tool classification first, so it's deliberately out of v1.)
+fn mastery(m: &Metrics) -> f64 {
+    let norm = |value: f64, full: f64| (value / full).clamp(0.0, 1.0);
+    let parallel = norm(m.parallel_share, PARALLEL_FULL);
+    let autonomy = norm(m.autonomy_ratio, AUTONOMY_FULL);
+    let multi = norm(m.multi_model_share, MULTI_FULL);
+    (parallel + autonomy + multi) / 3.0
+}
 
-    match (parallel, heavy) {
-        (true, true) if multi => Style::AllRounder,
-        // Both specialised but single-model: fall to the stronger of the two.
-        // Cross-multiplied form of `autonomy/AUTONOMY_MIN > parallel/PARALLEL_MIN`
-        // — avoids float division and stays correct if the thresholds ever
-        // diverge or go to zero. Ties favour Control.
-        (true, true) => {
-            if m.autonomy_ratio * PARALLEL_MIN > m.parallel_share * AUTONOMY_MIN {
-                Style::Solo
-            } else {
-                Style::Control
-            }
-        }
-        (true, false) => Style::Control,
-        (false, true) => Style::Solo,
-        (false, false) => Style::Scout,
+/// The mastery score banded into the 4 ascending style tiers. The column word is
+/// a tier label, not a working-style archetype: `Scout` (lowest) → `Control` →
+/// `Solo` → `AllRounder` (highest). The displayed row still comes from token
+/// throughput, so a low-throughput master lands at a low row.
+fn style_of(m: &Metrics) -> Style {
+    let score = mastery(m);
+    if score >= MASTERY_TIERS[2] {
+        Style::AllRounder
+    } else if score >= MASTERY_TIERS[1] {
+        Style::Solo
+    } else if score >= MASTERY_TIERS[0] {
+        Style::Control
+    } else {
+        Style::Scout
     }
 }
 
@@ -392,12 +405,13 @@ mod tests {
     }
 
     #[test]
-    fn parallel_only_lands_control() {
-        // Parallel over the bar, autonomy under it → Control regardless of model mix.
+    fn low_mastery_lands_control_tier() {
+        // One component moderately high (parallel 0.5 → 0.83 of full), the rest
+        // zero → mastery ≈ 0.28, the Control tier (tier 2 of 4).
         let m = Metrics {
-            parallel_share: 0.8,
-            autonomy_ratio: 0.02,
-            multi_model_share: 0.4,
+            parallel_share: 0.5,
+            autonomy_ratio: 0.0,
+            multi_model_share: 0.0,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
@@ -406,12 +420,13 @@ mod tests {
     }
 
     #[test]
-    fn heavy_only_lands_solo() {
-        // Most completions ran long, low concurrency share → Solo.
+    fn two_components_high_lands_solo_tier() {
+        // Parallel + autonomy both maxed, single-model → mastery ≈ 0.67, the Solo
+        // tier (tier 3) — just short of the top.
         let m = Metrics {
-            parallel_share: 0.1,
-            autonomy_ratio: 0.5,
-            multi_model_share: 0.4,
+            parallel_share: 0.6,
+            autonomy_ratio: 0.3,
+            multi_model_share: 0.0,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
@@ -420,13 +435,13 @@ mod tests {
     }
 
     #[test]
-    fn neither_axis_lands_scout() {
-        // Plain / general use: not parallel, not autonomy-led. Multi-model alone
-        // does not promote out of Scout.
+    fn nearly_nothing_lands_scout_tier() {
+        // A trickle on every component → mastery below the first cut-off → Scout
+        // (lowest tier). A single high component does not by itself escape Scout.
         let m = Metrics {
-            parallel_share: 0.2,
+            parallel_share: 0.1,
             autonomy_ratio: 0.02,
-            multi_model_share: 0.4,
+            multi_model_share: 0.05,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 18,
         };
@@ -435,12 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn parallel_heavy_and_multi_is_all_rounder() {
-        // Parallel AND autonomous AND multi-model → the orchestration profile.
+    fn all_components_high_is_all_rounder() {
+        // Every component at/above its full mark → mastery ≈ 1.0 → AllRounder.
         let m = Metrics {
             parallel_share: 0.6,
             autonomy_ratio: 0.3,
-            multi_model_share: 0.10,
+            multi_model_share: 0.25,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
         };
@@ -449,17 +464,17 @@ mod tests {
     }
 
     #[test]
-    fn parallel_and_heavy_but_single_model_is_not_all_rounder() {
-        // Both axes clear the bar, but everything came from one provider → it
-        // falls to the stronger single axis instead of AllRounder.
+    fn single_model_caps_below_all_rounder() {
+        // Parallel + autonomy maxed but one provider only (multi 0) → mastery
+        // 0.67, capped at the Solo tier. Model balance is needed for the apex.
         let m = Metrics {
-            parallel_share: 0.6, // 0.6 / 0.40 = 1.50
-            autonomy_ratio: 0.3, // 0.3 / 0.10 = 3.00 (stronger)
+            parallel_share: 0.9,
+            autonomy_ratio: 0.5,
             multi_model_share: 0.0,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
         };
-        assert_eq!(classify(&m), Some((Style::Solo, 2)));
+        assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Solo));
     }
 
     #[test]
@@ -476,18 +491,24 @@ mod tests {
     }
 
     #[test]
-    fn multi_model_just_under_threshold_is_not_all_rounder() {
-        // 9% minority share is below the 10% multi bar → not AllRounder even with
-        // both implementation axes cleared. With equal normalised
-        // parallel/autonomy strength the tie falls to Control.
-        let m = Metrics {
-            parallel_share: 0.6,  // 0.6 / 0.40 = 1.5
-            autonomy_ratio: 0.15, // 0.15 / 0.10 = 1.5 (tie)
-            multi_model_share: 0.09,
-            tokens_per_day: 450_000_000.0,
-            window_active_days: 25,
-        };
-        assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Control));
+    fn mastery_is_monotonic_in_each_component() {
+        // Raising any one component never lowers the score — sanity on the blend.
+        let lo = mastery(&base());
+        let up_parallel = mastery(&Metrics {
+            parallel_share: 0.6,
+            ..base()
+        });
+        let up_autonomy = mastery(&Metrics {
+            autonomy_ratio: 0.3,
+            ..base()
+        });
+        let up_multi = mastery(&Metrics {
+            multi_model_share: 0.25,
+            ..base()
+        });
+        assert!(up_parallel > lo && up_autonomy > lo && up_multi > lo);
+        // Each maxed component contributes a third of the score.
+        assert!((up_parallel - 1.0 / 3.0).abs() < 1e-9);
     }
 
     /// A combined summary that lands `AllRounder` R1 (`Lion`). `sample_summary`
