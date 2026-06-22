@@ -30,11 +30,11 @@ pub enum Style {
     Control,
     /// Heavy — runs many long, unattended tasks.
     Solo,
-    /// Research — reading/exploring more than building.
+    /// Neither parallel nor heavy — a plain / general way of working.
     Scout,
-    /// High on both parallel AND heavy at once (gated on those two style axes
-    /// only; the displayed row still comes from token throughput, so a
-    /// low-throughput all-rounder lands at a low row). Rare by construction.
+    /// Parallel AND heavy AND multi-model at once — the orchestration profile.
+    /// The displayed row still comes from token throughput, so a low-throughput
+    /// all-rounder lands at a low row. Rare by construction.
     AllRounder,
 }
 
@@ -131,16 +131,31 @@ struct Metrics {
 /// Public entry: derive the codename for a summary. Computed on demand at
 /// display time, never stored, so the analyzer stays free of vanity logic.
 pub fn for_summary(summary: &Summary) -> Codename {
-    let metrics = metrics(summary);
-    match classify(&metrics) {
-        None => Codename {
+    for_summary_styled(summary, summary)
+}
+
+/// Like [`for_summary`], but the working-style column is taken from `style_src`
+/// while the row, the OPS prefix, and the Chick floor come from `summary`.
+///
+/// The UI passes the combined summary as `style_src` so the style word stays the
+/// same across provider tabs while each tab still surfaces its own animal by
+/// volume. `AllRounder` in particular needs the multi-model share, which only
+/// the combined summary carries — without this a single-provider tab could never
+/// reach it. When `summary` is the combined one this is identical to
+/// `for_summary`.
+pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
+    let m = metrics(summary);
+    if is_chick(&m) {
+        return Codename {
             ops: "Eclipse",
             animal: CHICK,
-        },
-        Some((style, row)) => Codename {
-            ops: ops(&summary.hourly_usage),
-            animal: animal_for(style, row),
-        },
+        };
+    }
+    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
+    let style = style_of(&metrics(style_src));
+    Codename {
+        ops: ops(&summary.hourly_usage),
+        animal: animal_for(style, row),
     }
 }
 
@@ -180,28 +195,26 @@ fn tokens_per_day(summary: &Summary) -> f64 {
     summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64
 }
 
-/// `None` => Chick. Otherwise `(style column, row 1..=6)`. The ROW is the token
-/// level (volume only); the STYLE is how the agents are run. They are
-/// independent.
+/// Below either floor the user has no real data yet → Chick.
+fn is_chick(m: &Metrics) -> bool {
+    m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS
+}
+
+/// The working-style column — how the agents are run, independent of volume.
+/// The displayed row still comes from token throughput, so a low-throughput
+/// all-rounder lands at a low row.
 ///
-/// STYLE:
 /// - `AllRounder` — parallel AND heavy AND multi-model. The orchestration
 ///   profile: many at once, long unattended runs, and not on a single model.
 /// - `Control` — parallel but not heavy (or both, but single-model).
 /// - `Solo` — heavy but not parallel.
 /// - `Scout` — neither: a plain / general way of working.
-fn classify(m: &Metrics) -> Option<(Style, usize)> {
-    if m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS {
-        return None;
-    }
-
-    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
-
+fn style_of(m: &Metrics) -> Style {
     let parallel = m.control >= PARALLEL_MIN;
     let heavy = m.heavy_per_day >= SOLO_MIN;
     let multi = m.multi_model_share >= MULTI_MIN;
 
-    let style = match (parallel, heavy) {
+    match (parallel, heavy) {
         (true, true) if multi => Style::AllRounder,
         // Both specialised but single-model: fall to the stronger of the two
         // (normalised against their shared threshold; ties favour Control).
@@ -215,9 +228,19 @@ fn classify(m: &Metrics) -> Option<(Style, usize)> {
         (true, false) => Style::Control,
         (false, true) => Style::Solo,
         (false, false) => Style::Scout,
-    };
+    }
+}
 
-    Some((style, row))
+/// Combined view used by the tests: `None` => Chick, otherwise `(style, row
+/// 1..=6)`. ROW is volume only; STYLE is how the agents are run. They are
+/// independent.
+#[cfg(test)]
+fn classify(m: &Metrics) -> Option<(Style, usize)> {
+    if is_chick(m) {
+        return None;
+    }
+    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
+    Some((style_of(m), row))
 }
 
 /// First row (1..=6) whose threshold `raw` clears, or 7 if below the grid.
@@ -414,6 +437,53 @@ mod tests {
             classify(&m).map(|(style, _)| style),
             Some(Style::AllRounder),
         );
+    }
+
+    /// A combined summary that lands `AllRounder` R1 (`Lion`): parallel, heavy,
+    /// multi-model, top-row volume.
+    fn all_rounder_combined() -> Summary {
+        let mut s = crate::share::fixtures::sample_summary();
+        s.orchestration.avg_concurrency = 3.0; // parallel
+        s.active_days = 30;
+        if let Some(duration) = s.completion_duration.as_mut() {
+            // tail (20m+) buckets → unattended 60 / 30 days = 2.0/day ≥ SOLO_MIN
+            duration.buckets[3].count = 30;
+            duration.buckets[4].count = 20;
+            duration.buckets[5].count = 10;
+        }
+        s.recent_window_provider_min_share = 0.2; // multi-model
+        s.recent_window_volume = 800_000_000 * CODENAME_WINDOW_DAYS as u64; // R1
+        s.recent_window_active_days = 29;
+        s
+    }
+
+    #[test]
+    fn combined_all_rounder_is_lion() {
+        assert_eq!(for_summary(&all_rounder_combined()).animal, "Lion");
+    }
+
+    #[test]
+    fn style_comes_from_src_row_from_tab() {
+        // A single-provider tab (multi-model share 0) at R3 volume would never
+        // reach AllRounder on its own, but inherits the combined style word while
+        // keeping its own row → AllRounder R3 = Swallow.
+        let combined = all_rounder_combined();
+        let mut tab = combined.clone();
+        tab.provider = crate::model::Provider::Claude;
+        tab.recent_window_provider_min_share = 0.0; // single provider in isolation
+        tab.recent_window_volume = 200_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
+
+        assert_eq!(for_summary_styled(&tab, &combined).animal, "Swallow");
+        // Scored alone it is not AllRounder (no multi-model share).
+        assert_ne!(for_summary(&tab).animal, "Swallow");
+    }
+
+    #[test]
+    fn tab_below_floor_is_chick_regardless_of_src_style() {
+        let combined = all_rounder_combined();
+        let mut tab = combined.clone();
+        tab.recent_window_volume = 100_000 * CODENAME_WINDOW_DAYS as u64; // below floor
+        assert_eq!(for_summary_styled(&tab, &combined).animal, CHICK);
     }
 
     #[test]

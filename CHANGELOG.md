@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how people actually run their agents. **Most people's codename will change.**
   The exact rule stays undisclosed by design — the title is the only thing
   surfaced.
+- The working-style word is now consistent across every provider tab — it
+  reflects how you work overall. Each tab still shows its own animal, scaled by
+  that provider's volume.
+- Renamed the "Combined" tab to "Total".
+- Provider tabs are now data-driven: only agents you actually use get a tab, and
+  they're ordered by how much you use them (most-used first, Total last). An
+  empty agent no longer shows a blank tab.
+- Antigravity is auto-detected — its tab appears whenever its logs are present,
+  with no flag to set. It stays activity-only (no token usage), so it never
+  affects the token totals and sorts last.
+
+### Removed
+
+- The `--agy` flag. Antigravity is now detected automatically; use `--agy-dir`
+  to point at a non-standard location.
 
 ## [0.3.1] - 2026-06-22
 

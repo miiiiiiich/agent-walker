@@ -45,9 +45,9 @@ bunx agent-walker
 
 | キー | 動作 |
 |---|---|
-| `←` `→` / `h` `l` / `Tab` | プロバイダ切替（API換算コストの多い順・Combined 最後） |
+| `←` `→` / `h` `l` / `Tab` | プロバイダ切替（データのあるものだけ・使用量の多い順・Total 最後） |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` | スクロール |
-| `1`–`4` | タブへジャンプ |
+| `1`–`9` | タブへジャンプ |
 | `r` | リロード |
 | `s` | カードを共有（画像コピー / OS の Downloads フォルダに保存） |
 | `q` / `Esc` / `Ctrl-C` | 終了 |
@@ -58,7 +58,6 @@ bunx agent-walker
 |---|---|
 | `--days <N>` | グラフの集計期間（既定 30。codename のトークン量レベルは常に直近 30 日からとるので、`--days` を変えても rank はぶれない） |
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
-| `--agy` | Antigravity も読む（既定オフ） |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` も自動で読む） |
 | `--completions <shell>` | シェル補完を出力して終了 |
@@ -77,7 +76,7 @@ bunx agent-walker
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | トークン / モデル / ツール / サブエージェント / プロジェクト / ターン時間 — [詳細](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | トークン / モデル / ツール / タスク時間 / プロジェクト — [詳細](docs/codex.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | `--agy` で opt-in。セッションとツールの流れのみ（ログにトークンなし） — [詳細](docs/agy.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出（ログがあるときだけタブ表示）。セッションとツールの流れのみ（ログにトークンなし） — [詳細](docs/agy.md) |
 
 各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
 
@@ -97,7 +96,7 @@ Claude Code は既定で**約30日でトランスクリプトを整理する**�
 
 - コストは **API 換算の見積もり**（実請求ではない）。LiteLLM の価格、キャッシュ読み書きは別レート。pricing fetch 日付は、pricing が読めて端末幅に余裕があるとき COST パネルに表示される。
 - トークンは**キャッシュ込み**（入力 + 出力 + キャッシュ書込 + 読込）。Claude は毎ターン全コンテキストを再送するので、ヘビーに使うほど合計の大部分はキャッシュ読込＝安価な再読込で、新規の作業量とは別物。
-- **Antigravity はトークン/コスト非計上**（中身不明な protobuf）。`--agy` 時も Combined の合計トークンには加算されない（活動のみ反映）。
+- **Antigravity はトークン/コスト非計上**（中身不明な protobuf）。タブは自動検出されるが、Total の合計トークンには加算されない（活動のみ反映）。
 - 各エージェント自身の利用表示とは一致しない（集計の窓やキャッシュの数え方が違う）。
 - Antigravity のログのタイムスタンプはタイムゾーンなし＝ローカル想定。
 - Windows バイナリは 0.3 以降で配布。Windows Terminal / PowerShell で動き、ログは `%USERPROFILE%` から読む。WSL でもそのまま動く（パスは Linux 形式のまま）。

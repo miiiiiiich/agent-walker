@@ -33,7 +33,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &UiState) {
     // Only the tab bar and footer stay fixed; everything from the hero line
     // down lives in one scrollable page.
     frame.render_widget(Paragraph::new(hero::header_line(state, width)), rows[0]);
-    let lines = page::page_lines(summary, width);
+    // The working-style word (Control/Solo/Scout/AllRounder) is a global trait,
+    // so every tab takes it from the combined summary — only that one carries the
+    // multi-model share AllRounder needs. The row/animal still vary per tab.
+    let lines = page::page_lines(summary, &state.report.combined, width);
     let scroll = clamp_scroll(state, lines.len(), rows[1].height);
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), rows[1]);
     draw_footer(frame, rows[2], state, summary);

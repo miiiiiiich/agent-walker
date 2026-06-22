@@ -59,9 +59,9 @@ bunx agent-walker
 
 | Key | Action |
 |---|---|
-| `←` `→` / `h` `l` / `Tab` | switch provider (ordered by API-equivalent cost, heaviest first; Combined last) |
+| `←` `→` / `h` `l` / `Tab` | switch provider (only those with data; most-used first; Total last) |
 | `↑` `↓` / `j` `k` / `PgUp` `PgDn` | scroll |
-| `1`–`4` | jump to tab |
+| `1`–`9` | jump to tab |
 | `r` | reload |
 | `s` | share your stats card (copy image / save to your OS Downloads folder) |
 | `q` / `Esc` / `Ctrl-C` | quit |
@@ -72,7 +72,6 @@ Flags:
 |---|---|
 | `--days <N>` | Analysis window for the graphs (default 30; the codename's throughput level is always taken from the last 30 days, so the rank doesn't drift with `--days`) |
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
-| `--agy` | Also scan Antigravity logs (off by default — see [What it reads](#what-it-reads)) |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set) |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
@@ -96,7 +95,7 @@ card — just glance before you post.
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | opt-in with `--agy`; sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above
 explain what's read, how tokens/cache/cost are counted, and the caveats.
@@ -131,8 +130,8 @@ indefinitely; no setting needed.
   users the bulk of the total tends to be cache reads — real but cheaply
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens/cost are not counted** — its usage lives in an
-  undocumented protobuf format. With `--agy` on, the Combined token total still
-  excludes it (activity only); see [docs/agy.md](docs/agy.md).
+  undocumented protobuf format. Its tab is auto-detected, but the Total token
+  count still excludes it (activity only); see [docs/agy.md](docs/agy.md).
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.

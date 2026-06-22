@@ -15,7 +15,7 @@ pub enum Provider {
 impl Provider {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Combined => "Combined",
+            Self::Combined => "Total",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Agy => "Agy",

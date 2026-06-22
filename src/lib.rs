@@ -1,7 +1,7 @@
 //! agent-walker: a local dashboard for AI coding-agent usage.
 //!
-//! It reads the session logs that Claude Code, Codex CLI, and (opt-in)
-//! Antigravity CLI already write to disk, aggregates tokens, API-equivalent
+//! It reads the session logs that Claude Code, Codex CLI, and (auto-detected
+//! when present) Antigravity CLI already write to disk, aggregates tokens, API-equivalent
 //! cost, activity, and autonomy, and renders a terminal dashboard plus a
 //! shareable "codename" stats card. Everything is computed locally; the only
 //! network access is a pricing-metadata fetch.

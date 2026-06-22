@@ -26,7 +26,7 @@ part as **cache_read** — the same schema as Claude:
 tokens = input + output + cache_read
 ```
 
-So the Combined total adds up consistently with Claude. Two real differences
+So the Total view adds up consistently with Claude. Two real differences
 (behaviour, not accounting):
 
 - **Lower cache ratio.** OpenAI caches less aggressively than Claude Code's

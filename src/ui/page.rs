@@ -18,7 +18,7 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 /// The whole dashboard body as one flowing list of lines. Charts and the
 /// two-column section area are rendered into lines (not widgets) so the
 /// entire page scrolls as a unit.
-pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
+pub(super) fn page_lines(summary: &Summary, style_src: &Summary, width: u16) -> Vec<Line<'static>> {
     const CHART_BODY: usize = 6;
 
     // Two-column split, shared by the codename badge, the charts, and the
@@ -41,7 +41,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     // gutter would collapse and the badge would collide with the grass. Skip the
     // ACTIVITY title/legend row (index 0) since the badge's first row is blank.
     let activity = activity::activity_lines(summary);
-    let badge = codename_badge_lines(&crate::codename::for_summary(summary));
+    let badge = codename_badge_lines(&crate::codename::for_summary_styled(summary, style_src));
     let grass_width = activity.iter().skip(1).map(Line::width).max().unwrap_or(0);
     if badge.is_empty() {
         lines.extend(activity);

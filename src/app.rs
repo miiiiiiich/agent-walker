@@ -31,15 +31,12 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub codex_dir: Option<PathBuf>,
 
+    /// Override the Antigravity log directory. Antigravity is auto-detected:
+    /// its tab appears only when logs are present. Its logs expose no token
+    /// usage (an unlabeled protobuf store), so the tab is activity-only and
+    /// never feeds the token totals.
     #[arg(long, value_name = "DIR")]
     pub agy_dir: Option<PathBuf>,
-
-    /// Also collect Antigravity (agy) logs. Off by default: Antigravity's logs
-    /// expose no token usage — it lives in an unlabeled protobuf store
-    /// (`conversations/*.db`), so counts would be misleading. The parser is kept
-    /// for when that store becomes readable.
-    #[arg(long)]
-    pub agy: bool,
 
     /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
     /// month of logs. The codename level is always computed from the most recent
@@ -82,13 +79,11 @@ pub struct Config {
     pub demo: bool,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
-    /// Resolved only when `agy` is on. Skipping the home/default lookup here
-    /// lets agent-walker still start in environments where `dirs::home_dir()`
-    /// can't resolve, as long as the user isn't asking for Antigravity data.
+    /// Antigravity log directory, or `None` when it can't be resolved (e.g.
+    /// `dirs::home_dir()` fails in a sandbox). Resolution failure is swallowed
+    /// rather than fatal, since Antigravity is optional — its tab only shows up
+    /// when logs are actually found there.
     pub agy_dir: Option<PathBuf>,
-    /// Antigravity collection is opt-in (`--agy`); off by default because the
-    /// logs carry no token usage.
-    pub agy: bool,
     pub days: u16,
     pub use_cache: bool,
     /// Local UTC offset captured at startup (single-threaded moment), used to
@@ -119,15 +114,11 @@ pub fn run(args: Args) -> Result<()> {
         // circuit before the CLI override ever got a chance.
         claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
         codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
-        // agy is opt-in via --agy; if it's off we never need agy_dir, so
-        // skip the home lookup entirely. A --agy-dir without --agy is
-        // preserved verbatim (cheap, no resolution) but ignored downstream.
-        agy_dir: if args.agy {
-            Some(args.agy_dir.map_or_else(default_agy_dir, Ok)?)
-        } else {
-            args.agy_dir
-        },
-        agy: args.agy,
+        // Antigravity is always probed (no opt-in flag): an explicit --agy-dir
+        // wins, else fall back to the default location. A resolution failure is
+        // swallowed to None instead of fatal — agy is optional, so a sandbox
+        // without a home dir should still start and just omit the agy tab.
+        agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
         days: args.days,
         use_cache: !args.no_cache,
         local_offset,
@@ -151,10 +142,13 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if let Some(width) = args.render {
-        for tab_index in 0..4 {
+        // Load once and render every visible tab (present providers + Total) from
+        // the same report — the tab set is now data-dependent, not a fixed four.
+        let report = load_report(&config)?;
+        for tab_index in 0..=report.providers.len() {
             println!(
                 "{}",
-                ui::render_text(&config, width.max(40), 44, tab_index)?
+                ui::render_report_tab(&config, &report, width.max(40), 44, tab_index)?
             );
         }
         return Ok(());
@@ -164,43 +158,44 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 pub fn load_report(config: &Config) -> Result<AppSummary> {
+    // Pricing feeds the COST panels the UI renders later, so finish the refresh
+    // before handing back the report.
     let pricing_refresh = crate::cost::spawn_pricing_refresh();
     let result = load_report_inner(config);
-    // Pricing must be loaded before sorting providers by cost, so join first.
     let _ = pricing_refresh.join();
     result.map(|mut report| {
-        sort_providers_by_cost(&mut report.providers);
+        // Only surface a provider tab when that provider actually has data, then
+        // order what's left by how much it's used (heaviest first).
+        report.providers.retain(provider_has_data);
+        sort_providers_by_usage(&mut report.providers);
         report
     })
 }
 
-/// Order the provider tabs by API-equivalent cost, descending, so the
-/// heaviest-spend provider lands at `tab_index 0` (the startup tab). Ties break
-/// on token volume. With pricing unloaded every cost is 0, so this degrades to
-/// a stable token-volume ordering. The Combined tab is not in `providers`; it
-/// stays appended at the end of the tab strip.
-fn sort_providers_by_cost(providers: &mut [crate::model::Summary]) {
-    providers.sort_by(|left, right| {
-        provider_cost(right)
-            .partial_cmp(&provider_cost(left))
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then_with(|| {
-                right
-                    .total_usage
-                    .token_volume()
-                    .cmp(&left.total_usage.token_volume())
-            })
-    });
+/// A provider earns a tab only if it has real activity. Token volume catches
+/// Claude / Codex; sessions, tools, and completions catch Antigravity, which
+/// logs activity but no tokens. Everything false ⇒ the directory was missing or
+/// empty, so the tab is dropped instead of showing a blank Chick.
+fn provider_has_data(summary: &crate::model::Summary) -> bool {
+    summary.total_usage.token_volume() > 0
+        || summary.sessions > 0
+        || !summary.tools.is_empty()
+        || summary.completion_duration.is_some()
 }
 
-/// Summed API-equivalent cost of a provider over the display window, from its
-/// per-model-per-day usage. Unpriced models contribute nothing.
-fn provider_cost(summary: &crate::model::Summary) -> f64 {
-    summary
-        .model_daily
-        .iter()
-        .filter_map(|entry| crate::cost::usage_cost_usd(&entry.model, &entry.usage))
-        .sum::<f64>()
+/// Order the provider tabs by how much each is used — token volume, descending —
+/// so the heaviest provider lands at `tab_index 0` (the startup tab). Ties break
+/// on provider identity for a stable order. Antigravity carries no tokens, so it
+/// naturally sorts last. The Total tab is not in `providers`; it stays appended
+/// at the end of the tab strip.
+fn sort_providers_by_usage(providers: &mut [crate::model::Summary]) {
+    providers.sort_by(|left, right| {
+        right
+            .total_usage
+            .token_volume()
+            .cmp(&left.total_usage.token_volume())
+            .then_with(|| left.provider.label().cmp(right.provider.label()))
+    });
 }
 
 fn load_report_inner(config: &Config) -> Result<AppSummary> {
@@ -228,15 +223,14 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
                 config.local_offset,
             )
         });
-        // Antigravity is opt-in (`--agy`): its logs carry no token usage, so it
-        // is left out of the default report rather than skewing the totals.
+        // Antigravity is probed whenever its directory resolved; the collector
+        // returns an empty collection for a missing dir, and an empty provider
+        // is filtered out before it ever becomes a tab. Its logs carry no token
+        // usage, so it never skews the totals regardless.
         let agy_handle = scope.spawn(|| {
-            // `config.agy` and `config.agy_dir` agree by construction: when
-            // `agy` is true `agy_dir` is `Some`; when it's false we skip both.
             config
-                .agy
-                .then_some(config.agy_dir.as_ref())
-                .flatten()
+                .agy_dir
+                .as_ref()
                 .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
         });
         let claude_collection = claude::collect(
@@ -285,18 +279,18 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
     clippy::cast_precision_loss,
     reason = "Token counts up to ~10^12 lose no meaningful precision as f64; this share is display-only."
 )]
-fn provider_min_share(providers: &[crate::model::Summary]) -> f64 {
+pub(crate) fn provider_min_share(providers: &[crate::model::Summary]) -> f64 {
     use crate::model::Provider;
     let volume = |want: Provider| -> u64 {
         providers
             .iter()
             .filter(|summary| summary.provider == want)
             .map(|summary| summary.recent_window_volume)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     };
     let claude = volume(Provider::Claude);
     let codex = volume(Provider::Codex);
-    let total = claude + codex;
+    let total = claude.saturating_add(codex);
     if total == 0 {
         return 0.0;
     }
@@ -381,23 +375,33 @@ mod tests {
     }
 
     #[test]
-    fn providers_sort_highest_cost_first() {
-        // No pricing is loaded in the test harness, so every provider cost is 0
-        // and the sort falls back to descending token volume. The lighter
-        // provider is listed first on input to prove it is reordered to the back.
+    fn providers_sort_most_used_first() {
+        // The lighter provider is listed first on input to prove it is reordered
+        // to the back by descending token volume.
         let mut providers = vec![
             provider_summary(Provider::Codex, "gpt-5.5", 1_000_000),
             provider_summary(Provider::Claude, "claude-opus-4-8", 9_000_000),
         ];
 
-        sort_providers_by_cost(&mut providers);
+        sort_providers_by_usage(&mut providers);
 
         // Heaviest provider lands at tab_index 0 (startup tab).
         assert_eq!(providers[0].provider, Provider::Claude);
         assert_eq!(providers[1].provider, Provider::Codex);
         assert!(
             providers[0].total_usage.token_volume() >= providers[1].total_usage.token_volume(),
-            "providers must be ordered by descending volume in the no-pricing fallback"
+            "providers must be ordered by descending token volume"
         );
+    }
+
+    #[test]
+    fn empty_provider_has_no_tab() {
+        // A provider with no tokens, sessions, tools, or completions (a missing
+        // or empty log dir) must not earn a tab.
+        let empty = provider_summary(Provider::Codex, "gpt-5.5", 0);
+        assert!(!provider_has_data(&empty));
+
+        let used = provider_summary(Provider::Claude, "claude-opus-4-8", 1);
+        assert!(provider_has_data(&used));
     }
 }
