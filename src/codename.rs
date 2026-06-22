@@ -134,17 +134,20 @@ pub fn for_summary(summary: &Summary) -> Codename {
     for_summary_styled(summary, summary)
 }
 
-/// Like [`for_summary`], but the working-style column is taken from `style_src`
-/// while the row, the OPS prefix, and the Chick floor come from `summary`.
+/// Like [`for_summary`], but the multi-model signal is taken from `style_src`
+/// while everything else — parallel, heavy, the row, the OPS prefix, the Chick
+/// floor — comes from `summary` itself.
 ///
-/// The UI passes the combined summary as `style_src` so the style word stays the
-/// same across provider tabs while each tab still surfaces its own animal by
-/// volume. `AllRounder` in particular needs the multi-model share, which only
-/// the combined summary carries — without this a single-provider tab could never
-/// reach it. When `summary` is the combined one this is identical to
-/// `for_summary`.
+/// The UI passes the combined summary as `style_src`. Parallel and heavy stay
+/// per-tab so a tab reflects how that agent is actually run (a tool you never
+/// parallelise won't read as `AllRounder`). Only the multi-model axis is a
+/// cross-tool trait the per-provider summaries can't see — they leave it at 0 —
+/// so it's sourced from the combined summary. A tab thus earns `AllRounder` only
+/// when you genuinely run *that* agent in parallel for long stretches and you're
+/// multi-model overall. When `summary` is the combined one this is identical to
+/// [`for_summary`].
 pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
-    let m = metrics(summary);
+    let mut m = metrics(summary);
     if is_chick(&m) {
         return Codename {
             ops: "Eclipse",
@@ -152,7 +155,9 @@ pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
         };
     }
     let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
-    let style = style_of(&metrics(style_src));
+    // Multi-model is the only cross-tool axis; borrow it from the combined view.
+    m.multi_model_share = style_src.recent_window_provider_min_share;
+    let style = style_of(&m);
     Codename {
         ops: ops(&summary.hourly_usage),
         animal: animal_for(style, row),
@@ -464,12 +469,12 @@ mod tests {
     }
 
     #[test]
-    fn style_comes_from_src_row_from_tab() {
-        // A single-provider tab (multi-model share 0) at R3 volume would never
-        // reach AllRounder on its own, but inherits the combined style word while
-        // keeping its own row → AllRounder R3 = Swallow.
+    fn parallel_heavy_tab_reaches_all_rounder_via_src_multi() {
+        // A parallel + heavy single-provider tab has multi-model share 0 on its
+        // own, so alone it can't be AllRounder. Borrowing the combined multi
+        // signal lets it reach AllRounder at its own row → R3 = Swallow.
         let combined = all_rounder_combined();
-        let mut tab = combined.clone();
+        let mut tab = combined.clone(); // keeps parallel (3.0) + heavy (2.0/day)
         tab.provider = crate::model::Provider::Claude;
         tab.recent_window_provider_min_share = 0.0; // single provider in isolation
         tab.recent_window_volume = 200_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
@@ -477,6 +482,28 @@ mod tests {
         assert_eq!(for_summary_styled(&tab, &combined).animal, "Swallow");
         // Scored alone it is not AllRounder (no multi-model share).
         assert_ne!(for_summary(&tab).animal, "Swallow");
+    }
+
+    #[test]
+    fn non_parallel_tab_is_not_all_rounder_even_with_multi_src() {
+        // The Codex-tab case: you barely parallelise that agent. Even though the
+        // combined view is AllRounder, parallel/heavy are read per-tab, so a tab
+        // that is neither stays Scout — it does not inherit AllRounder.
+        let combined = all_rounder_combined();
+        let mut tab = combined.clone();
+        tab.orchestration.avg_concurrency = 1.0; // not parallel
+        if let Some(duration) = tab.completion_duration.as_mut() {
+            duration.buckets[3].count = 0; // and not heavy
+            duration.buckets[4].count = 0;
+            duration.buckets[5].count = 0;
+        }
+        tab.recent_window_provider_min_share = 0.0;
+        tab.recent_window_volume = 200_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
+
+        assert_eq!(
+            for_summary_styled(&tab, &combined).animal,
+            animal_for(Style::Scout, 3),
+        );
     }
 
     #[test]
