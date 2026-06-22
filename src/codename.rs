@@ -216,10 +216,12 @@ fn style_of(m: &Metrics) -> Style {
 
     match (parallel, heavy) {
         (true, true) if multi => Style::AllRounder,
-        // Both specialised but single-model: fall to the stronger of the two
-        // (normalised against their shared threshold; ties favour Control).
+        // Both specialised but single-model: fall to the stronger of the two.
+        // Cross-multiplied form of `heavy/SOLO_MIN > control/PARALLEL_MIN` —
+        // avoids float division and stays correct if the thresholds ever diverge
+        // or go to zero. Ties favour Control.
         (true, true) => {
-            if m.heavy_per_day / SOLO_MIN > m.control / PARALLEL_MIN {
+            if m.heavy_per_day * PARALLEL_MIN > m.control * SOLO_MIN {
                 Style::Solo
             } else {
                 Style::Control
@@ -433,10 +435,9 @@ mod tests {
             tokens_per_day: 450_000_000.0,
             window_active_days: 25,
         };
-        assert_ne!(
-            classify(&m).map(|(style, _)| style),
-            Some(Style::AllRounder),
-        );
+        // Not AllRounder (multi under bar); with equal normalised parallel/heavy
+        // strength the tie falls to Control.
+        assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Control));
     }
 
     /// A combined summary that lands `AllRounder` R1 (`Lion`): parallel, heavy,

@@ -281,15 +281,15 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
 )]
 pub(crate) fn provider_min_share(providers: &[crate::model::Summary]) -> f64 {
     use crate::model::Provider;
-    let volume = |want: Provider| -> u64 {
-        providers
-            .iter()
-            .filter(|summary| summary.provider == want)
-            .map(|summary| summary.recent_window_volume)
-            .fold(0u64, u64::saturating_add)
-    };
-    let claude = volume(Provider::Claude);
-    let codex = volume(Provider::Codex);
+    // One pass, saturating: token counts come from untrusted logs, so the sum
+    // must clamp rather than wrap or panic in debug builds.
+    let (claude, codex) = providers
+        .iter()
+        .fold((0u64, 0u64), |(claude, codex), summary| match summary.provider {
+            Provider::Claude => (claude.saturating_add(summary.recent_window_volume), codex),
+            Provider::Codex => (claude, codex.saturating_add(summary.recent_window_volume)),
+            _ => (claude, codex),
+        });
     let total = claude.saturating_add(codex);
     if total == 0 {
         return 0.0;
