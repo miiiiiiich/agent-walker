@@ -122,7 +122,15 @@ const GRID: [[&str; 4]; 6] = [
 /// editing, the more "Scout" they look. We keep the axis narrow to "went
 /// outside the repo for information". Any `mcp__*` tool also counts as
 /// research (matched by prefix in `research_calls`).
-const RESEARCH_TOOLS: [&str; 3] = ["WebFetch", "WebSearch", "view_image"];
+const RESEARCH_TOOLS: [&str; 4] = [
+    // Claude Code tool names.
+    "WebFetch",
+    "WebSearch",
+    "view_image",
+    // Codex CLI emits its browser call as snake_case `web_search`; without
+    // this entry, a Codex-only user's outward lookups don't count at all.
+    "web_search",
+];
 const BUILD_TOOLS: [&str; 28] = [
     "Edit",
     "Write",
@@ -458,7 +466,7 @@ mod tests {
                 "{forbidden} must not count toward SCOUT",
             );
         }
-        for outward in ["WebFetch", "WebSearch", "view_image"] {
+        for outward in ["WebFetch", "WebSearch", "view_image", "web_search"] {
             assert!(
                 RESEARCH_TOOLS.contains(&outward),
                 "{outward} should count toward SCOUT",
