@@ -285,10 +285,12 @@ pub(crate) fn provider_min_share(providers: &[crate::model::Summary]) -> f64 {
     // must clamp rather than wrap or panic in debug builds.
     let (claude, codex) = providers
         .iter()
-        .fold((0u64, 0u64), |(claude, codex), summary| match summary.provider {
-            Provider::Claude => (claude.saturating_add(summary.recent_window_volume), codex),
-            Provider::Codex => (claude, codex.saturating_add(summary.recent_window_volume)),
-            _ => (claude, codex),
+        .fold((0u64, 0u64), |(claude, codex), summary| {
+            match summary.provider {
+                Provider::Claude => (claude.saturating_add(summary.recent_window_volume), codex),
+                Provider::Codex => (claude, codex.saturating_add(summary.recent_window_volume)),
+                _ => (claude, codex),
+            }
         });
     let total = claude.saturating_add(codex);
     if total == 0 {
