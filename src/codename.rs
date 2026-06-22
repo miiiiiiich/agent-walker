@@ -2,15 +2,14 @@
 //!
 //! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Hawk". The ANIMAL encodes a 6×4
 //! grid — **ROW = token throughput (the level), COLUMN = working style**
-//! (parallel / heavy / research / all-rounder) — so one word carries both how
-//! much and what kind. OPS is the dominant time-of-day. "Chick" is the no-data
-//! floor.
+//! (`Control` = parallel / `Solo` = heavy / `Scout` = neither / `AllRounder`
+//! = parallel + heavy + multi-model) — so one word carries both how much and
+//! what kind. OPS is the dominant time-of-day. "Chick" is the no-data floor.
 //!
-//! Everything is a RATE or RATIO, never an absolute cumulative count, so the
-//! title does not drift just because the window changes. The level is tokens
-//! per day over the most recent 30 days — computed over a fixed window
-//! regardless of the display `--days`, so 7-, 30-, or 90-day views all pin to
-//! the same level; the style axes are rates/ratios over the analysis window.
+//! ROW and STYLE are independent: ROW is volume (tokens/day over the most
+//! recent 30 days, fixed regardless of the display `--days`), while STYLE uses
+//! flat per-axis thresholds that don't change with the row. The style axes are
+//! rates/ratios over the analysis window.
 //!
 //! All numeric cut-offs live in the one block below and are meant to be easy to
 //! retune. They are never surfaced in the UI — only the final title is — so the
@@ -74,7 +73,11 @@ const CHICK: &str = "Chick";
 /// The analyzer fills `Summary::recent_window_volume` over this same window.
 pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
 
-/// Row (R1 top .. R6 entry) by tokens per day over the window.
+// ROW is volume; STYLE is how you work. They are independent — STYLE uses a
+// single flat threshold per axis that does NOT change with the row, so "what
+// kind of user" reads the same whether you're R1 or R6.
+
+/// ROW (R1 top .. R6 entry) by tokens per day over the window. Volume only.
 const TOKENS_PER_DAY: [f64; 6] = [
     750_000_000.0, // R1
     400_000_000.0, // R2
@@ -84,15 +87,16 @@ const TOKENS_PER_DAY: [f64; 6] = [
     500_000.0,     // R6
 ];
 
-/// Per-style strength bands, descending R1..R6 — all rates/ratios. Used to pick
-/// the dominant style and to gate the all-rounder.
-const CONTROL_AVG: [f64; 6] = [4.0, 2.5, 1.8, 1.4, 1.15, 1.02]; // weighted avg simultaneous sessions (parallel)
-const HEAVY_PER_DAY: [f64; 6] = [8.0, 3.5, 1.8, 0.8, 0.3, 0.05]; // 20m+ unattended runs per active day (heavy)
-const SCOUT_RESEARCH: [f64; 6] = [70.0, 50.0, 35.0, 22.0, 12.0, 3.0]; // research % of (research+build) tools
-
-/// All-rounder = parallel AND heavy both reach at least this band (research is
-/// NOT required). Rare by construction — you must clear an absolute bar on both.
-const ALLROUND_MIN_ROW: usize = 3;
+/// STYLE thresholds — single flat cut-offs, row-independent.
+/// Parallel: weighted-average simultaneous sessions. At/above this you "run
+/// things in parallel".
+const PARALLEL_MIN: f64 = 1.8;
+/// Solo: 20m+ unattended completions per active day. At/above this you "leave
+/// long tasks running".
+const SOLO_MIN: f64 = 1.8;
+/// Multi-model: the smaller provider's share of `Claude`+`Codex` volume.
+/// At/above this you're not leaning on a single model. Required for `AllRounder`.
+const MULTI_MIN: f64 = 0.05;
 
 /// Below either floor the user is "Chick" (no real data yet).
 const CHICK_MIN_TOKENS_PER_DAY: f64 = 500_000.0;
@@ -102,8 +106,9 @@ const CHICK_MIN_DAYS: usize = 3;
 /// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
-/// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`,
-/// ordered per column strongest (R1) → humblest.
+/// 6×4 animal grid: `[row R1..R6][Control, Solo, Scout, AllRounder]`. The row
+/// is volume; the column is working style. Scout is the no-specialization
+/// column (neither parallel nor heavy), so it reads as the "general" use.
 const GRID: [[&str; 4]; 6] = [
     ["Hound", "Fox", "Doberman", "Lion"],    // R1
     ["Octopus", "Wolf", "Orca", "Hawk"],     // R2
@@ -113,64 +118,12 @@ const GRID: [[&str; 4]; 6] = [
     ["Ant", "Firefly", "Butterfly", "Bee"],  // R6
 ];
 
-/// SCOUT = share of *outward* knowledge lookups in (research + build) tool
-/// calls. High = pulling in external context (web, MCP, image content), low =
-/// constructing. Reading or grepping local source is intentionally NOT
-/// counted: every implementation pass starts by reading what's there, so
-/// folding `Read`/`Grep`/`Glob` (and the shell equivalents) into "research"
-/// flips the verdict for heavy implementers — the more code they read before
-/// editing, the more "Scout" they look. We keep the axis narrow to "went
-/// outside the repo for information". Any `mcp__*` tool also counts as
-/// research (matched by prefix in `research_calls`).
-const RESEARCH_TOOLS: [&str; 4] = [
-    // Claude Code tool names.
-    "WebFetch",
-    "WebSearch",
-    "view_image",
-    // Codex CLI emits its browser call as snake_case `web_search`; without
-    // this entry, a Codex-only user's outward lookups don't count at all.
-    "web_search",
-];
-const BUILD_TOOLS: [&str; 28] = [
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "apply_patch",
-    // Codex shell wrappers, kept as the fallback bucket for commands the
-    // collector could not decompose.
-    "exec_command",
-    "write_stdin",
-    "Bash",
-    // Codex shell commands decomposed by the collector (build/mutate side).
-    "cargo",
-    "npm",
-    "npx",
-    "bun",
-    "pnpm",
-    "yarn",
-    "make",
-    "python",
-    "python3",
-    "node",
-    "go",
-    "rustc",
-    "mkdir",
-    "rm",
-    "mv",
-    "cp",
-    "touch",
-    "chmod",
-    "docker",
-    "pip",
-];
-
 // ===========================================================================
 
 struct Metrics {
     control: f64,              // weighted avg simultaneous sessions (parallel)
     heavy_per_day: f64,        // 20m+ unattended runs per active day (heavy)
-    scout: f64,                // research % of (research + build) tools
+    multi_model_share: f64,    // smaller provider's share of Claude+Codex volume
     tokens_per_day: f64,       // tokens/day over the most recent window (level)
     window_active_days: usize, // active days over the fixed 30-day window (Chick floor)
 }
@@ -211,18 +164,10 @@ fn metrics(summary: &Summary) -> Metrics {
         0.0
     };
 
-    let research = research_calls(summary);
-    let build = tool_calls(summary, &BUILD_TOOLS);
-    let scout = if research + build > 0 {
-        research as f64 / (research + build) as f64 * 100.0
-    } else {
-        0.0
-    };
-
     Metrics {
         control: summary.orchestration.avg_concurrency,
         heavy_per_day,
-        scout,
+        multi_model_share: summary.recent_window_provider_min_share,
         tokens_per_day: tokens_per_day(summary),
         window_active_days: summary.recent_window_active_days,
     }
@@ -235,30 +180,16 @@ fn tokens_per_day(summary: &Summary) -> f64 {
     summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64
 }
 
-/// Research/explore tool calls: named research tools plus any `mcp__*` tool.
-fn research_calls(summary: &Summary) -> usize {
-    summary
-        .tools
-        .iter()
-        .filter(|tool| {
-            RESEARCH_TOOLS.contains(&tool.name.as_str()) || tool.name.starts_with("mcp__")
-        })
-        .map(|tool| tool.calls)
-        .sum()
-}
-
-fn tool_calls(summary: &Summary, names: &[&str]) -> usize {
-    summary
-        .tools
-        .iter()
-        .filter(|tool| names.contains(&tool.name.as_str()))
-        .map(|tool| tool.calls)
-        .sum()
-}
-
-/// `None` => Chick. Otherwise `(style column, row 1..=6)`. The row is the token
-/// level; the style is the column — they are independent, so growing any axis
-/// can only raise the row (via throughput) or switch the column, never demote.
+/// `None` => Chick. Otherwise `(style column, row 1..=6)`. The ROW is the token
+/// level (volume only); the STYLE is how the agents are run. They are
+/// independent.
+///
+/// STYLE:
+/// - `AllRounder` — parallel AND heavy AND multi-model. The orchestration
+///   profile: many at once, long unattended runs, and not on a single model.
+/// - `Control` — parallel but not heavy (or both, but single-model).
+/// - `Solo` — heavy but not parallel.
+/// - `Scout` — neither: a plain / general way of working.
 fn classify(m: &Metrics) -> Option<(Style, usize)> {
     if m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS {
         return None;
@@ -266,24 +197,24 @@ fn classify(m: &Metrics) -> Option<(Style, usize)> {
 
     let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
 
-    let parallel_row = band_row(m.control, &CONTROL_AVG);
-    let heavy_row = band_row(m.heavy_per_day, &HEAVY_PER_DAY);
+    let parallel = m.control >= PARALLEL_MIN;
+    let heavy = m.heavy_per_day >= SOLO_MIN;
+    let multi = m.multi_model_share >= MULTI_MIN;
 
-    let style = if parallel_row <= ALLROUND_MIN_ROW && heavy_row <= ALLROUND_MIN_ROW {
-        Style::AllRounder
-    } else {
-        // Strongest single style by R1-normalized strength. Ties favour the
-        // earlier axis (parallel > heavy > research) via strict `>`.
-        let strengths = [
-            (Style::Control, m.control / CONTROL_AVG[0]),
-            (Style::Solo, m.heavy_per_day / HEAVY_PER_DAY[0]),
-            (Style::Scout, m.scout / SCOUT_RESEARCH[0]),
-        ];
-        strengths
-            .iter()
-            .copied()
-            .reduce(|best, next| if next.1 > best.1 { next } else { best })
-            .map_or(Style::Control, |(style, _)| style)
+    let style = match (parallel, heavy) {
+        (true, true) if multi => Style::AllRounder,
+        // Both specialised but single-model: fall to the stronger of the two
+        // (normalised against their shared threshold; ties favour Control).
+        (true, true) => {
+            if m.heavy_per_day / SOLO_MIN > m.control / PARALLEL_MIN {
+                Style::Solo
+            } else {
+                Style::Control
+            }
+        }
+        (true, false) => Style::Control,
+        (false, true) => Style::Solo,
+        (false, false) => Style::Scout,
     };
 
     Some((style, row))
@@ -346,7 +277,7 @@ mod tests {
         Metrics {
             control: 1.0,
             heavy_per_day: 0.0,
-            scout: 0.0,
+            multi_model_share: 0.0,
             tokens_per_day: 200_000_000.0, // R3
             window_active_days: 20,
         }
@@ -385,11 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn parallel_dominant_lands_octopus() {
+    fn parallel_only_lands_control() {
+        // Parallel over the bar, heavy under it → Control regardless of model mix.
         let m = Metrics {
             control: 3.0,
             heavy_per_day: 0.5,
-            scout: 10.0,
+            multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
@@ -398,12 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn heavy_dominant_lands_wolf() {
-        // Many long unattended runs per day, low concurrency.
+    fn heavy_only_lands_solo() {
+        // Many long unattended runs per day, low concurrency → Solo.
         let m = Metrics {
             control: 1.0,
             heavy_per_day: 4.0,
-            scout: 5.0,
+            multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 25,
         };
@@ -412,11 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn research_dominant_lands_orca() {
+    fn neither_axis_lands_scout() {
+        // Plain / general use: not parallel, not heavy. Multi-model alone does
+        // not promote out of Scout.
         let m = Metrics {
             control: 1.2,
             heavy_per_day: 0.2,
-            scout: 60.0,
+            multi_model_share: 0.4,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 18,
         };
@@ -425,13 +359,12 @@ mod tests {
     }
 
     #[test]
-    fn parallel_and_heavy_both_high_is_all_rounder() {
-        // Clears the bar on parallel AND heavy → all-rounder (research
-        // irrelevant). This is the heavy-orchestrator profile.
+    fn parallel_heavy_and_multi_is_all_rounder() {
+        // Parallel AND heavy AND multi-model → the orchestration profile.
         let m = Metrics {
             control: 3.35,
             heavy_per_day: 4.17,
-            scout: 19.0,
+            multi_model_share: 0.10,
             tokens_per_day: 450_000_000.0, // R2
             window_active_days: 29,
         };
@@ -440,11 +373,25 @@ mod tests {
     }
 
     #[test]
+    fn parallel_and_heavy_but_single_model_is_not_all_rounder() {
+        // Both axes clear the bar, but everything came from one provider → it
+        // falls to the stronger single axis instead of AllRounder.
+        let m = Metrics {
+            control: 3.35,       // 3.35 / 1.8 = 1.86
+            heavy_per_day: 4.17, // 4.17 / 1.8 = 2.32 (stronger)
+            multi_model_share: 0.0,
+            tokens_per_day: 450_000_000.0, // R2
+            window_active_days: 29,
+        };
+        assert_eq!(classify(&m), Some((Style::Solo, 2)));
+    }
+
+    #[test]
     fn apex_all_rounder_is_lion() {
         let m = Metrics {
             control: 5.0,
             heavy_per_day: 10.0,
-            scout: 80.0,
+            multi_model_share: 0.3,
             tokens_per_day: 800_000_000.0, // R1
             window_active_days: 28,
         };
@@ -453,41 +400,20 @@ mod tests {
     }
 
     #[test]
-    fn research_tools_are_outward_lookups_only() {
-        // Reading or grepping local source is the entry point for *building*,
-        // not a signal of being a scout. Folding `Read` / `Grep` / `Glob` (and
-        // the shell equivalents) into the SCOUT axis flipped the verdict for
-        // heavy implementers — the more code they read before editing, the
-        // more Scout they looked. Keep the axis narrow to "went outside the
-        // repo for information".
-        for forbidden in ["Read", "Grep", "Glob", "cat", "grep", "ls", "find", "rg"] {
-            assert!(
-                !RESEARCH_TOOLS.contains(&forbidden),
-                "{forbidden} must not count toward SCOUT",
-            );
-        }
-        for outward in ["WebFetch", "WebSearch", "view_image", "web_search"] {
-            assert!(
-                RESEARCH_TOOLS.contains(&outward),
-                "{outward} should count toward SCOUT",
-            );
-        }
-    }
-
-    #[test]
-    fn parallel_favoured_over_heavy_on_tie() {
-        // Equal normalized strength, neither reaching the all-rounder bar. The
-        // values give exactly equal ratios (0.30) — re-tune if bands change.
+    fn multi_model_just_under_threshold_is_not_all_rounder() {
+        // 4% minority share is below the 5% multi bar → not AllRounder even
+        // with both implementation axes cleared.
         let m = Metrics {
-            control: 1.2,       // 1.2 / 4.0 = 0.30, parallel_row R5
-            heavy_per_day: 2.4, // 2.4 / 8.0 = 0.30, heavy_row R3
-            scout: 0.0,
-            tokens_per_day: 220_000_000.0,
-            window_active_days: 20,
+            control: 3.0,
+            heavy_per_day: 3.0,
+            multi_model_share: 0.04,
+            tokens_per_day: 450_000_000.0,
+            window_active_days: 25,
         };
-        // Heavy reaches R3 but parallel only R5, so not an all-rounder; the tie
-        // then resolves to the earlier axis.
-        assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Control));
+        assert_ne!(
+            classify(&m).map(|(style, _)| style),
+            Some(Style::AllRounder),
+        );
     }
 
     #[test]

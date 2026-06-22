@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-22
+
+### Changed
+
+- Reworked how the codename's working-style word is chosen so it lines up with
+  how people actually run their agents. **Most people's codename will change.**
+  The exact rule stays undisclosed by design — the title is the only thing
+  surfaced.
+
 ## [0.3.1] - 2026-06-22
 
 ### Changed
@@ -72,6 +81,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.4.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.0
 [0.2.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.1

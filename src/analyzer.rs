@@ -172,6 +172,10 @@ pub fn summarize(
         total_usage: aggregates.total_usage,
         recent_window_volume,
         recent_window_active_days,
+        // Cross-provider balance is only meaningful once provider summaries are
+        // combined, so the per-collection pass leaves it at 0.0; `app::run`
+        // fills the combined summary from the per-provider window volumes.
+        recent_window_provider_min_share: 0.0,
         daily,
         daily_sessions,
         model_daily,

@@ -25,6 +25,7 @@ pub(crate) fn sample_summary() -> Summary {
         total_usage: usage.clone(),
         recent_window_volume: usage.token_volume(),
         recent_window_active_days: 25,
+        recent_window_provider_min_share: 0.0,
         daily: Vec::new(),
         daily_sessions: Vec::new(),
         model_daily: Vec::new(),
