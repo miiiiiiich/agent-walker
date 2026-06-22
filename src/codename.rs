@@ -193,11 +193,8 @@ fn metrics(summary: &Summary) -> Metrics {
 /// (CONTROL) axis. Volume-normalised: a hand-driver sits at concurrency 1, a
 /// fan-out operator spends most of their time at 2+, regardless of total tokens.
 /// Guarded: under a couple of hours of measured activity the ratio is too noisy
-/// to trust, so it reads as 0 (not parallel).
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Display-only share; seconds never approach f64's exact-integer limit in practice."
-)]
+/// to trust, so it reads as 0 (not parallel). (The `u64 as f64` casts are covered
+/// by the module-level `cast_precision_loss` allow; seconds stay far below 2^53.)
 fn parallel_share(orch: &Orchestration) -> f64 {
     let active = orch
         .time_by_level
@@ -222,11 +219,8 @@ fn parallel_share(orch: &Orchestration) -> f64 {
 /// autonomous just because the absolute number of long runs grows with volume.
 /// Guarded: needs a minimum number of completions (and a few long ones) before
 /// the ratio is trusted, so a single long run on a thin sample can't read as
-/// fully autonomous.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Display-only share; completion counts never approach f64's exact-integer limit."
-)]
+/// fully autonomous. (Casts covered by the module-level `cast_precision_loss`
+/// allow; completion counts stay far below 2^53.)
 fn autonomy_ratio(duration: Option<&DurationSummary>) -> f64 {
     let Some(duration) = duration else {
         return 0.0;

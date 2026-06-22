@@ -96,8 +96,8 @@ pub(super) fn orchestration(
     }
 }
 
-/// Bucket a live concurrency count into the 5 distribution slots
-/// (1 / 2 / 3 / 4–6 / 7+); `None` for idle stretches.
+/// Bucket a live concurrency count into the 6 distribution slots
+/// (1 / 2 / 3 / 4–6 / 7–9 / 10+); `None` for idle stretches.
 fn level_bucket(active: i32) -> Option<usize> {
     match active {
         1 => Some(0),
