@@ -82,7 +82,10 @@ pub struct Config {
     pub demo: bool,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
-    pub agy_dir: PathBuf,
+    /// Resolved only when `agy` is on. Skipping the home/default lookup here
+    /// lets agent-walker still start in environments where `dirs::home_dir()`
+    /// can't resolve, as long as the user isn't asking for Antigravity data.
+    pub agy_dir: Option<PathBuf>,
     /// Antigravity collection is opt-in (`--agy`); off by default because the
     /// logs carry no token usage.
     pub agy: bool,
@@ -116,7 +119,14 @@ pub fn run(args: Args) -> Result<()> {
         // circuit before the CLI override ever got a chance.
         claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
         codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
-        agy_dir: args.agy_dir.map_or_else(default_agy_dir, Ok)?,
+        // agy is opt-in via --agy; if it's off we never need agy_dir, so
+        // skip the home lookup entirely. A --agy-dir without --agy is
+        // preserved verbatim (cheap, no resolution) but ignored downstream.
+        agy_dir: if args.agy {
+            Some(args.agy_dir.map_or_else(default_agy_dir, Ok)?)
+        } else {
+            args.agy_dir
+        },
         agy: args.agy,
         days: args.days,
         use_cache: !args.no_cache,
@@ -221,14 +231,13 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         // Antigravity is opt-in (`--agy`): its logs carry no token usage, so it
         // is left out of the default report rather than skewing the totals.
         let agy_handle = scope.spawn(|| {
-            config.agy.then(|| {
-                agy::collect(
-                    &config.agy_dir,
-                    mtime_floor,
-                    config.use_cache,
-                    config.local_offset,
-                )
-            })
+            // `config.agy` and `config.agy_dir` agree by construction: when
+            // `agy` is true `agy_dir` is `Some`; when it's false we skip both.
+            config
+                .agy
+                .then(|| config.agy_dir.as_ref())
+                .flatten()
+                .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
         });
         let claude_collection = claude::collect(
             &config.claude_dir,
