@@ -235,7 +235,7 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
             // `agy` is true `agy_dir` is `Some`; when it's false we skip both.
             config
                 .agy
-                .then(|| config.agy_dir.as_ref())
+                .then_some(config.agy_dir.as_ref())
                 .flatten()
                 .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
         });
