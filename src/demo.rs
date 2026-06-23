@@ -356,15 +356,12 @@ pub fn demo_report(config: &Config) -> AppSummary {
         .iter()
         .map(|collection| summarize(collection, now, config.days, config.local_offset))
         .collect::<Vec<_>>();
-    let mut combined = summarize(
+    let combined = summarize(
         &Collection::combined(PathBuf::from("demo data"), &collections),
         now,
         config.days,
         config.local_offset,
     );
-    // Same as the real path: only the combined summary carries the multi-model
-    // share, so fill it here too or the demo could never show an AllRounder.
-    combined.recent_window_provider_min_share = crate::app::provider_min_share(&providers);
 
     AppSummary {
         generated_at: now,

@@ -3,7 +3,8 @@ use super::svg::svg;
 use super::{REPO_URL, ShareCard, badge_art, render_png};
 use crate::model::ToolStat;
 
-/// The 24 codename animals (matches `codename::GRID`); Chick carries no badge.
+/// The 24 codename animals — same set as `codename::GRID` (order independent;
+/// this only checks every animal has a badge). Chick carries no badge.
 const ANIMALS: [&str; 24] = [
     "Hound",
     "Fox",

@@ -50,11 +50,11 @@ impl ShareCard {
         Self::from_summary_styled(summary, summary)
     }
 
-    /// Like [`Self::from_summary`], but the codename's working-style word is
+    /// Like [`Self::from_summary`], but the codename's orchestration tier is
     /// taken from `style_src` (the combined/Total summary) while the rest of the
     /// card describes `summary`. The interactive share path uses this so a
-    /// provider tab's card shows the same codename as the tab's badge — only the
-    /// combined summary carries the multi-model signal an `AllRounder` needs.
+    /// provider tab's card shows the same codename as the tab's badge — the tier
+    /// is a whole-person trait (parallelism and tooling across all agents).
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,

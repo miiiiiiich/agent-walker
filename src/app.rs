@@ -254,13 +254,12 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         .iter()
         .map(|collection| summarize(collection, now, config.days, config.local_offset))
         .collect::<Vec<_>>();
-    let mut combined = summarize(
+    let combined = summarize(
         &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
         now,
         config.days,
         config.local_offset,
     );
-    combined.recent_window_provider_min_share = provider_min_share(&providers);
 
     Ok(AppSummary {
         generated_at: now,
@@ -269,34 +268,6 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         combined,
         providers,
     })
-}
-
-/// How balanced Claude vs Codex token usage is over the recent window:
-/// `min / (claude + codex)`, in `0.0..=0.5`. Antigravity is excluded because
-/// its logs carry no token counts. Returns 0.0 when only one (or neither) of
-/// the two has volume. Feeds the codename's multi-model axis.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Token counts up to ~10^12 lose no meaningful precision as f64; this share is display-only."
-)]
-pub(crate) fn provider_min_share(providers: &[crate::model::Summary]) -> f64 {
-    use crate::model::Provider;
-    // One pass, saturating: token counts come from untrusted logs, so the sum
-    // must clamp rather than wrap or panic in debug builds.
-    let (claude, codex) = providers
-        .iter()
-        .fold((0u64, 0u64), |(claude, codex), summary| {
-            match summary.provider {
-                Provider::Claude => (claude.saturating_add(summary.recent_window_volume), codex),
-                Provider::Codex => (claude, codex.saturating_add(summary.recent_window_volume)),
-                _ => (claude, codex),
-            }
-        });
-    let total = claude.saturating_add(codex);
-    if total == 0 {
-        return 0.0;
-    }
-    claude.min(codex) as f64 / total as f64
 }
 
 fn default_claude_dir() -> Result<PathBuf> {
@@ -349,7 +320,6 @@ mod tests {
             total_usage: usage.clone(),
             recent_window_volume: usage.token_volume(),
             recent_window_active_days: 1,
-            recent_window_provider_min_share: 0.0,
             daily: Vec::new(),
             daily_sessions: Vec::new(),
             model_daily: vec![crate::model::ModelDailyStat {

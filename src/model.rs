@@ -267,8 +267,9 @@ pub struct DurationBucket {
 
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
-    /// Time-weighted mean of simultaneous sessions over active wall-time — the
-    /// CONTROL style signal (weighted by how parallel, not a ≥N cut-off).
+    /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
+    /// in the PARALLEL AGENTS panel; the codename's parallel signal uses the
+    /// time-at-2+-concurrent share from `time_by_level`, not this mean.
     pub avg_concurrency: f64,
     /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,
@@ -295,13 +296,6 @@ pub struct Summary {
     /// codename's data-sufficiency floor so a short `--days` view can't demote a
     /// real user to the no-data rank.
     pub recent_window_active_days: usize,
-    /// How balanced the two token-billed providers (Claude / Codex) are over
-    /// the recent window: `min(claude, codex) / (claude + codex)`, in
-    /// `0.0..=0.5`. 0 means everything came from one provider. Only the
-    /// combined summary carries a meaningful value (the analyzer leaves
-    /// per-provider summaries at 0.0; `app::run` fills the combined one). Feeds
-    /// the codename's multi-model axis.
-    pub recent_window_provider_min_share: f64,
     pub daily: Vec<DailyStat>,
     pub daily_sessions: Vec<DailySessions>,
     pub model_daily: Vec<ModelDailyStat>,
