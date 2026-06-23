@@ -101,6 +101,7 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
         .filter(|path| {
             let is_db = path
                 .extension()
+                .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("db"));
             let named_opencode = path
                 .file_name()
