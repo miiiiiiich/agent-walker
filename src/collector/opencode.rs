@@ -155,7 +155,13 @@ fn parse_messages(
         return;
     };
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        // `session_id` is NOT NULL in OpenCode's own schema, but a corrupt DB
+        // could still carry a NULL — default it rather than dropping the row
+        // (and its tokens) as a type-mismatch parse error.
+        Ok((
+            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            row.get::<_, String>(1)?,
+        ))
     }) else {
         return;
     };
@@ -245,7 +251,13 @@ fn parse_tool_parts(
         return;
     };
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        // `session_id` is NOT NULL in OpenCode's own schema, but a corrupt DB
+        // could still carry a NULL — default it rather than dropping the row
+        // (and its tokens) as a type-mismatch parse error.
+        Ok((
+            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            row.get::<_, String>(1)?,
+        ))
     }) else {
         return;
     };
@@ -430,6 +442,31 @@ mod tests {
         assert!(collection.usage_events.is_empty());
         assert!(collection.tool_events.is_empty());
         assert!(collection.session_touches.is_empty());
+    }
+
+    #[test]
+    fn null_session_id_keeps_the_row() {
+        // A corrupt DB with a NULL session_id must not drop the row (and its
+        // tokens) as a parse error — it defaults to an empty session instead.
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .expect("create schema");
+        let assistant = r#"{"role":"assistant","tokens":{"input":7,"output":3},"time":{"created":1781542363256}}"#;
+        conn.execute(
+            "INSERT INTO message VALUES ('m1',NULL,1781542363256,1781542363256,?1)",
+            [assistant],
+        )
+        .expect("insert");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 10);
+        assert_eq!(collection.stats.parse_errors, 0);
     }
 
     #[test]
