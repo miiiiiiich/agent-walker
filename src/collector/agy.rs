@@ -1,14 +1,16 @@
-//! Antigravity (`agy`) collector — **opt-in via `--agy`, off by default.**
+//! Antigravity (`agy`) collector — **auto-detected; the tab shows only when
+//! logs are present, and carries activity only (no token usage).**
 //!
-//! Why disabled: Antigravity's text logs (`log/*.log`, `history.jsonl`) record
-//! the model, turns, and tool confirmations but **no token usage**, so every
-//! event here carries `TokenUsage::default()` (zero). The real usage lives in
-//! `conversations/*.{db,pb}` as unlabeled protobuf blobs (table `gen_metadata`)
-//! — token-magnitude integers are present but which field is prompt / output /
-//! cached is unknown, and the schema is Google-internal and liable to change.
-//! Rather than report misleading zero-token totals, agy is left out of the
-//! default report. This parser is kept intact for the day that store becomes
-//! readable (decode `gen_metadata`, identify the token fields, fill `usage`).
+//! Why activity-only: Antigravity's text logs (`log/*.log`, `history.jsonl`)
+//! record the model, turns, and tool confirmations but **no token usage**, so
+//! every event here carries `TokenUsage::default()` (zero). The real usage lives
+//! in `conversations/*.{db,pb}` as unlabeled protobuf blobs (table
+//! `gen_metadata`) — token-magnitude integers are present but which field is
+//! prompt / output / cached is unknown, and the schema is Google-internal and
+//! liable to change. Because every agy event is zero-token, it never moves the
+//! token totals; the tab simply appears when logs exist and sorts last. This
+//! parser is kept intact for the day that store becomes readable (decode
+//! `gen_metadata`, identify the token fields, fill `usage`).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};

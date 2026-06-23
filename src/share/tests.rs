@@ -1,8 +1,10 @@
 use super::fixtures::sample_summary;
 use super::svg::svg;
 use super::{REPO_URL, ShareCard, badge_art, render_png};
+use crate::model::ToolStat;
 
-/// The 24 codename animals (matches `codename::GRID`); Chick carries no badge.
+/// The 24 codename animals — same set as `codename::GRID` (order independent;
+/// this only checks every animal has a badge). Chick carries no badge.
 const ANIMALS: [&str; 24] = [
     "Hound",
     "Fox",
@@ -106,6 +108,49 @@ fn caption_includes_headline_and_repo() {
     assert!(caption.contains("tokens"));
     assert!(caption.contains("15 turns ran 20m+"));
     assert!(caption.contains(REPO_URL));
+}
+
+#[test]
+fn card_codename_uses_style_source() {
+    // The shared card's codename must match the tab badge: a provider tab card
+    // takes its orchestration column from the Total summary, not the provider
+    // alone. The combined view is tooling-heavy + parallel (→ Apex); the tab on
+    // its own has no tooling (→ Parallel), so the two must differ.
+    let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
+    let mut combined = sample_summary();
+    combined.tools = vec![
+        ToolStat {
+            name: "Bash".to_owned(),
+            calls: 900,
+        },
+        ToolStat {
+            name: "Agent".to_owned(),
+            calls: 60,
+        },
+        ToolStat {
+            name: "Skill".to_owned(),
+            calls: 40,
+        },
+    ];
+    combined.recent_window_volume = 800_000_000 * window; // R1
+    combined.recent_window_active_days = 29;
+
+    let mut tab = combined.clone();
+    tab.tools = vec![ToolStat {
+        name: "Bash".to_owned(),
+        calls: 500,
+    }]; // no tooling on its own → Parallel column
+    tab.recent_window_volume = 250_000_000 * window; // R3
+
+    let styled = ShareCard::from_summary_styled(&tab, &combined);
+    let alone = ShareCard::from_summary(&tab);
+    assert_ne!(styled.codename, alone.codename);
+    // R3 × Apex (inherited from the Total summary) = Doberman.
+    assert!(
+        styled.codename.contains("Doberman"),
+        "expected R3 Apex Doberman, got {}",
+        styled.codename
+    );
 }
 
 #[test]

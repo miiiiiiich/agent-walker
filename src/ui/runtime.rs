@@ -13,20 +13,27 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::app::{Config, load_report};
+use crate::model::AppSummary;
 
 use super::draw::draw;
 use super::input::handle_key;
 use super::state::UiState;
 
-/// Render one provider tab to plain text at the given size. Used by the
-/// hidden `--render` flag and snapshot tests; keeps the TUI inspectable
-/// without a terminal session.
-pub fn render_text(config: &Config, width: u16, height: u16, tab_index: usize) -> Result<String> {
-    let report = load_report(config)?;
+/// Render one provider tab of an already-loaded report to plain text. Used by the
+/// hidden `--render` flag; keeps the TUI inspectable without a terminal session.
+/// Takes the report by reference so the caller can load once and render every
+/// tab from it, rather than re-scanning the logs per tab.
+pub fn render_report_tab(
+    config: &Config,
+    report: &AppSummary,
+    width: u16,
+    height: u16,
+    tab_index: usize,
+) -> Result<String> {
     let state = UiState {
         config: config.clone(),
         tab_index: tab_index.min(report.providers.len()),
-        report,
+        report: report.clone(),
         status: String::new(),
         scroll: 0,
         max_scroll: Cell::new(0),

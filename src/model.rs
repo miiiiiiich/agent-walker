@@ -15,7 +15,7 @@ pub enum Provider {
 impl Provider {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Combined => "Combined",
+            Self::Combined => "Total",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Agy => "Agy",
@@ -267,8 +267,9 @@ pub struct DurationBucket {
 
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
-    /// Time-weighted mean of simultaneous sessions over active wall-time — the
-    /// CONTROL style signal (weighted by how parallel, not a ≥N cut-off).
+    /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
+    /// in the PARALLEL AGENTS panel; the codename's parallel signal uses the
+    /// time-at-2+-concurrent share from `time_by_level`, not this mean.
     pub avg_concurrency: f64,
     /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,

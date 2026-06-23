@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-23
+
+### Changed
+
+- Reworked how the codename's working-style word is chosen so it lines up with
+  how people actually run their agents. **Most people's codename will change.**
+  The exact rule stays undisclosed by design — the title is the only thing
+  surfaced.
+- The grid now reads as **how much (row) × how well you orchestrate (column)**.
+  The column is an ordered tier measured across *all* your agents combined and
+  built so it doesn't simply climb with volume. It's the same tier on every tab —
+  your identity — while each tab's animal is scaled by that provider's volume.
+  The exact rule stays undisclosed by design.
+- Renamed the "Combined" tab to "Total".
+- Provider tabs are now data-driven: only agents you actually use get a tab, and
+  they're ordered by how much you use them (most-used first, Total last). An
+  empty agent no longer shows a blank tab.
+- Antigravity is auto-detected — its tab appears whenever its logs are present,
+  with no flag to set. It stays activity-only (no token usage), so it never
+  affects the token totals and sorts last.
+
+### Removed
+
+- The `--agy` flag. Antigravity is now detected automatically; use `--agy-dir`
+  to point at a non-standard location.
+
 ## [0.3.1] - 2026-06-22
 
 ### Changed
@@ -72,6 +98,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.4.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.0
 [0.2.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.2.1

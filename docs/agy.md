@@ -3,7 +3,8 @@
 ## Where the data comes from
 
 `~/.gemini/antigravity-cli` — `history.jsonl` (timestamps) and `log/cli-*.log`
-(model name + confirmed commands). Read-only.
+(model name + confirmed commands). Read-only. Auto-detected: the Agy tab appears
+only when this directory holds logs (point elsewhere with `--agy-dir`).
 
 ## What's captured — and what isn't
 
@@ -24,5 +25,5 @@ break often. agent-walker deliberately does **not** read it.
 
 Treat agy numbers as **activity-only**. If you use Antigravity meaningfully, its
 tokens and cost are **not** reflected in agent-walker's totals — including the
-Combined view. This is a known gap, not a bug: it is the price of not coupling to
+Total view. This is a known gap, not a bug: it is the price of not coupling to
 an undocumented binary format.

@@ -12,4 +12,4 @@ mod state;
 mod theme;
 mod utils;
 
-pub use runtime::{render_text, run};
+pub use runtime::{render_report_tab, run};

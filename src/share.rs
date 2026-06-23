@@ -9,7 +9,7 @@ mod raster;
 mod svg;
 
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 #[cfg(test)]
 mod tests;
 

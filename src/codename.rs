@@ -1,20 +1,32 @@
 //! Codename: a playful vanity title derived from a usage `Summary`.
 //!
-//! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Hawk". The ANIMAL encodes a 6×4
-//! grid — **ROW = token throughput (the level), COLUMN = working style**
-//! (parallel / heavy / research / all-rounder) — so one word carries both how
-//! much and what kind. OPS is the dominant time-of-day. "Chick" is the no-data
-//! floor.
+//! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Doberman". The ANIMAL encodes a
+//! trapezoid grid — **ROW = monthly token volume (how much), COLUMN = an
+//! ordered orchestration tier (how well you drive your agents)**. The four
+//! ascending columns are `Scout` (特徴なし) → `Tools` (機能活用) → `Parallel`
+//! (並列) → `Apex` (頂点). OPS is the dominant time-of-day; "Chick" is the
+//! no-data floor.
 //!
-//! Everything is a RATE or RATIO, never an absolute cumulative count, so the
-//! title does not drift just because the window changes. The level is tokens
-//! per day over the most recent 30 days — computed over a fixed window
-//! regardless of the display `--days`, so 7-, 30-, or 90-day views all pin to
-//! the same level; the style axes are rates/ratios over the analysis window.
+//! The grid is an inverted pyramid: high orchestration is only reachable at high
+//! volume (you can't run many agents in parallel on a trickle of tokens), so the
+//! right-hand columns close off as the row drops — the apex (`Lion`) sits at the
+//! single top-right cell. A tier above the row's reach is clamped back to the
+//! row's widest column rather than left as a dead cell.
 //!
-//! All numeric cut-offs live in the one block below and are meant to be easy to
-//! retune. They are never surfaced in the UI — only the final title is — so the
-//! formula stays opaque to ordinary users even though the source is public.
+//! The two orchestration signals are volume-independent so the column reads "how"
+//! not "how much":
+//! - **parallel** — share of active time spent at 2+ concurrent sessions,
+//!   measured across *every* agent at once (Claude + Codex + Antigravity), so
+//!   running several agents together counts even if no single tool was driven in
+//!   parallel.
+//! - **機能活用 (tooling)** — share of tool calls that delegate or invoke a
+//!   capability beyond raw file/shell ops: subagents, skills, and MCP.
+//!
+//! Columns: both high → `Apex`; both low → `Scout`; otherwise the dominant axis
+//! (`Parallel` if parallel ≥ tooling, else `Tools`). The exact cut-offs live in
+//! the one block below, are easy to retune, and are never surfaced in the UI —
+//! only the final title is — so the formula stays opaque even though the source
+//! is public.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -23,20 +35,19 @@
     reason = "Scores are display-only thresholds; approximate float math never feeds back into integer state."
 )]
 
-use crate::model::Summary;
+use crate::model::{Orchestration, Summary, ToolStat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
-    /// Parallel — many sessions running at once.
-    Control,
-    /// Heavy — runs many long, unattended tasks.
-    Solo,
-    /// Research — reading/exploring more than building.
+    /// 特徴なし — neither parallel nor tooling-led (column 0, lowest).
     Scout,
-    /// High on both parallel AND heavy at once (gated on those two style axes
-    /// only; the displayed row still comes from token throughput, so a
-    /// low-throughput all-rounder lands at a low row). Rare by construction.
-    AllRounder,
+    /// 機能活用 — tooling-dominant: leans on subagents / skills / MCP (column 1).
+    Tools,
+    /// 並列 — parallel-dominant: runs many agents at once (column 2).
+    Parallel,
+    /// 頂点 — both parallel AND tooling high: the full orchestrator (column 3,
+    /// highest). The apex cell (R1 × this column) is `Lion`.
+    Apex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,38 +72,49 @@ impl Codename {
 const CHICK: &str = "Chick";
 
 // ===== Tunable thresholds — single source of truth =========================
-// Every axis is a rate or ratio, so the title is window-robust. The level is
-// tokens/day over the most recent 30 days (longer `--days` is clipped back, so
-// the level stays pinned even while graphs span 90 days). Token counts are
-// cache-inclusive and ~90%+ cache reads for nearly everyone, so the bar is set
-// on gross throughput rather than pricing cache separately. Calibrated so a
-// heavy power user (top low-single-digit %) lands around R3, leaving R2 and R1
-// as headroom for the rare documented extremes. Retune here only; nothing else
-// hard-codes a number.
+// ROW is volume; COLUMN is the orchestration tier. They are deliberately
+// correlated (high orchestration needs volume), which the trapezoid embraces.
+// All numbers are provisional and meant to be recalibrated against a real
+// population — only the author's own data is available so far. Retune here only.
 
 /// The level always reflects the most recent N days of token throughput.
 /// The analyzer fills `Summary::recent_window_volume` over this same window.
 pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
 
-/// Row (R1 top .. R6 entry) by tokens per day over the window.
-const TOKENS_PER_DAY: [f64; 6] = [
+/// ROW (R1 top .. R8 entry) by tokens per day over the window. Volume only.
+/// (Monthly equivalents: R1 ≥22.5B, R2 ≥12B, R3 ≥6.6B, R4 ≥3.6B, R5 ≥1.35B,
+/// R6 ≥360M, R7 ≥90M, R8 ≥15M — these ÷30.)
+const TOKENS_PER_DAY: [f64; 8] = [
     750_000_000.0, // R1
     400_000_000.0, // R2
-    150_000_000.0, // R3
-    45_000_000.0,  // R4
-    12_000_000.0,  // R5
-    500_000.0,     // R6
+    220_000_000.0, // R3
+    120_000_000.0, // R4
+    45_000_000.0,  // R5
+    12_000_000.0,  // R6
+    3_000_000.0,   // R7
+    // R8 floor IS the Chick floor by construction: anything below is Chick, not a
+    // row, so `band_row`'s "below grid" (9) is unreachable on the real path. Keep
+    // them tied so a future retune can't open a gap that maps sub-floor to R8.
+    CHICK_MIN_TOKENS_PER_DAY, // R8
 ];
 
-/// Per-style strength bands, descending R1..R6 — all rates/ratios. Used to pick
-/// the dominant style and to gate the all-rounder.
-const CONTROL_AVG: [f64; 6] = [4.0, 2.5, 1.8, 1.4, 1.15, 1.02]; // weighted avg simultaneous sessions (parallel)
-const HEAVY_PER_DAY: [f64; 6] = [8.0, 3.5, 1.8, 0.8, 0.3, 0.05]; // 20m+ unattended runs per active day (heavy)
-const SCOUT_RESEARCH: [f64; 6] = [70.0, 50.0, 35.0, 22.0, 12.0, 3.0]; // research % of (research+build) tools
+/// Orchestration normalisation: the value at which each signal reads "fully
+/// maxed" (clamped to 1.0 of its axis).
+/// 60%+ of active time at 2+ concurrent sessions = fully parallel.
+const PARALLEL_FULL: f64 = 0.60;
+/// 2%+ of tool calls being subagent / skill / MCP = fully tooling. (Calibrated
+/// against the author as the current high-water mark; recalibrate with more
+/// data.)
+const TOOLING_FULL: f64 = 0.02;
 
-/// All-rounder = parallel AND heavy both reach at least this band (research is
-/// NOT required). Rare by construction — you must clear an absolute bar on both.
-const ALLROUND_MIN_ROW: usize = 3;
+/// Column cut-offs on each normalised axis (0..1).
+/// Both axes ≥ HIGH → Apex (頂点). Both axes < LOW → Scout (特徴なし).
+const TIER_HIGH: f64 = 0.50;
+const TIER_LOW: f64 = 0.25;
+
+/// Low-sample guards: a ratio is only trusted with enough underneath it.
+const PARALLEL_MIN_ACTIVE_SECS: u64 = 2 * 60 * 60; // 2h of measured active time
+const TOOLING_MIN_CALLS: usize = 50; // total tool calls before trusting the share
 
 /// Below either floor the user is "Chick" (no real data yet).
 const CHICK_MIN_TOKENS_PER_DAY: f64 = 500_000.0;
@@ -102,75 +124,38 @@ const CHICK_MIN_DAYS: usize = 3;
 /// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
 
-/// 6×4 animal grid: `[row R1..R6][parallel, heavy, research, all-rounder]`,
-/// ordered per column strongest (R1) → humblest.
-const GRID: [[&str; 4]; 6] = [
-    ["Hound", "Fox", "Doberman", "Lion"],    // R1
-    ["Octopus", "Wolf", "Orca", "Hawk"],     // R2
-    ["Raven", "Puma", "Whale", "Swallow"],   // R3
-    ["Scorpion", "Piranha", "Bear", "Gull"], // R4
-    ["Cat", "Kangaroo", "Eel", "Deer"],      // R5
-    ["Ant", "Firefly", "Butterfly", "Bee"],  // R6
-];
+/// Tooling tool names: a short, stable rule (not a long classifier list).
+/// A call counts as 機能活用 when it delegates to a subagent, invokes a skill,
+/// or reaches an MCP server. New ordinary tools don't change this; new harness
+/// features just under-count slightly until added.
+fn is_tooling(name: &str) -> bool {
+    name.starts_with("mcp__") || matches!(name, "Skill" | "Agent" | "Task" | "spawn_agent")
+}
 
-/// SCOUT = share of *outward* knowledge lookups in (research + build) tool
-/// calls. High = pulling in external context (web, MCP, image content), low =
-/// constructing. Reading or grepping local source is intentionally NOT
-/// counted: every implementation pass starts by reading what's there, so
-/// folding `Read`/`Grep`/`Glob` (and the shell equivalents) into "research"
-/// flips the verdict for heavy implementers — the more code they read before
-/// editing, the more "Scout" they look. We keep the axis narrow to "went
-/// outside the repo for information". Any `mcp__*` tool also counts as
-/// research (matched by prefix in `research_calls`).
-const RESEARCH_TOOLS: [&str; 4] = [
-    // Claude Code tool names.
-    "WebFetch",
-    "WebSearch",
-    "view_image",
-    // Codex CLI emits its browser call as snake_case `web_search`; without
-    // this entry, a Codex-only user's outward lookups don't count at all.
-    "web_search",
-];
-const BUILD_TOOLS: [&str; 28] = [
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "apply_patch",
-    // Codex shell wrappers, kept as the fallback bucket for commands the
-    // collector could not decompose.
-    "exec_command",
-    "write_stdin",
-    "Bash",
-    // Codex shell commands decomposed by the collector (build/mutate side).
-    "cargo",
-    "npm",
-    "npx",
-    "bun",
-    "pnpm",
-    "yarn",
-    "make",
-    "python",
-    "python3",
-    "node",
-    "go",
-    "rustc",
-    "mkdir",
-    "rm",
-    "mv",
-    "cp",
-    "touch",
-    "chmod",
-    "docker",
-    "pip",
+/// Trapezoid: the widest column index reachable at each row (R1..R8). The right
+/// columns close off as volume drops, so the grid is an inverted pyramid.
+const ROW_MAX_COL: [usize; 8] = [3, 3, 3, 3, 2, 1, 1, 0];
+
+/// 8×4 animal grid: `[row R1..R8][Scout, Tools, Parallel, Apex]` (columns left→
+/// right = ascending orchestration). Empty strings are the closed trapezoid
+/// cells — never indexed because the column is clamped to `ROW_MAX_COL`. Lion is
+/// the apex at R1 × Apex; families run down the columns (aquatic, birds, …).
+const GRID: [[&str; 4]; 8] = [
+    ["Orca", "Hawk", "Puma", "Lion"],            // R1
+    ["Whale", "Raven", "Bear", "Wolf"],          // R2
+    ["Octopus", "Gull", "Kangaroo", "Doberman"], // R3
+    ["Eel", "Swallow", "Deer", "Hound"],         // R4
+    ["Piranha", "Cat", "Fox", ""],               // R5
+    ["Bee", "Scorpion", "", ""],                 // R6
+    ["Firefly", "Butterfly", "", ""],            // R7
+    ["Ant", "", "", ""],                         // R8
 ];
 
 // ===========================================================================
 
 struct Metrics {
-    control: f64,              // weighted avg simultaneous sessions (parallel)
-    heavy_per_day: f64,        // 20m+ unattended runs per active day (heavy)
-    scout: f64,                // research % of (research + build) tools
+    parallel_share: f64,       // share of active time at 2+ concurrent
+    tooling_ratio: f64,        // share of tool calls that are subagent / skill / MCP
     tokens_per_day: f64,       // tokens/day over the most recent window (level)
     window_active_days: usize, // active days over the fixed 30-day window (Chick floor)
 }
@@ -178,54 +163,83 @@ struct Metrics {
 /// Public entry: derive the codename for a summary. Computed on demand at
 /// display time, never stored, so the analyzer stays free of vanity logic.
 pub fn for_summary(summary: &Summary) -> Codename {
-    let metrics = metrics(summary);
-    match classify(&metrics) {
-        None => Codename {
+    for_summary_styled(summary, summary)
+}
+
+/// Like [`for_summary`], but the orchestration column is taken from `style_src`
+/// while the row, the OPS prefix, and the Chick floor come from `summary`.
+///
+/// The UI passes the combined summary as `style_src`. Orchestration is a
+/// whole-person trait measured across every agent at once, so a provider tab
+/// shows your overall column at that tab's own volume row — the animal changes by
+/// tier, the column word stays your identity. When `summary` is the combined one
+/// this is identical to [`for_summary`].
+pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
+    let m = metrics(summary);
+    if is_chick(&m) {
+        return Codename {
             ops: "Eclipse",
             animal: CHICK,
-        },
-        Some((style, row)) => Codename {
-            ops: ops(&summary.hourly_usage),
-            animal: animal_for(style, row),
-        },
+        };
+    }
+    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 8);
+    let style = style_of(&metrics(style_src));
+    Codename {
+        ops: ops(&summary.hourly_usage),
+        animal: animal_for(style, row),
     }
 }
 
 fn metrics(summary: &Summary) -> Metrics {
-    let active_days = summary.active_days;
-
-    let unattended = summary.completion_duration.as_ref().map_or(0, |duration| {
-        // The duration histogram is laid out as three sub-20m buckets followed
-        // by the three 20m+ "unattended" buckets, so skipping the first three
-        // isolates the tail without coupling scoring to display label strings.
-        duration
-            .buckets
-            .iter()
-            .skip(3)
-            .map(|bucket| bucket.count)
-            .sum::<usize>()
-    });
-    let heavy_per_day = if active_days > 0 {
-        unattended as f64 / active_days as f64
-    } else {
-        0.0
-    };
-
-    let research = research_calls(summary);
-    let build = tool_calls(summary, &BUILD_TOOLS);
-    let scout = if research + build > 0 {
-        research as f64 / (research + build) as f64 * 100.0
-    } else {
-        0.0
-    };
-
     Metrics {
-        control: summary.orchestration.avg_concurrency,
-        heavy_per_day,
-        scout,
+        parallel_share: parallel_share(&summary.orchestration),
+        tooling_ratio: tooling_ratio(&summary.tools),
         tokens_per_day: tokens_per_day(summary),
         window_active_days: summary.recent_window_active_days,
     }
+}
+
+/// Share of active wall-time spent at 2+ concurrent sessions — the parallel
+/// axis. Volume-normalised: a hand-driver sits at concurrency 1, a fan-out
+/// operator spends most of their time at 2+, regardless of total tokens. Guarded:
+/// under a couple of hours of measured activity the ratio is too noisy to trust,
+/// so it reads as 0. (Casts covered by the module-level `cast_precision_loss`
+/// allow; seconds stay far below 2^53.)
+fn parallel_share(orch: &Orchestration) -> f64 {
+    let active = orch
+        .time_by_level
+        .iter()
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    if active < PARALLEL_MIN_ACTIVE_SECS {
+        return 0.0;
+    }
+    // Bucket 0 is concurrency-1 (solo); everything after it is 2+ concurrent.
+    let parallel = orch
+        .time_by_level
+        .iter()
+        .skip(1)
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    parallel as f64 / active as f64
+}
+
+/// Share of tool calls that delegate or invoke a capability beyond raw file /
+/// shell ops (subagent / skill / MCP) — the 機能活用 axis. Volume-normalised
+/// (a ratio, not a count). Guarded by a minimum total so a thin sample can't
+/// swing it. (Casts covered by the module-level `cast_precision_loss` allow;
+/// call counts stay far below 2^53.)
+fn tooling_ratio(tools: &[ToolStat]) -> f64 {
+    let total: usize = tools.iter().map(|tool| tool.calls).sum();
+    if total < TOOLING_MIN_CALLS {
+        return 0.0;
+    }
+    let tooling: usize = tools
+        .iter()
+        .filter(|tool| is_tooling(&tool.name))
+        .map(|tool| tool.calls)
+        .sum();
+    tooling as f64 / total as f64
 }
 
 /// Tokens per day over the fixed codename window. `recent_window_volume` is the
@@ -235,78 +249,64 @@ fn tokens_per_day(summary: &Summary) -> f64 {
     summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64
 }
 
-/// Research/explore tool calls: named research tools plus any `mcp__*` tool.
-fn research_calls(summary: &Summary) -> usize {
-    summary
-        .tools
-        .iter()
-        .filter(|tool| {
-            RESEARCH_TOOLS.contains(&tool.name.as_str()) || tool.name.starts_with("mcp__")
-        })
-        .map(|tool| tool.calls)
-        .sum()
+/// Below either floor the user has no real data yet → Chick.
+fn is_chick(m: &Metrics) -> bool {
+    m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS
 }
 
-fn tool_calls(summary: &Summary, names: &[&str]) -> usize {
-    summary
-        .tools
-        .iter()
-        .filter(|tool| names.contains(&tool.name.as_str()))
-        .map(|tool| tool.calls)
-        .sum()
+/// The orchestration column from the two normalised axes. Apex needs both high
+/// (a strict gate, so the top is meaningful); Scout is both low; otherwise the
+/// dominant axis wins, and `Parallel` ranks above `Tools` so parallel-dominant
+/// users land in a higher column than tooling-dominant ones.
+fn style_of(m: &Metrics) -> Style {
+    let parallel = (m.parallel_share / PARALLEL_FULL).clamp(0.0, 1.0);
+    let tooling = (m.tooling_ratio / TOOLING_FULL).clamp(0.0, 1.0);
+
+    if parallel >= TIER_HIGH && tooling >= TIER_HIGH {
+        Style::Apex
+    } else if parallel < TIER_LOW && tooling < TIER_LOW {
+        Style::Scout
+    } else if parallel >= tooling {
+        Style::Parallel
+    } else {
+        Style::Tools
+    }
 }
 
-/// `None` => Chick. Otherwise `(style column, row 1..=6)`. The row is the token
-/// level; the style is the column — they are independent, so growing any axis
-/// can only raise the row (via throughput) or switch the column, never demote.
+/// Combined view used by the tests: `None` => Chick, otherwise `(style, row
+/// 1..=8)`.
+#[cfg(test)]
 fn classify(m: &Metrics) -> Option<(Style, usize)> {
-    if m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS {
+    if is_chick(m) {
         return None;
     }
-
-    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 6);
-
-    let parallel_row = band_row(m.control, &CONTROL_AVG);
-    let heavy_row = band_row(m.heavy_per_day, &HEAVY_PER_DAY);
-
-    let style = if parallel_row <= ALLROUND_MIN_ROW && heavy_row <= ALLROUND_MIN_ROW {
-        Style::AllRounder
-    } else {
-        // Strongest single style by R1-normalized strength. Ties favour the
-        // earlier axis (parallel > heavy > research) via strict `>`.
-        let strengths = [
-            (Style::Control, m.control / CONTROL_AVG[0]),
-            (Style::Solo, m.heavy_per_day / HEAVY_PER_DAY[0]),
-            (Style::Scout, m.scout / SCOUT_RESEARCH[0]),
-        ];
-        strengths
-            .iter()
-            .copied()
-            .reduce(|best, next| if next.1 > best.1 { next } else { best })
-            .map_or(Style::Control, |(style, _)| style)
-    };
-
-    Some((style, row))
+    let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 8);
+    Some((style_of(m), row))
 }
 
-/// First row (1..=6) whose threshold `raw` clears, or 7 if below the grid.
-fn band_row(raw: f64, thresholds: &[f64; 6]) -> usize {
+/// First row (1..=8) whose threshold `raw` clears, or 9 if below the grid.
+fn band_row(raw: f64, thresholds: &[f64; 8]) -> usize {
     for (index, threshold) in thresholds.iter().enumerate() {
         if raw >= *threshold {
             return index + 1;
         }
     }
-    7
+    9
 }
 
+/// The animal at `(style column, row)`, with the column clamped to the row's
+/// widest reachable column (the trapezoid). So an orchestration tier above the
+/// row's reach shows that row's strongest available animal, never a dead cell.
 fn animal_for(style: Style, row: usize) -> &'static str {
-    let column = match style {
-        Style::Control => 0,
-        Style::Solo => 1,
-        Style::Scout => 2,
-        Style::AllRounder => 3,
+    let tier = match style {
+        Style::Scout => 0,
+        Style::Tools => 1,
+        Style::Parallel => 2,
+        Style::Apex => 3,
     };
-    GRID[row.clamp(1, 6) - 1][column]
+    let index = row.clamp(1, 8) - 1;
+    let column = tier.min(ROW_MAX_COL[index]);
+    GRID[index][column]
 }
 
 /// Dominant time-of-day word from the hourly token histogram.
@@ -341,13 +341,13 @@ fn ops(hourly: &[u64; 24]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ToolStat;
 
     fn base() -> Metrics {
         Metrics {
-            control: 1.0,
-            heavy_per_day: 0.0,
-            scout: 0.0,
-            tokens_per_day: 200_000_000.0, // R3
+            parallel_share: 0.0,
+            tooling_ratio: 0.0,
+            tokens_per_day: 250_000_000.0, // R3
             window_active_days: 20,
         }
     }
@@ -363,8 +363,6 @@ mod tests {
 
     #[test]
     fn short_window_active_days_is_chick() {
-        // A real 30-day user viewed at --days 1 still has a window-stable rate,
-        // but too few window-active days to score yet.
         let m = Metrics {
             window_active_days: 2,
             ..base()
@@ -373,121 +371,178 @@ mod tests {
     }
 
     #[test]
-    fn row_is_token_rate_not_style() {
-        // High parallel but a trickle of tokens → entry row (R6), Control col.
+    fn both_axes_low_is_scout() {
+        // parallel norm 0.17, tooling norm 0.15 — both below LOW → Scout.
         let m = Metrics {
-            control: 3.0,
-            tokens_per_day: 1_000_000.0, // R6
+            parallel_share: 0.10,
+            tooling_ratio: 0.003,
             ..base()
         };
-        assert_eq!(classify(&m), Some((Style::Control, 6)));
-        assert_eq!(animal_for(Style::Control, 6), "Ant");
+        assert_eq!(classify(&m), Some((Style::Scout, 3)));
+        assert_eq!(animal_for(Style::Scout, 3), "Octopus");
     }
 
     #[test]
-    fn parallel_dominant_lands_octopus() {
+    fn parallel_dominant_is_parallel() {
+        // parallel norm 0.83 (≥LOW, <HIGH not required), tooling norm 0.10 →
+        // dominant axis is parallel → Parallel column.
         let m = Metrics {
-            control: 3.0,
-            heavy_per_day: 0.5,
-            scout: 10.0,
-            tokens_per_day: 450_000_000.0, // R2
-            window_active_days: 25,
+            parallel_share: 0.50,
+            tooling_ratio: 0.002,
+            ..base()
         };
-        assert_eq!(classify(&m), Some((Style::Control, 2)));
-        assert_eq!(animal_for(Style::Control, 2), "Octopus");
+        assert_eq!(classify(&m), Some((Style::Parallel, 3)));
+        assert_eq!(animal_for(Style::Parallel, 3), "Kangaroo");
     }
 
     #[test]
-    fn heavy_dominant_lands_wolf() {
-        // Many long unattended runs per day, low concurrency.
+    fn tooling_dominant_is_tools() {
+        // parallel norm 0.08 (<LOW), tooling norm 0.75 (≥LOW) → tooling dominant.
         let m = Metrics {
-            control: 1.0,
-            heavy_per_day: 4.0,
-            scout: 5.0,
-            tokens_per_day: 450_000_000.0, // R2
-            window_active_days: 25,
+            parallel_share: 0.05,
+            tooling_ratio: 0.015,
+            ..base()
         };
-        assert_eq!(classify(&m), Some((Style::Solo, 2)));
-        assert_eq!(animal_for(Style::Solo, 2), "Wolf");
+        assert_eq!(classify(&m), Some((Style::Tools, 3)));
+        assert_eq!(animal_for(Style::Tools, 3), "Gull");
     }
 
     #[test]
-    fn research_dominant_lands_orca() {
+    fn both_high_is_apex() {
+        // parallel norm 1.0, tooling norm 1.0 → both ≥ HIGH → Apex.
         let m = Metrics {
-            control: 1.2,
-            heavy_per_day: 0.2,
-            scout: 60.0,
-            tokens_per_day: 450_000_000.0, // R2
-            window_active_days: 18,
+            parallel_share: 0.60,
+            tooling_ratio: 0.02,
+            ..base()
         };
-        assert_eq!(classify(&m), Some((Style::Scout, 2)));
-        assert_eq!(animal_for(Style::Scout, 2), "Orca");
+        assert_eq!(classify(&m), Some((Style::Apex, 3)));
+        assert_eq!(animal_for(Style::Apex, 3), "Doberman");
     }
 
     #[test]
-    fn parallel_and_heavy_both_high_is_all_rounder() {
-        // Clears the bar on parallel AND heavy → all-rounder (research
-        // irrelevant). This is the heavy-orchestrator profile.
+    fn apex_at_r1_is_lion() {
         let m = Metrics {
-            control: 3.35,
-            heavy_per_day: 4.17,
-            scout: 19.0,
-            tokens_per_day: 450_000_000.0, // R2
-            window_active_days: 29,
-        };
-        assert_eq!(classify(&m), Some((Style::AllRounder, 2)));
-        assert_eq!(animal_for(Style::AllRounder, 2), "Hawk");
-    }
-
-    #[test]
-    fn apex_all_rounder_is_lion() {
-        let m = Metrics {
-            control: 5.0,
-            heavy_per_day: 10.0,
-            scout: 80.0,
+            parallel_share: 0.80,
+            tooling_ratio: 0.03,
             tokens_per_day: 800_000_000.0, // R1
             window_active_days: 28,
         };
-        assert_eq!(classify(&m), Some((Style::AllRounder, 1)));
-        assert_eq!(animal_for(Style::AllRounder, 1), "Lion");
+        assert_eq!(classify(&m), Some((Style::Apex, 1)));
+        assert_eq!(animal_for(Style::Apex, 1), "Lion");
     }
 
     #[test]
-    fn research_tools_are_outward_lookups_only() {
-        // Reading or grepping local source is the entry point for *building*,
-        // not a signal of being a scout. Folding `Read` / `Grep` / `Glob` (and
-        // the shell equivalents) into the SCOUT axis flipped the verdict for
-        // heavy implementers — the more code they read before editing, the
-        // more Scout they looked. Keep the axis narrow to "went outside the
-        // repo for information".
-        for forbidden in ["Read", "Grep", "Glob", "cat", "grep", "ls", "find", "rg"] {
-            assert!(
-                !RESEARCH_TOOLS.contains(&forbidden),
-                "{forbidden} must not count toward SCOUT",
-            );
-        }
-        for outward in ["WebFetch", "WebSearch", "view_image", "web_search"] {
-            assert!(
-                RESEARCH_TOOLS.contains(&outward),
-                "{outward} should count toward SCOUT",
-            );
-        }
-    }
-
-    #[test]
-    fn parallel_favoured_over_heavy_on_tie() {
-        // Equal normalized strength, neither reaching the all-rounder bar. The
-        // values give exactly equal ratios (0.30) — re-tune if bands change.
+    fn trapezoid_clamps_high_tier_at_low_row() {
+        // Apex orchestration but only R7 volume: the row reaches column 1 at
+        // most, so the apex tier is clamped back to the Tools column → Butterfly,
+        // never a dead Apex cell.
         let m = Metrics {
-            control: 1.2,       // 1.2 / 4.0 = 0.30, parallel_row R5
-            heavy_per_day: 2.4, // 2.4 / 8.0 = 0.30, heavy_row R3
-            scout: 0.0,
-            tokens_per_day: 220_000_000.0,
+            parallel_share: 0.80,
+            tooling_ratio: 0.03,
+            tokens_per_day: 5_000_000.0, // R7
             window_active_days: 20,
         };
-        // Heavy reaches R3 but parallel only R5, so not an all-rounder; the tie
-        // then resolves to the earlier axis.
-        assert_eq!(classify(&m).map(|(style, _)| style), Some(Style::Control));
+        assert_eq!(classify(&m), Some((Style::Apex, 7)));
+        assert_eq!(animal_for(Style::Apex, 7), "Butterfly");
+    }
+
+    #[test]
+    fn tooling_ratio_share_and_guard() {
+        // 100 tooling calls out of 1000 → 0.10.
+        let tools = vec![
+            ToolStat {
+                name: "Bash".to_owned(),
+                calls: 900,
+            },
+            ToolStat {
+                name: "Agent".to_owned(),
+                calls: 60,
+            },
+            ToolStat {
+                name: "Skill".to_owned(),
+                calls: 40,
+            },
+        ];
+        assert!((tooling_ratio(&tools) - 0.10).abs() < 1e-9);
+        // mcp__ prefix counts; below the min-call guard it reads as 0.
+        let thin = vec![ToolStat {
+            name: "mcp__notion__fetch".to_owned(),
+            calls: 5,
+        }];
+        assert!(tooling_ratio(&thin).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn band_row_eight_bands() {
+        assert_eq!(band_row(800_000_000.0, &TOKENS_PER_DAY), 1);
+        assert_eq!(band_row(250_000_000.0, &TOKENS_PER_DAY), 3); // ≥220M
+        assert_eq!(band_row(200_000_000.0, &TOKENS_PER_DAY), 4); // <220M
+        assert_eq!(band_row(600_000.0, &TOKENS_PER_DAY), 8); // ≥500K
+        assert_eq!(band_row(100_000.0, &TOKENS_PER_DAY), 9); // below grid
+    }
+
+    /// A combined summary that lands `Apex` R1 (`Lion`): parallel (sample's
+    /// time-by-level gives ≈0.61 at 2+) plus a tooling-heavy tool mix and top-row
+    /// volume.
+    fn apex_combined() -> Summary {
+        let mut s = crate::share::fixtures::sample_summary();
+        s.tools = vec![
+            ToolStat {
+                name: "Bash".to_owned(),
+                calls: 900,
+            },
+            ToolStat {
+                name: "Agent".to_owned(),
+                calls: 60,
+            },
+            ToolStat {
+                name: "Skill".to_owned(),
+                calls: 40,
+            },
+        ];
+        s.recent_window_volume = 800_000_000 * CODENAME_WINDOW_DAYS as u64; // R1
+        s.recent_window_active_days = 29;
+        s
+    }
+
+    #[test]
+    fn combined_apex_is_lion() {
+        assert_eq!(for_summary(&apex_combined()).animal, "Lion");
+    }
+
+    #[test]
+    fn tab_shows_combined_style_at_own_row() {
+        // Column is whole-person (from the combined summary); only the row is
+        // per-tab. A lower-volume tab of an Apex shows the Apex column at its own
+        // row → R3 × Apex = Doberman.
+        let combined = apex_combined();
+        let mut tab = combined.clone();
+        tab.provider = crate::model::Provider::Claude;
+        tab.recent_window_volume = 250_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
+        assert_eq!(for_summary_styled(&tab, &combined).animal, "Doberman");
+    }
+
+    #[test]
+    fn non_parallel_tab_still_inherits_combined_style() {
+        // A tab you never parallelise (and with no tooling of its own) still
+        // inherits the combined column — orchestration is measured whole-person.
+        let combined = apex_combined();
+        let mut tab = combined.clone();
+        tab.orchestration.time_by_level = [10_000, 0, 0, 0, 0, 0];
+        tab.tools = vec![ToolStat {
+            name: "Bash".to_owned(),
+            calls: 500,
+        }];
+        tab.recent_window_volume = 250_000_000 * CODENAME_WINDOW_DAYS as u64; // R3
+        assert_eq!(for_summary_styled(&tab, &combined).animal, "Doberman");
+    }
+
+    #[test]
+    fn tab_below_floor_is_chick_regardless_of_src_style() {
+        let combined = apex_combined();
+        let mut tab = combined.clone();
+        tab.recent_window_volume = 100_000 * CODENAME_WINDOW_DAYS as u64; // below floor
+        assert_eq!(for_summary_styled(&tab, &combined).animal, CHICK);
     }
 
     #[test]

@@ -79,7 +79,10 @@ fn execute_share(state: &UiState) -> String {
     let Some(modal) = state.share.as_ref() else {
         return String::new();
     };
-    let card = ShareCard::from_summary(state.current_summary());
+    // Orchestration tier from the Total summary so the shared card's codename
+    // matches the tab's badge (a per-provider summary alone can't reach the high
+    // tiers — parallelism and tooling are whole-person).
+    let card = ShareCard::from_summary_styled(state.current_summary(), &state.report.combined);
     let result = if modal.selected == 0 {
         crate::share::copy_image(&card).map(|()| "card image copied to clipboard".to_owned())
     } else {
