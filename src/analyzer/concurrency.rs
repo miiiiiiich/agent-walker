@@ -75,8 +75,8 @@ pub(super) fn orchestration(
     }
 
     // Weighted concurrency: time-weighted mean of simultaneous sessions, using
-    // each band's midpoint (4–6→5, 7–9→8, 10+→11). This is the CONTROL signal —
-    // higher = more sustained orchestration, no arbitrary "≥N" cut-off.
+    // each band's midpoint (4–6→5, 7–9→8, 10+→11). A display stat — higher = more
+    // sustained parallelism, no arbitrary "≥N" cut-off.
     let avg_concurrency = if active_secs > 0 {
         let midpoints = [1.0_f64, 2.0, 3.0, 5.0, 8.0, 11.0];
         let weighted: f64 = level_secs

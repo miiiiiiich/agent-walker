@@ -371,7 +371,7 @@ pub(super) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'static>
         .copied()
         .max()
         .unwrap_or(0);
-    // Weighted avg concurrency (computed once in the analyzer) = the CONTROL signal.
+    // Weighted avg concurrency (computed once in the analyzer) = parallelism stat.
     let avg = orchestration.avg_concurrency;
     let labels = ["1", "2", "3", "4-6", "7-9", "10+"];
     let colors = [

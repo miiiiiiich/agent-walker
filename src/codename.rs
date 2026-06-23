@@ -92,7 +92,10 @@ const TOKENS_PER_DAY: [f64; 8] = [
     45_000_000.0,  // R5
     12_000_000.0,  // R6
     3_000_000.0,   // R7
-    500_000.0,     // R8
+    // R8 floor IS the Chick floor by construction: anything below is Chick, not a
+    // row, so `band_row`'s "below grid" (9) is unreachable on the real path. Keep
+    // them tied so a future retune can't open a gap that maps sub-floor to R8.
+    CHICK_MIN_TOKENS_PER_DAY, // R8
 ];
 
 /// Orchestration normalisation: the value at which each signal reads "fully

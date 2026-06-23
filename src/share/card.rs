@@ -33,7 +33,7 @@ pub struct ShareCard {
     pub(crate) completion: Option<(Vec<usize>, usize, usize, String, String, String)>,
     /// PARALLEL AGENTS: (% of active time at 4+ concurrent, peak concurrency).
     pub(crate) parallel: Option<(u64, usize)>,
-    /// Time-weighted average simultaneous sessions (the CONTROL metric).
+    /// Time-weighted average simultaneous sessions (the PARALLEL AGENTS stat).
     pub(crate) avg_concurrency: f64,
     pub(crate) grass: Grass,
 }

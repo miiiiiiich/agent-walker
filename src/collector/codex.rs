@@ -200,8 +200,8 @@ fn collect_tool_event(
     };
     // Codex runs most reads and writes through a generic shell wrapper
     // (`exec_command` etc., usually `bash -lc "..."`); resolving the wrapper to
-    // the real command basename lets the codename's research/build classifier
-    // see `grep`/`cargo` instead of one undifferentiated "exec" bucket.
+    // the real command basename lets the tool list show `grep`/`cargo` instead of
+    // one undifferentiated "exec" bucket.
     let tool_name = if is_shell_wrapper(&raw_name) {
         exec_command_basename(value).unwrap_or(raw_name)
     } else {
@@ -504,7 +504,7 @@ mod tests {
     }
 
     /// Shell-wrapper tool calls (`exec_command` etc.) are decomposed to the real
-    /// command basename so the codename's research/build split can see it;
+    /// command basename so the tool list reflects the real command;
     /// unrecognized arguments fall back to the wrapper name unchanged.
     #[test]
     fn decomposes_exec_command_to_real_command_basename() {
