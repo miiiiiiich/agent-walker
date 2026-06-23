@@ -10,13 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - OpenCode support. Its local SQLite store (`~/.local/share/opencode`, or
-  `$OPENCODE_HOME` / `$XDG_DATA_HOME`) is auto-detected and read via a read-only
-  in-memory snapshot (SQLite's Backup API — never locks or writes your live
-  store), contributing tokens, models, tools, projects, durations, and activity
-  — near parity with Claude and Codex. Follows OpenCode's own resolver:
-  `OPENCODE_DB` overrides the file, and per-channel `opencode-<channel>.db`
-  stores are picked up alongside the default. `--opencode-dir` points at a
-  non-standard data dir.
+  `$OPENCODE_HOME` / `$XDG_DATA_HOME`) is auto-detected and read **read-only**
+  (never locks, checkpoints, or writes your live store), contributing tokens,
+  models, tools, projects, durations, and activity — near parity with Claude and
+  Codex. Follows OpenCode's own resolver: `OPENCODE_DB` overrides the file, and
+  per-channel `opencode-<channel>.db` stores are picked up alongside the default
+  (deduped by row id). Reasoning tokens are folded into the output total.
+  `--opencode-dir` points at a non-standard data dir.
 
 ## [0.4.0] - 2026-06-23
 

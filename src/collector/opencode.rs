@@ -8,19 +8,21 @@
 //! (`type:"tool"`, `tool`). Storage layout is documented at
 //! <https://opencode.ai/docs/troubleshooting/> and the OSS repo (sst/opencode).
 //!
-//! We open the live DB **read-only** and take a consistent in-memory snapshot
-//! through SQLite's online Backup API, then read from that copy. The source is
-//! never written, locked for writes, or checkpointed, and the backup runs under
-//! SQLite's own read lock — so there's no `fs::copy` race between the db and its
-//! `-wal`. Cost is left to the shared LiteLLM pricing path like every other
-//! provider — the per-message `cost` OpenCode records (and local models such as
-//! Ollama, which report no priced usage) is not used here.
+//! We open the live DB **read-only** and read it directly. The read-only flag
+//! means SQLite can never write the user's store (no checkpoint, no recovery
+//! write); in WAL mode our reads don't block OpenCode's writes, and a brief
+//! `busy_timeout` rides out the rare exclusive moments. Reading directly — rather
+//! than copying the whole DB into memory first — keeps memory proportional to
+//! the recent-window rows we actually parse, not the entire history. Cost is
+//! left to the shared LiteLLM pricing path like every other provider — the
+//! per-message `cost` OpenCode records (and local models such as Ollama, which
+//! report no priced usage) is not used here.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
@@ -46,14 +48,31 @@ pub fn collect(
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0);
 
+    // Across multiple DB files (e.g. a default store plus a channel store, or a
+    // copy left over from a migration) the same row can appear twice; dedupe by
+    // its primary-key id so a turn isn't counted once per file.
+    let mut seen_messages = HashSet::new();
+    let mut seen_parts = HashSet::new();
     for db_path in db_paths(root) {
-        let Some(conn) = open_snapshot(&db_path) else {
+        let Some(conn) = open_readonly(&db_path) else {
             collection.stats.unreadable_files += 1;
             continue;
         };
         collection.stats.files_seen += 1;
-        parse_messages(&conn, floor_ms, local_offset, &mut collection);
-        parse_tool_parts(&conn, floor_ms, local_offset, &mut collection);
+        parse_messages(
+            &conn,
+            floor_ms,
+            local_offset,
+            &mut collection,
+            &mut seen_messages,
+        );
+        parse_tool_parts(
+            &conn,
+            floor_ms,
+            local_offset,
+            &mut collection,
+            &mut seen_parts,
+        );
     }
 
     collection.stats.usage_events = collection.usage_events.len();
@@ -107,7 +126,8 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("opencode"));
-            is_db && named_opencode
+            // A directory matching the pattern isn't a DB — don't try to open it.
+            is_db && named_opencode && path.is_file()
         })
         .collect();
     // Deterministic order so files_seen / parse order doesn't depend on the FS.
@@ -115,29 +135,15 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
     paths
 }
 
-/// Open the live DB read-only and copy it into an in-memory database via
-/// SQLite's online Backup API, returning a connection to that copy. The backup
-/// holds a read lock for the duration of the page copy, so it's a consistent
-/// snapshot even mid-write — no `fs::copy` race between the db and its `-wal`,
-/// no temp files, and the user's store is never written or checkpointed (the
-/// `immutable=1` foot-gun is avoided too). A live DB whose WAL needs recovery
-/// with no `-shm` present can't be opened read-only; that degrades to an empty
-/// collection rather than touching the store.
-fn open_snapshot(db: &Path) -> Option<Connection> {
-    let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    // If OpenCode holds a write lock as we attach, wait briefly rather than
-    // failing the snapshot outright.
-    let _ = source.busy_timeout(Duration::from_millis(500));
-    let mut snapshot = Connection::open_in_memory().ok()?;
-    {
-        let backup = Backup::new(&source, &mut snapshot).ok()?;
-        // Pause between any step that hits BUSY/LOCKED so a contended copy backs
-        // off instead of spinning.
-        backup
-            .run_to_completion(1024, Duration::from_millis(25), None)
-            .ok()?;
-    }
-    Some(snapshot)
+/// Open the live DB read-only. The read-only flag guarantees SQLite never writes
+/// the user's store; the `busy_timeout` rides out a brief write lock (e.g. a
+/// checkpoint restart) instead of failing immediately. A WAL DB that needs
+/// recovery with no `-shm` present can't be opened read-only; that DB is skipped
+/// rather than touched.
+fn open_readonly(db: &Path) -> Option<Connection> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    Some(conn)
 }
 
 /// One usage + duration event per assistant message (the per-turn totals live on
@@ -147,11 +153,12 @@ fn parse_messages(
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
+    seen: &mut HashSet<String>,
 ) {
     // Filter on the indexed `time_created` column so SQLite skips out-of-window
     // rows before we ever parse their JSON in Rust.
     let Ok(mut stmt) =
-        conn.prepare("SELECT session_id, data FROM message WHERE time_created >= ?1")
+        conn.prepare("SELECT id, session_id, data FROM message WHERE time_created >= ?1")
     else {
         return;
     };
@@ -160,8 +167,9 @@ fn parse_messages(
         // could still carry a NULL — default it rather than dropping the row
         // (and its tokens) as a type-mismatch parse error.
         Ok((
-            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            row.get::<_, String>(1)?,
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            row.get::<_, String>(2)?,
         ))
     }) else {
         return;
@@ -169,12 +177,16 @@ fn parse_messages(
 
     for row in rows {
         collection.stats.lines_seen += 1;
-        let Ok((session_id, data)) = row else {
+        let Ok((id, session_id, data)) = row else {
             // A row-level SQLite error (type mismatch, mid-scan corruption)
             // should surface in the stats, not vanish like `flatten()` would.
             collection.stats.parse_errors += 1;
             continue;
         };
+        // Already counted from another DB file (a copied store) — skip the dup.
+        if !seen.insert(id) {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             collection.stats.parse_errors += 1;
             continue;
@@ -197,7 +209,11 @@ fn parse_messages(
 
         let usage = TokenUsage {
             input_tokens: token(&value, "/tokens/input"),
-            output_tokens: token(&value, "/tokens/output"),
+            // OpenCode stores only the *visible* output here and counts
+            // reasoning separately; fold reasoning in so token totals and cost
+            // match the inclusive convention the other providers use.
+            output_tokens: token(&value, "/tokens/output")
+                .saturating_add(token(&value, "/tokens/reasoning")),
             reasoning_output_tokens: token(&value, "/tokens/reasoning"),
             cache_creation_input_tokens: token(&value, "/tokens/cache/write"),
             cache_read_input_tokens: token(&value, "/tokens/cache/read"),
@@ -243,21 +259,26 @@ fn parse_tool_parts(
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
+    seen: &mut HashSet<String>,
 ) {
-    // `time_created >= ?1` first lets SQLite drop out-of-window rows on the cheap
-    // integer column before the per-row `json_extract` ever runs.
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT session_id, data FROM part WHERE time_created >= ?1 AND json_extract(data, '$.type') = 'tool'",
-    ) else {
+    // Filter only on the indexed `time_created` integer column in SQL, and do the
+    // `type == "tool"` check in Rust. Putting `json_extract` in the WHERE clause
+    // makes a single malformed `data` row raise "malformed JSON" and abort the
+    // whole result set, losing every later tool call in this DB.
+    let Ok(mut stmt) = conn
+        .prepare("SELECT id, session_id, time_created, data FROM part WHERE time_created >= ?1")
+    else {
         return;
     };
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
         // `session_id` is NOT NULL in OpenCode's own schema, but a corrupt DB
-        // could still carry a NULL — default it rather than dropping the row
-        // (and its tokens) as a type-mismatch parse error.
+        // could still carry a NULL — default it rather than dropping the row as
+        // a type-mismatch parse error.
         Ok((
-            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            row.get::<_, String>(1)?,
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
         ))
     }) else {
         return;
@@ -265,7 +286,7 @@ fn parse_tool_parts(
 
     for row in rows {
         collection.stats.lines_seen += 1;
-        let Ok((session_id, data)) = row else {
+        let Ok((id, session_id, time_created, data)) = row else {
             collection.stats.parse_errors += 1;
             continue;
         };
@@ -273,12 +294,25 @@ fn parse_tool_parts(
             collection.stats.parse_errors += 1;
             continue;
         };
+        if value.get("type").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
         let Some(tool_name) = value.get("tool").and_then(Value::as_str) else {
             continue;
         };
-        let start_ms = value.pointer("/state/time/start").and_then(Value::as_i64);
+        // Already counted from another DB file (a copied store) — skip the dup.
+        if !seen.insert(id) {
+            continue;
+        }
+        // Prefer the tool's own start time; fall back to the row's `time_created`
+        // so a tool without a recorded start isn't dropped by the analyzer for
+        // lacking a timestamp.
+        let start_ms = value
+            .pointer("/state/time/start")
+            .and_then(Value::as_i64)
+            .unwrap_or(time_created);
         collection.tool_events.push(ToolEvent {
-            timestamp: start_ms.and_then(|ms| ms_to_offset(ms, local_offset)),
+            timestamp: ms_to_offset(start_ms, local_offset),
             session_id: Some(session_id),
             tool_name: tool_name.to_owned(),
             subagent_type: None,
@@ -349,13 +383,15 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 1);
         let event = &collection.usage_events[0];
         assert_eq!(event.usage.input_tokens, 100);
-        assert_eq!(event.usage.output_tokens, 20);
+        // OpenCode's stored output (20) excludes reasoning (5); we fold reasoning
+        // in, so output_tokens is the inclusive 25 and reasoning is also kept.
+        assert_eq!(event.usage.output_tokens, 25);
         assert_eq!(event.usage.reasoning_output_tokens, 5);
         assert_eq!(event.usage.cache_read_input_tokens, 40);
         assert_eq!(event.usage.cache_creation_input_tokens, 10);
-        // token_volume = input + output + cache_create + cache_read (reasoning is
-        // a subset of output, not added on top).
-        assert_eq!(event.usage.token_volume(), 170);
+        // token_volume = input + output(incl. reasoning) + cache_create +
+        // cache_read = 100 + 25 + 10 + 40.
+        assert_eq!(event.usage.token_volume(), 175);
         assert_eq!(event.model.as_deref(), Some("qwen3:8b"));
         assert_eq!(event.project.as_deref(), Some("somewhere/proj"));
 
@@ -443,6 +479,76 @@ mod tests {
         assert!(collection.usage_events.is_empty());
         assert!(collection.tool_events.is_empty());
         assert!(collection.session_touches.is_empty());
+    }
+
+    #[test]
+    fn duplicate_rows_across_db_files_are_counted_once() {
+        // A copied store left beside the default (same row ids) must not double
+        // count the same turn.
+        let dir = TempDir::new().expect("tempdir");
+        write_db_at(&dir.path().join("opencode.db"));
+        write_db_at(&dir.path().join("opencode-prod.db"));
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.stats.files_seen, 2);
+        // One assistant message and one tool part, despite two identical DBs.
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.session_touches.len(), 2);
+    }
+
+    #[test]
+    fn malformed_part_json_does_not_drop_later_tools() {
+        // A single malformed part row must not abort the whole result set; later
+        // valid tool calls in the same DB still come through.
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .expect("create schema");
+        conn.execute(
+            "INSERT INTO part VALUES ('p0','m1','s1',1781542400000,1781542400000,'{not valid json')",
+            [],
+        )
+        .expect("insert bad");
+        let good = r#"{"type":"tool","tool":"bash","state":{"time":{"start":1781542400500}}}"#;
+        conn.execute(
+            "INSERT INTO part VALUES ('p1','m1','s1',1781542400600,1781542400600,?1)",
+            [good],
+        )
+        .expect("insert good");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].tool_name, "bash");
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn tool_without_start_time_falls_back_to_time_created() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .expect("create schema");
+        // A tool part with no state.time.start.
+        let tool = r#"{"type":"tool","tool":"read"}"#;
+        conn.execute(
+            "INSERT INTO part VALUES ('p1','m1','s1',1781542400000,1781542400000,?1)",
+            [tool],
+        )
+        .expect("insert");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.tool_events.len(), 1);
+        // The event keeps a timestamp (from time_created) so the analyzer doesn't
+        // drop it.
+        assert!(collection.tool_events[0].timestamp.is_some());
     }
 
     #[test]

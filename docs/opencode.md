@@ -13,11 +13,12 @@ follows OpenCode's own database resolver:
   default `opencode.db` and the `opencode-<channel>.db` a non-stable install
   (e.g. a `dev` build) writes.
 
-It opens each DB **read-only** and takes a consistent snapshot through SQLite's
-online **Backup API** (an in-memory copy under SQLite's read lock), then reads
-from that copy — so it never locks, checkpoints, writes, or corrupts your live
-store, and there's no file-copy race between the DB and its WAL. Storage location
-is documented at
+It opens each DB **read-only** and reads it directly. The read-only flag means
+SQLite can't write, checkpoint, or recover your live store; in WAL mode the read
+doesn't block OpenCode's writes, and a short busy-timeout rides out the rare
+exclusive moment. Reading directly (rather than copying the whole DB first) keeps
+memory proportional to the recent rows actually parsed, not the full history.
+Storage location is documented at
 [opencode.ai/docs/troubleshooting](https://opencode.ai/docs/troubleshooting/);
 the schema lives in the OSS repo (`sst/opencode`). Auto-detected: the OpenCode
 tab appears only when a matching DB exists.
@@ -31,6 +32,10 @@ tab appears only when a matching DB exists.
   ```
   tokens = input + output + cache_read + cache_creation(=cache.write)
   ```
+
+  OpenCode stores only the *visible* output in `output` and counts `reasoning`
+  separately, so reasoning is folded into the output total (and priced at the
+  output rate) to match the inclusive convention the other providers use.
 
 - **Model** from `data.modelID` (e.g. `qwen3:8b`, `claude-...`).
 - **Project** from `data.path.cwd` (the working directory), labeled like the other
