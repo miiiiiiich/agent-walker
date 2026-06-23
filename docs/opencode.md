@@ -3,9 +3,10 @@
 ## Where the data comes from
 
 `~/.local/share/opencode/opencode.db` — a local SQLite store (overridable with
-`OPENCODE_HOME`, or `$XDG_DATA_HOME/opencode`). Read-only and **immutable**, so
-agent-walker never locks the DB, never recovers its WAL, and never writes to your
-OpenCode store. Storage location is documented at
+`OPENCODE_HOME`, or `$XDG_DATA_HOME/opencode`). agent-walker reads a **private
+snapshot copy** (the DB plus its WAL, copied to a temp dir) and never lets SQLite
+open your live store, so it can't lock, checkpoint, or corrupt it. Storage
+location is documented at
 [opencode.ai/docs/troubleshooting](https://opencode.ai/docs/troubleshooting/);
 the schema lives in the OSS repo (`sst/opencode`). Auto-detected: the OpenCode
 tab appears only when `opencode.db` exists.
@@ -43,5 +44,5 @@ the pricing database, so their cost shows as $0 even though their tokens count.
 
 - Only `opencode.db` is read; per-channel stores (`opencode-<channel>.db`) are
   not, for now.
-- Immutable reads see the last-committed state, so a session still being written
-  may lag by one checkpoint.
+- The snapshot is taken at launch, so a session still being written shows up on
+  the next run.

@@ -8,17 +8,18 @@
 //! (`type:"tool"`, `tool`). Storage layout is documented at
 //! <https://opencode.ai/docs/troubleshooting/> and the OSS repo (sst/opencode).
 //!
-//! We open the DB **read-only and immutable** (no locks, no WAL recovery) so
-//! agent-walker never touches the user's OpenCode store. Cost is left to the
-//! shared LiteLLM pricing path like every other provider — the per-message
-//! `cost` OpenCode records (and local models such as Ollama, which report no
-//! priced usage) is not used here.
+//! We read a **private snapshot copy** of the DB (copied to a temp dir, WAL and
+//! all) and never let SQLite open the user's live store, so we can't lock,
+//! checkpoint, or corrupt it. Cost is left to the shared LiteLLM pricing path
+//! like every other provider — the per-message `cost` OpenCode records (and
+//! local models such as Ollama, which report no priced usage) is not used here.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, params};
 use serde_json::Value;
+use tempfile::TempDir;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::project_from_cwd;
@@ -38,7 +39,8 @@ pub fn collect(
     if !db_path.exists() {
         return collection;
     }
-    let Some(conn) = open_readonly(&db_path) else {
+    // `_snapshot` must outlive `conn` — it owns the temp copy `conn` reads.
+    let Some((conn, _snapshot)) = open_snapshot(&db_path) else {
         collection.stats.unreadable_files += 1;
         return collection;
     };
@@ -60,16 +62,31 @@ pub fn collect(
     collection
 }
 
-/// Open the DB read-only and immutable: SQLite takes no locks and never tries to
-/// recover the WAL, so a live OpenCode session can't be disturbed and we can't
-/// write to the user's store. Immutable reads the last-committed state.
-fn open_readonly(db: &Path) -> Option<Connection> {
-    let uri = format!("file:{}?immutable=1", db.to_string_lossy());
-    Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )
-    .ok()
+/// Copy the DB (plus any `-wal` / `-shm` sidecars) into a throwaway temp dir and
+/// open the *copy*. The user's store is only ever read via `fs::copy` — never
+/// opened by SQLite — so a live OpenCode session can't be locked, checkpointed,
+/// or corrupted, and copying the WAL keeps the snapshot consistent (no
+/// `immutable=1` foot-gun). The `TempDir` is returned so it outlives the
+/// connection and is removed on drop.
+fn open_snapshot(db: &Path) -> Option<(Connection, TempDir)> {
+    let snapshot = TempDir::new().ok()?;
+    let dest = snapshot.path().join("opencode.db");
+    std::fs::copy(db, &dest).ok()?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = with_suffix(db, suffix);
+        if sidecar.exists() {
+            let _ = std::fs::copy(&sidecar, with_suffix(&dest, suffix));
+        }
+    }
+    Connection::open(&dest).ok().map(|conn| (conn, snapshot))
+}
+
+/// SQLite sidecar path: the DB filename with a suffix appended (`opencode.db`
+/// → `opencode.db-wal`). Appends to the whole path so non-UTF-8 names survive.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// One usage + duration event per assistant message (the per-turn totals live on
@@ -80,10 +97,14 @@ fn parse_messages(
     local_offset: UtcOffset,
     collection: &mut Collection,
 ) {
-    let Ok(mut stmt) = conn.prepare("SELECT session_id, data FROM message") else {
+    // Filter on the indexed `time_created` column so SQLite skips out-of-window
+    // rows before we ever parse their JSON in Rust.
+    let Ok(mut stmt) =
+        conn.prepare("SELECT session_id, data FROM message WHERE time_created >= ?1")
+    else {
         return;
     };
-    let Ok(rows) = stmt.query_map([], |row| {
+    let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) else {
         return;
@@ -98,9 +119,6 @@ fn parse_messages(
         let Some(created_ms) = value.pointer("/time/created").and_then(Value::as_i64) else {
             continue;
         };
-        if created_ms < floor_ms {
-            continue;
-        }
         let Some(timestamp) = ms_to_offset(created_ms, local_offset) else {
             continue;
         };
@@ -142,7 +160,10 @@ fn parse_messages(
             collection.duration_events.push(DurationEvent {
                 timestamp: Some(timestamp),
                 session_id: Some(session_id),
-                duration_ms: u64::try_from(completed_ms - created_ms).unwrap_or(0),
+                // `time.completed` is untrusted; saturating_sub avoids an
+                // overflow panic, and a clock that ran backwards (completed <
+                // created) falls to 0 rather than a garbage duration.
+                duration_ms: u64::try_from(completed_ms.saturating_sub(created_ms)).unwrap_or(0),
                 status: value
                     .get("finish")
                     .and_then(Value::as_str)
@@ -160,12 +181,14 @@ fn parse_tool_parts(
     local_offset: UtcOffset,
     collection: &mut Collection,
 ) {
-    let Ok(mut stmt) = conn
-        .prepare("SELECT session_id, data FROM part WHERE json_extract(data, '$.type') = 'tool'")
-    else {
+    // `time_created >= ?1` first lets SQLite drop out-of-window rows on the cheap
+    // integer column before the per-row `json_extract` ever runs.
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session_id, data FROM part WHERE time_created >= ?1 AND json_extract(data, '$.type') = 'tool'",
+    ) else {
         return;
     };
-    let Ok(rows) = stmt.query_map([], |row| {
+    let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) else {
         return;
@@ -181,9 +204,6 @@ fn parse_tool_parts(
             continue;
         };
         let start_ms = value.pointer("/state/time/start").and_then(Value::as_i64);
-        if start_ms.is_some_and(|ms| ms < floor_ms) {
-            continue;
-        }
         collection.tool_events.push(ToolEvent {
             timestamp: start_ms.and_then(|ms| ms_to_offset(ms, local_offset)),
             session_id: Some(session_id),
@@ -292,5 +312,29 @@ mod tests {
         assert!(collection.usage_events.is_empty());
         assert!(collection.tool_events.is_empty());
         assert!(collection.session_touches.is_empty());
+    }
+
+    #[test]
+    fn backwards_clock_duration_is_zero() {
+        // A corrupt / skewed `time.completed` earlier than `time.created` must
+        // not overflow or produce a garbage duration — it falls to 0.
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .expect("create schema");
+        let backwards = r#"{"role":"assistant","tokens":{"input":1,"output":1},"time":{"created":2000,"completed":1000}}"#;
+        conn.execute(
+            "INSERT INTO message VALUES ('m1','s1',2000,2000,?1)",
+            [backwards],
+        )
+        .expect("insert");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 0);
     }
 }

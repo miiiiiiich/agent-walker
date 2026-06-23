@@ -38,9 +38,10 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 resvg = "0.47"
 arboard = "3.6.1"
+# Read a private snapshot copy of OpenCode's live SQLite store (collector/opencode).
+tempfile = "3.24.0"
 
 [dev-dependencies]
-tempfile = "3.24.0"
 
 # The profile that 'dist' will build with
 [profile.dist]
