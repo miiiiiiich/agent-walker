@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- OpenCode support. Its local SQLite store (`~/.local/share/opencode/opencode.db`,
+  or `$OPENCODE_HOME` / `$XDG_DATA_HOME`) is auto-detected and read **read-only**,
+  contributing tokens, models, tools, projects, durations, and activity — near
+  parity with Claude and Codex. `--opencode-dir` points at a non-standard
+  location.
+
 ## [0.4.0] - 2026-06-23
 
 ### Changed

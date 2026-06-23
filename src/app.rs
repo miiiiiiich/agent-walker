@@ -8,7 +8,7 @@ use clap_complete::Shell;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
-use crate::collector::{agy, claude, codex};
+use crate::collector::{agy, claude, codex, opencode};
 use crate::format::snapshot_app;
 use crate::model::{AppSummary, Collection};
 use crate::ui;
@@ -37,6 +37,13 @@ pub struct Args {
     /// never feeds the token totals.
     #[arg(long, value_name = "DIR")]
     pub agy_dir: Option<PathBuf>,
+
+    /// Override the OpenCode data directory (default `~/.local/share/opencode`,
+    /// or `$OPENCODE_HOME` / `$XDG_DATA_HOME/opencode`). Auto-detected: its tab
+    /// appears only when `opencode.db` is present. Tokens are read from the
+    /// local SQLite store.
+    #[arg(long, value_name = "DIR")]
+    pub opencode_dir: Option<PathBuf>,
 
     /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
     /// month of logs. The codename level is always computed from the most recent
@@ -84,6 +91,10 @@ pub struct Config {
     /// rather than fatal, since Antigravity is optional — its tab only shows up
     /// when logs are actually found there.
     pub agy_dir: Option<PathBuf>,
+    /// OpenCode data directory, or `None` when it can't be resolved. Optional and
+    /// auto-detected like Antigravity: the tab appears only when `opencode.db`
+    /// exists there.
+    pub opencode_dir: Option<PathBuf>,
     pub days: u16,
     pub use_cache: bool,
     /// Local UTC offset captured at startup (single-threaded moment), used to
@@ -119,6 +130,8 @@ pub fn run(args: Args) -> Result<()> {
         // swallowed to None instead of fatal — agy is optional, so a sandbox
         // without a home dir should still start and just omit the agy tab.
         agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
+        // Same treatment as agy: auto-detected, resolution failure swallowed.
+        opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
         days: args.days,
         use_cache: !args.no_cache,
         local_offset,
@@ -214,33 +227,44 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         .max(u64::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30) + 1);
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
-    let (codex_result, (agy_result, claude_collection)) = std::thread::scope(|scope| {
-        let codex_handle = scope.spawn(|| {
-            codex::collect(
-                &config.codex_dir,
+    let (codex_result, agy_result, opencode_result, claude_collection) =
+        std::thread::scope(|scope| {
+            let codex_handle = scope.spawn(|| {
+                codex::collect(
+                    &config.codex_dir,
+                    mtime_floor,
+                    config.use_cache,
+                    config.local_offset,
+                )
+            });
+            // Antigravity and OpenCode are probed whenever their directory
+            // resolved; the collector returns an empty collection for a missing
+            // dir / DB, and an empty provider is filtered out before it ever
+            // becomes a tab. (Antigravity logs carry no token usage; OpenCode's
+            // SQLite store does.)
+            let agy_handle = scope.spawn(|| {
+                config.agy_dir.as_ref().map(|dir| {
+                    agy::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let opencode_handle = scope.spawn(|| {
+                config.opencode_dir.as_ref().map(|dir| {
+                    opencode::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let claude_collection = claude::collect(
+                &config.claude_dir,
                 mtime_floor,
                 config.use_cache,
                 config.local_offset,
+            );
+            (
+                codex_handle.join(),
+                agy_handle.join(),
+                opencode_handle.join(),
+                claude_collection,
             )
         });
-        // Antigravity is probed whenever its directory resolved; the collector
-        // returns an empty collection for a missing dir, and an empty provider
-        // is filtered out before it ever becomes a tab. Its logs carry no token
-        // usage, so it never skews the totals regardless.
-        let agy_handle = scope.spawn(|| {
-            config
-                .agy_dir
-                .as_ref()
-                .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
-        });
-        let claude_collection = claude::collect(
-            &config.claude_dir,
-            mtime_floor,
-            config.use_cache,
-            config.local_offset,
-        );
-        (codex_handle.join(), (agy_handle.join(), claude_collection))
-    });
 
     let mut collections = vec![
         claude_collection,
@@ -248,6 +272,9 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
     ];
     if let Some(agy) = agy_result.map_err(|_| anyhow!("Antigravity collector thread panicked"))? {
         collections.push(agy);
+    }
+    if let Some(oc) = opencode_result.map_err(|_| anyhow!("OpenCode collector thread panicked"))? {
+        collections.push(oc);
     }
 
     let providers = collections
@@ -280,6 +307,10 @@ fn default_codex_dir() -> Result<PathBuf> {
 
 fn default_agy_dir() -> Result<PathBuf> {
     crate::paths::agy_home()
+}
+
+fn default_opencode_dir() -> Result<PathBuf> {
+    crate::paths::opencode_home()
 }
 
 fn demo_enabled() -> bool {

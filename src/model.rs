@@ -10,6 +10,7 @@ pub enum Provider {
     Claude,
     Codex,
     Agy,
+    OpenCode,
 }
 
 impl Provider {
@@ -19,6 +20,7 @@ impl Provider {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Agy => "Agy",
+            Self::OpenCode => "OpenCode",
         }
     }
 }
