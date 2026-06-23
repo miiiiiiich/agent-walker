@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-06-22
+## [0.4.0] - 2026-06-23
 
 ### Changed
 
@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how people actually run their agents. **Most people's codename will change.**
   The exact rule stays undisclosed by design — the title is the only thing
   surfaced.
-- The horizontal axis is now an ordered "how skilfully you drive your agents"
-  tier, blended across *all* your agents combined and measured so it doesn't
-  simply climb with volume. The grid reads as how much (row) × how well (column).
-  It's the same tier on every tab — your identity — while each tab's animal is
-  scaled by that provider's volume. The exact blend stays undisclosed by design.
+- The grid now reads as **how much (row) × how well you orchestrate (column)**.
+  The column is an ordered tier measured across *all* your agents combined and
+  built so it doesn't simply climb with volume. It's the same tier on every tab —
+  your identity — while each tab's animal is scaled by that provider's volume.
+  The exact rule stays undisclosed by design.
 - Renamed the "Combined" tab to "Total".
 - Provider tabs are now data-driven: only agents you actually use get a tab, and
   they're ordered by how much you use them (most-used first, Total last). An
