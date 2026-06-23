@@ -110,8 +110,14 @@ fn parse_messages(
         return;
     };
 
-    for (session_id, data) in rows.flatten() {
+    for row in rows {
         collection.stats.lines_seen += 1;
+        let Ok((session_id, data)) = row else {
+            // A row-level SQLite error (type mismatch, mid-scan corruption)
+            // should surface in the stats, not vanish like `flatten()` would.
+            collection.stats.parse_errors += 1;
+            continue;
+        };
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             collection.stats.parse_errors += 1;
             continue;
@@ -194,8 +200,12 @@ fn parse_tool_parts(
         return;
     };
 
-    for (session_id, data) in rows.flatten() {
+    for row in rows {
         collection.stats.lines_seen += 1;
+        let Ok((session_id, data)) = row else {
+            collection.stats.parse_errors += 1;
+            continue;
+        };
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             collection.stats.parse_errors += 1;
             continue;
