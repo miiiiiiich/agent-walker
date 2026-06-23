@@ -2,14 +2,25 @@
 
 ## Where the data comes from
 
-`~/.local/share/opencode/opencode.db` — a local SQLite store (overridable with
-`OPENCODE_HOME`, or `$XDG_DATA_HOME/opencode`). agent-walker reads a **private
-snapshot copy** (the DB plus its WAL, copied to a temp dir) and never lets SQLite
-open your live store, so it can't lock, checkpoint, or corrupt it. Storage
-location is documented at
+`~/.local/share/opencode/opencode.db` — a local SQLite store (the data dir is
+overridable with `OPENCODE_HOME`, or `$XDG_DATA_HOME/opencode`). agent-walker
+follows OpenCode's own database resolver:
+
+- if `OPENCODE_DB` is set, that file is read (an absolute path as-is, a relative
+  one under the data dir; `:memory:` can't be read from another process, so it's
+  skipped);
+- otherwise every `opencode*.db` in the data dir is read, covering both the
+  default `opencode.db` and the `opencode-<channel>.db` a non-stable install
+  (e.g. a `dev` build) writes.
+
+It opens each DB **read-only** and takes a consistent snapshot through SQLite's
+online **Backup API** (an in-memory copy under SQLite's read lock), then reads
+from that copy — so it never locks, checkpoints, writes, or corrupts your live
+store, and there's no file-copy race between the DB and its WAL. Storage location
+is documented at
 [opencode.ai/docs/troubleshooting](https://opencode.ai/docs/troubleshooting/);
 the schema lives in the OSS repo (`sst/opencode`). Auto-detected: the OpenCode
-tab appears only when `opencode.db` exists.
+tab appears only when a matching DB exists.
 
 ## What's captured
 
@@ -42,7 +53,7 @@ the pricing database, so their cost shows as $0 even though their tokens count.
 
 ## Caveats
 
-- Only `opencode.db` is read; per-channel stores (`opencode-<channel>.db`) are
-  not, for now.
 - The snapshot is taken at launch, so a session still being written shows up on
   the next run.
+- A live DB whose WAL still needs recovery and has no `-shm` present can't be
+  opened read-only; that DB is skipped rather than touched.

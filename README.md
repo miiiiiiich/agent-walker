@@ -95,7 +95,7 @@ card — just glance before you post.
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
-| OpenCode | `~/.local/share/opencode/opencode.db` | auto-detected (SQLite, read-only); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
+| OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
 | Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above

@@ -8,18 +8,21 @@
 //! (`type:"tool"`, `tool`). Storage layout is documented at
 //! <https://opencode.ai/docs/troubleshooting/> and the OSS repo (sst/opencode).
 //!
-//! We read a **private snapshot copy** of the DB (copied to a temp dir, WAL and
-//! all) and never let SQLite open the user's live store, so we can't lock,
-//! checkpoint, or corrupt it. Cost is left to the shared LiteLLM pricing path
-//! like every other provider — the per-message `cost` OpenCode records (and
-//! local models such as Ollama, which report no priced usage) is not used here.
+//! We open the live DB **read-only** and take a consistent in-memory snapshot
+//! through SQLite's online Backup API, then read from that copy. The source is
+//! never written, locked for writes, or checkpointed, and the backup runs under
+//! SQLite's own read lock — so there's no `fs::copy` race between the db and its
+//! `-wal`. Cost is left to the shared LiteLLM pricing path like every other
+//! provider — the per-message `cost` OpenCode records (and local models such as
+//! Ollama, which report no priced usage) is not used here.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, params};
+use rusqlite::backup::Backup;
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::Value;
-use tempfile::TempDir;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::project_from_cwd;
@@ -35,16 +38,6 @@ pub fn collect(
     local_offset: UtcOffset,
 ) -> Collection {
     let mut collection = Collection::new(Provider::OpenCode, root.to_path_buf());
-    let db_path = root.join("opencode.db");
-    if !db_path.exists() {
-        return collection;
-    }
-    // `_snapshot` must outlive `conn` — it owns the temp copy `conn` reads.
-    let Some((conn, _snapshot)) = open_snapshot(&db_path) else {
-        collection.stats.unreadable_files += 1;
-        return collection;
-    };
-    collection.stats.files_seen += 1;
 
     // Events older than the history window can't be relevant; the timestamps are
     // epoch milliseconds (`time.created`), so compare in the same unit.
@@ -53,8 +46,15 @@ pub fn collect(
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0);
 
-    parse_messages(&conn, floor_ms, local_offset, &mut collection);
-    parse_tool_parts(&conn, floor_ms, local_offset, &mut collection);
+    for db_path in db_paths(root) {
+        let Some(conn) = open_snapshot(&db_path) else {
+            collection.stats.unreadable_files += 1;
+            continue;
+        };
+        collection.stats.files_seen += 1;
+        parse_messages(&conn, floor_ms, local_offset, &mut collection);
+        parse_tool_parts(&conn, floor_ms, local_offset, &mut collection);
+    }
 
     collection.stats.usage_events = collection.usage_events.len();
     collection.stats.tool_events = collection.tool_events.len();
@@ -62,31 +62,76 @@ pub fn collect(
     collection
 }
 
-/// Copy the DB (plus any `-wal` / `-shm` sidecars) into a throwaway temp dir and
-/// open the *copy*. The user's store is only ever read via `fs::copy` — never
-/// opened by SQLite — so a live OpenCode session can't be locked, checkpointed,
-/// or corrupted, and copying the WAL keeps the snapshot consistent (no
-/// `immutable=1` foot-gun). The `TempDir` is returned so it outlives the
-/// connection and is removed on drop.
-fn open_snapshot(db: &Path) -> Option<(Connection, TempDir)> {
-    let snapshot = TempDir::new().ok()?;
-    let dest = snapshot.path().join("opencode.db");
-    std::fs::copy(db, &dest).ok()?;
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = with_suffix(db, suffix);
-        if sidecar.exists() {
-            let _ = std::fs::copy(&sidecar, with_suffix(&dest, suffix));
-        }
-    }
-    Connection::open(&dest).ok().map(|conn| (conn, snapshot))
+/// The OpenCode DB file(s) to read. Reads the `OPENCODE_DB` override from the
+/// environment, then defers to [`resolve_db_paths`] (kept env-free so it stays
+/// testable, like `paths::resolve_root`).
+fn db_paths(root: &Path) -> Vec<PathBuf> {
+    resolve_db_paths(root, std::env::var_os("OPENCODE_DB"))
 }
 
-/// SQLite sidecar path: the DB filename with a suffix appended (`opencode.db`
-/// → `opencode.db-wal`). Appends to the whole path so non-UTF-8 names survive.
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(suffix);
-    PathBuf::from(name)
+/// Mirror OpenCode's own resolver: `OPENCODE_DB` wins (an absolute path used
+/// as-is, a relative one joined under the data dir; `:memory:` can't be read
+/// from another process, so it's skipped). Otherwise read every `opencode*.db`
+/// in the data dir, which covers both the default `opencode.db` and the
+/// per-channel `opencode-<channel>.db` a non-stable install writes.
+fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> {
+    if let Some(db) = override_db {
+        if db == *OsStr::new(":memory:") {
+            return Vec::new();
+        }
+        let path = PathBuf::from(&db);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        // A missing override is "absent", not "unreadable" — skip it silently.
+        return if path.exists() {
+            vec![path]
+        } else {
+            Vec::new()
+        };
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let is_db = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("db"));
+            let named_opencode = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("opencode"));
+            is_db && named_opencode
+        })
+        .collect();
+    // Deterministic order so files_seen / parse order doesn't depend on the FS.
+    paths.sort();
+    paths
+}
+
+/// Open the live DB read-only and copy it into an in-memory database via
+/// SQLite's online Backup API, returning a connection to that copy. The backup
+/// holds a read lock for the duration of the page copy, so it's a consistent
+/// snapshot even mid-write — no `fs::copy` race between the db and its `-wal`,
+/// no temp files, and the user's store is never written or checkpointed (the
+/// `immutable=1` foot-gun is avoided too). A live DB whose WAL needs recovery
+/// with no `-shm` present can't be opened read-only; that degrades to an empty
+/// collection rather than touching the store.
+fn open_snapshot(db: &Path) -> Option<Connection> {
+    let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut snapshot = Connection::open_in_memory().ok()?;
+    {
+        let backup = Backup::new(&source, &mut snapshot).ok()?;
+        backup
+            .run_to_completion(1024, Duration::from_millis(0), None)
+            .ok()?;
+    }
+    Some(snapshot)
 }
 
 /// One usage + duration event per assistant message (the per-turn totals live on
@@ -246,7 +291,11 @@ mod tests {
     const ASSISTANT_DONE_MS: i64 = 1_781_542_436_778;
 
     fn write_db(dir: &Path) {
-        let conn = Connection::open(dir.join("opencode.db")).expect("open temp db");
+        write_db_at(&dir.join("opencode.db"));
+    }
+
+    fn write_db_at(db: &Path) {
+        let conn = Connection::open(db).expect("open temp db");
         conn.execute_batch(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
              CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
@@ -301,6 +350,60 @@ mod tests {
 
         // A touch per message (user + assistant), for concurrency / active days.
         assert_eq!(collection.session_touches.len(), 2);
+    }
+
+    #[test]
+    fn channel_db_is_collected() {
+        // A non-stable install writes `opencode-<channel>.db` instead of the
+        // default name; the glob must still pick it up.
+        let dir = TempDir::new().expect("tempdir");
+        write_db_at(&dir.path().join("opencode-dev.db"));
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.stats.files_seen, 1);
+    }
+
+    #[test]
+    fn resolve_db_paths_globs_channel_dbs_sorted() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db_at(&dir.path().join("opencode.db"));
+        write_db_at(&dir.path().join("opencode-beta.db"));
+        // A `-wal` sidecar must not be mistaken for a DB file.
+        std::fs::write(dir.path().join("opencode.db-wal"), b"").expect("wal");
+        let paths = resolve_db_paths(dir.path(), None);
+        assert_eq!(
+            paths,
+            vec![
+                dir.path().join("opencode-beta.db"),
+                dir.path().join("opencode.db"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_db_paths_honors_absolute_override() {
+        let dir = TempDir::new().expect("tempdir");
+        let custom = dir.path().join("custom.db");
+        write_db_at(&custom);
+        // Even with a default db present, the absolute override wins exclusively.
+        write_db_at(&dir.path().join("opencode.db"));
+        let paths = resolve_db_paths(dir.path(), Some(custom.clone().into_os_string()));
+        assert_eq!(paths, vec![custom]);
+    }
+
+    #[test]
+    fn resolve_db_paths_memory_override_is_skipped() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db_at(&dir.path().join("opencode.db"));
+        let paths = resolve_db_paths(dir.path(), Some(OsString::from(":memory:")));
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn resolve_db_paths_missing_override_is_absent() {
+        let dir = TempDir::new().expect("tempdir");
+        let paths = resolve_db_paths(dir.path(), Some(OsString::from("/no/such/file.db")));
+        assert!(paths.is_empty());
     }
 
     #[test]
