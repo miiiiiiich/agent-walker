@@ -1,0 +1,3 @@
+# Proper nouns / product names that `clippy::doc_markdown` must not flag as
+# un-backticked code identifiers. `..` keeps clippy's built-in allowlist.
+doc-valid-idents = ["OpenCode", "Ollama", "SQLite", "LiteLLM", ".."]

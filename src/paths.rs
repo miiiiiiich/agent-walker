@@ -66,6 +66,22 @@ pub fn agy_home() -> Result<PathBuf> {
     Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
+/// Data directory OpenCode reads. `OPENCODE_HOME` overrides it; otherwise it
+/// follows the XDG data dir (`$XDG_DATA_HOME/opencode`, default
+/// `~/.local/share/opencode`), as documented at
+/// <https://opencode.ai/docs/troubleshooting/>. The SQLite store lives at
+/// `<root>/opencode.db`.
+pub fn opencode_home() -> Result<PathBuf> {
+    resolve_root(std::env::var_os("OPENCODE_HOME"), || {
+        let xdg = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty());
+        let base = match xdg {
+            Some(value) => PathBuf::from(value),
+            None => home_dir()?.join(".local").join("share"),
+        };
+        Ok(base.join("opencode"))
+    })
+}
+
 /// Base directory for `agent-walker`'s parse cache. Stays at
 /// `<home>/.cache/agent-walker` on every platform so a macOS/Linux user
 /// upgrading does not lose their warmed cache; on Windows this resolves under

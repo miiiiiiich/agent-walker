@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-23
+
+### Added
+
+- OpenCode support. Its local SQLite store (`~/.local/share/opencode`, or
+  `$OPENCODE_HOME` / `$XDG_DATA_HOME`) is auto-detected and read **read-only**
+  (never locks, checkpoints, or writes your live store), contributing tokens,
+  models, tools, projects, durations, and activity — near parity with Claude and
+  Codex. Follows OpenCode's own resolver: `OPENCODE_DB` overrides the file, and
+  per-channel `opencode-<channel>.db` stores are picked up alongside the default
+  (deduped by row id). Reasoning tokens are folded into the output total.
+  `--opencode-dir` points at a non-standard data dir.
+
 ## [0.4.0] - 2026-06-23
 
 ### Changed
@@ -98,6 +111,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.5.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.5.0
 [0.4.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.0

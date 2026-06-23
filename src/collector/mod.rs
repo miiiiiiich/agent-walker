@@ -1,6 +1,7 @@
 pub mod agy;
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
