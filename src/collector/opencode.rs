@@ -124,11 +124,16 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
 /// collection rather than touching the store.
 fn open_snapshot(db: &Path) -> Option<Connection> {
     let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    // If OpenCode holds a write lock as we attach, wait briefly rather than
+    // failing the snapshot outright.
+    let _ = source.busy_timeout(Duration::from_millis(500));
     let mut snapshot = Connection::open_in_memory().ok()?;
     {
         let backup = Backup::new(&source, &mut snapshot).ok()?;
+        // Pause between any step that hits BUSY/LOCKED so a contended copy backs
+        // off instead of spinning.
         backup
-            .run_to_completion(1024, Duration::from_millis(0), None)
+            .run_to_completion(1024, Duration::from_millis(25), None)
             .ok()?;
     }
     Some(snapshot)
