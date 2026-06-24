@@ -155,9 +155,9 @@ fn jwt_subject(jwt: &str) -> Option<String> {
 }
 
 /// Normalize a `WorkOS` subject into the id Cursor's cookie expects: a
-/// `…|user_XXX` suffix collapses to `user_XXX` (native Cursor accounts), while a
-/// bridged OAuth subject (`google-oauth2|<id>`, `github|<id>`, `oidc|<id>`) is
-/// kept verbatim.
+/// `…|user_XXX` suffix collapses to `user_XXX` (native Cursor accounts), while
+/// any other bridged-OAuth subject (`<provider>|<id>`, for any provider) is kept
+/// verbatim — no provider allowlist, so Microsoft / GitLab / SAML logins work too.
 fn normalize_subject(subject: &str) -> Option<String> {
     // A `…|user_XXX` suffix or an already-bare `user_XXX` collapses to `user_XXX`.
     let tail = subject.rsplit_once('|').map_or(subject, |(_, tail)| tail);
@@ -167,13 +167,13 @@ fn normalize_subject(subject: &str) -> Option<String> {
     {
         return Some(tail.to_owned());
     }
-    let bridged = ["google-oauth2|", "github|", "oidc|", "auth0|"]
-        .iter()
-        .any(|prefix| subject.starts_with(prefix));
-    if bridged && subject.matches('|').count() == 1 {
-        return Some(subject.to_owned());
+    // Otherwise accept any single-pipe `<provider>|<id>` with non-empty halves.
+    match subject.split_once('|') {
+        Some((provider, id)) if !provider.is_empty() && !id.is_empty() && !id.contains('|') => {
+            Some(subject.to_owned())
+        }
+        _ => None,
     }
-    None
 }
 
 /// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
@@ -445,6 +445,12 @@ mod tests {
             normalize_subject("google-oauth2|209269195").as_deref(),
             Some("google-oauth2|209269195")
         );
+        // No provider allowlist: any single-pipe subject is kept verbatim.
+        assert_eq!(
+            normalize_subject("microsoft|abc123").as_deref(),
+            Some("microsoft|abc123")
+        );
         assert_eq!(normalize_subject("weird-value"), None);
+        assert_eq!(normalize_subject("a|b|c"), None);
     }
 }
