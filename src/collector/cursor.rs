@@ -17,13 +17,12 @@
 //! `Cost` column is carried through as `UsageEvent::reported_cost_usd`.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
-use std::time::Duration;
 use time::OffsetDateTime;
 use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
@@ -73,7 +72,7 @@ pub fn collect(
     };
     collection.stats.files_seen += 1;
 
-    let floor = mtime_floor.and_then(systemtime_to_offset);
+    let floor = mtime_floor.map(OffsetDateTime::from);
     parse_csv(&csv, floor, local_offset, &mut collection);
 
     collection.stats.usage_events = collection.usage_events.len();
@@ -291,11 +290,6 @@ fn split_csv_line(line: &str) -> Vec<String> {
     }
     fields.push(current);
     fields
-}
-
-fn systemtime_to_offset(time: SystemTime) -> Option<OffsetDateTime> {
-    let nanos = time.duration_since(UNIX_EPOCH).ok()?.as_nanos();
-    OffsetDateTime::from_unix_timestamp_nanos(i128::try_from(nanos).ok()?).ok()
 }
 
 #[cfg(test)]
