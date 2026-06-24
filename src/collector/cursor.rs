@@ -182,7 +182,9 @@ fn normalize_subject(subject: &str) -> Option<String> {
 /// Cursor), other statuses and transport failures pass their own message.
 fn fetch_csv(cookie: &str) -> Result<String, String> {
     let response = ureq::get(CSV_URL)
-        .timeout(Duration::from_secs(20))
+        // The fetch is synchronous and the dashboard waits on it, so keep the
+        // cap short — the CSV is tiny; a slow network shouldn't hang startup.
+        .timeout(Duration::from_secs(8))
         .set("Cookie", cookie)
         .set("Referer", REFERER)
         .set("User-Agent", USER_AGENT)
@@ -214,7 +216,11 @@ fn parse_csv(
     };
     // Strip a UTF-8 BOM so the first column name still matches "Date".
     let header = header.trim_start_matches('\u{feff}');
-    let columns: Vec<String> = split_csv_line(header);
+    // Trim each header cell so `"Date, Model"`-style spacing still resolves.
+    let columns: Vec<String> = split_csv_line(header)
+        .into_iter()
+        .map(|column| column.trim().to_owned())
+        .collect();
     let index = |name: &str| columns.iter().position(|column| column == name);
 
     let (Some(date_idx), Some(model_idx), Some(input_idx), Some(cache_read_idx), Some(output_idx)) = (
