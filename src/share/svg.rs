@@ -123,20 +123,13 @@ fn draw_header(s: &mut String, card: &ShareCard) {
         s,
         r#"<text x="{LX}" y="76" fill="{C_DIM}" font-size="15" font-weight="700" letter-spacing="4">CODENAME</text>"#
     );
-    if card.animal == "Chick" {
-        let _ = write!(
-            s,
-            r#"<text x="{LX}" y="118" fill="{C_TEXT}" font-size="34" font-weight="800">Chick</text>"#
-        );
-    } else {
-        let color = ops_color(&card.ops);
-        let _ = write!(
-            s,
-            r#"<text x="{LX}" y="118" font-size="34" font-weight="800" letter-spacing="0.5"><tspan fill="{color}">{}</tspan><tspan fill="{C_TEXT}"> {}</tspan></text>"#,
-            xml_escape(&card.ops),
-            xml_escape(&card.animal)
-        );
-    }
+    let color = ops_color(&card.ops);
+    let _ = write!(
+        s,
+        r#"<text x="{LX}" y="118" font-size="34" font-weight="800" letter-spacing="0.5"><tspan fill="{color}">{}</tspan><tspan fill="{C_TEXT}"> {}</tspan></text>"#,
+        xml_escape(&card.ops),
+        xml_escape(&card.animal)
+    );
 
     let _ = write!(
         s,

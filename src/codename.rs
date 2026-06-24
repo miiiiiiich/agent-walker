@@ -4,8 +4,8 @@
 //! trapezoid grid — **ROW = monthly token volume (how much), COLUMN = an
 //! ordered orchestration tier (how well you drive your agents)**. The four
 //! ascending columns are `Scout` (特徴なし) → `Tools` (機能活用) → `Parallel`
-//! (並列) → `Apex` (頂点). OPS is the dominant time-of-day; "Chick" is the
-//! no-data floor.
+//! (並列) → `Apex` (頂点). OPS is the dominant time-of-day; "Ant" is the floor
+//! (R8 and anything below it).
 //!
 //! The grid is an inverted pyramid: high orchestration is only reachable at high
 //! volume (you can't run many agents in parallel on a trickle of tokens), so the
@@ -54,22 +54,20 @@ pub enum Style {
 pub struct Codename {
     /// Time-of-day word: "Aurora" / "Sol" / "Luna" / "Eclipse".
     pub ops: &'static str,
-    /// Grid animal, or "Chick" for the no-data floor.
+    /// Grid animal; `FLOOR_ANIMAL` ("Ant") for anything below the grid floor.
     pub animal: &'static str,
 }
 
 impl Codename {
-    /// The displayed title. Chick (no data) carries no time prefix.
+    /// The displayed title, always `"<OPS> <animal>"`.
     pub fn title(&self) -> String {
-        if self.animal == CHICK {
-            CHICK.to_owned()
-        } else {
-            format!("{} {}", self.ops, self.animal)
-        }
+        format!("{} {}", self.ops, self.animal)
     }
 }
 
-const CHICK: &str = "Chick";
+/// The lowest rank — used both for R8 in the grid and for anything below the
+/// floor, so the bottom of the ladder is always "Ant".
+const FLOOR_ANIMAL: &str = "Ant";
 
 // ===== Tunable thresholds — single source of truth =========================
 // ROW is volume; COLUMN is the orchestration tier. They are deliberately
@@ -92,10 +90,10 @@ const TOKENS_PER_DAY: [f64; 8] = [
     45_000_000.0,  // R5
     12_000_000.0,  // R6
     3_000_000.0,   // R7
-    // R8 floor IS the Chick floor by construction: anything below is Chick, not a
-    // row, so `band_row`'s "below grid" (9) is unreachable on the real path. Keep
-    // them tied so a future retune can't open a gap that maps sub-floor to R8.
-    CHICK_MIN_TOKENS_PER_DAY, // R8
+    // R8's threshold IS the floor: anything below maps to the same "Ant" rank,
+    // so `band_row`'s "below grid" (9) is unreachable on the real path. Keep them
+    // tied so a future retune can't open a gap between sub-floor and R8.
+    FLOOR_MIN_TOKENS_PER_DAY, // R8
 ];
 
 /// Orchestration normalisation: the value at which each signal reads "fully
@@ -116,9 +114,9 @@ const TIER_LOW: f64 = 0.25;
 const PARALLEL_MIN_ACTIVE_SECS: u64 = 2 * 60 * 60; // 2h of measured active time
 const TOOLING_MIN_CALLS: usize = 50; // total tool calls before trusting the share
 
-/// Below either floor the user is "Chick" (no real data yet).
-const CHICK_MIN_TOKENS_PER_DAY: f64 = 500_000.0;
-const CHICK_MIN_DAYS: usize = 3;
+/// Below either floor the sample is too thin for a real rank → "Ant".
+const FLOOR_MIN_TOKENS_PER_DAY: f64 = 500_000.0;
+const FLOOR_MIN_DAYS: usize = 3;
 
 /// OPS is decided when the top time-band leads the second by this many points;
 /// otherwise the day is "mixed" → Eclipse.
@@ -157,7 +155,7 @@ struct Metrics {
     parallel_share: f64,       // share of active time at 2+ concurrent
     tooling_ratio: f64,        // share of tool calls that are subagent / skill / MCP
     tokens_per_day: f64,       // tokens/day over the most recent window (level)
-    window_active_days: usize, // active days over the fixed 30-day window (Chick floor)
+    window_active_days: usize, // active days over the fixed 30-day window (floor gate)
 }
 
 /// Public entry: derive the codename for a summary. Computed on demand at
@@ -167,7 +165,7 @@ pub fn for_summary(summary: &Summary) -> Codename {
 }
 
 /// Like [`for_summary`], but the orchestration column is taken from `style_src`
-/// while the row, the OPS prefix, and the Chick floor come from `summary`.
+/// while the row, the OPS prefix, and the floor check come from `summary`.
 ///
 /// The UI passes the combined summary as `style_src`. Orchestration is a
 /// whole-person trait measured across every agent at once, so a provider tab
@@ -176,10 +174,12 @@ pub fn for_summary(summary: &Summary) -> Codename {
 /// this is identical to [`for_summary`].
 pub fn for_summary_styled(summary: &Summary, style_src: &Summary) -> Codename {
     let m = metrics(summary);
-    if is_chick(&m) {
+    // Below the grid floor everyone lands on the lowest rank, "Ant" — the same
+    // animal as R8, so the very bottom is always Ant (with a normal OPS prefix).
+    if is_below_floor(&m) {
         return Codename {
-            ops: "Eclipse",
-            animal: CHICK,
+            ops: ops(&summary.hourly_usage),
+            animal: FLOOR_ANIMAL,
         };
     }
     let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 8);
@@ -249,9 +249,10 @@ fn tokens_per_day(summary: &Summary) -> f64 {
     summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64
 }
 
-/// Below either floor the user has no real data yet → Chick.
-fn is_chick(m: &Metrics) -> bool {
-    m.tokens_per_day < CHICK_MIN_TOKENS_PER_DAY || m.window_active_days < CHICK_MIN_DAYS
+/// Below either floor (too few tokens/day, or too few active days) the sample is
+/// too thin for a real rank, so the user sits at the floor ("Ant").
+fn is_below_floor(m: &Metrics) -> bool {
+    m.tokens_per_day < FLOOR_MIN_TOKENS_PER_DAY || m.window_active_days < FLOOR_MIN_DAYS
 }
 
 /// The orchestration column from the two normalised axes. Apex needs both high
@@ -273,11 +274,11 @@ fn style_of(m: &Metrics) -> Style {
     }
 }
 
-/// Combined view used by the tests: `None` => Chick, otherwise `(style, row
+/// Combined view used by the tests: `None` => below floor, otherwise `(style, row
 /// 1..=8)`.
 #[cfg(test)]
 fn classify(m: &Metrics) -> Option<(Style, usize)> {
-    if is_chick(m) {
+    if is_below_floor(m) {
         return None;
     }
     let row = band_row(m.tokens_per_day, &TOKENS_PER_DAY).clamp(1, 8);
@@ -353,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn low_tokens_is_chick() {
+    fn low_tokens_is_below_floor() {
         let m = Metrics {
             tokens_per_day: 100_000.0,
             ..base()
@@ -362,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn short_window_active_days_is_chick() {
+    fn short_window_active_days_is_below_floor() {
         let m = Metrics {
             window_active_days: 2,
             ..base()
@@ -538,11 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn tab_below_floor_is_chick_regardless_of_src_style() {
+    fn tab_below_floor_is_ant_regardless_of_src_style() {
         let combined = apex_combined();
         let mut tab = combined.clone();
         tab.recent_window_volume = 100_000 * CODENAME_WINDOW_DAYS as u64; // below floor
-        assert_eq!(for_summary_styled(&tab, &combined).animal, CHICK);
+        assert_eq!(for_summary_styled(&tab, &combined).animal, "Ant");
     }
 
     #[test]
