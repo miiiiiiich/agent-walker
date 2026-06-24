@@ -53,13 +53,10 @@ pub struct Args {
     #[arg(long)]
     pub no_cursor: bool,
 
-    /// Cursor session JWT to use instead of reading the local `state.vscdb`
-    /// (also read from the `CURSOR_TOKEN` env var).
-    #[arg(long, value_name = "TOKEN")]
-    pub cursor_token: Option<String>,
-
     /// Override the path to Cursor's `state.vscdb` (default is the platform
-    /// config dir, e.g. `~/Library/Application Support/Cursor/...`).
+    /// config dir, e.g. `~/Library/Application Support/Cursor/...`). To supply a
+    /// session JWT directly, set the `CURSOR_TOKEN` env var — a token on the
+    /// command line would leak into `ps` and shell history.
     #[arg(long, value_name = "PATH")]
     pub cursor_state_db: Option<PathBuf>,
 
@@ -113,9 +110,10 @@ pub struct Config {
     /// auto-detected like Antigravity: the tab appears only when `opencode.db`
     /// exists there.
     pub opencode_dir: Option<PathBuf>,
-    /// Cursor is opt-in (it reaches the network). `None` means "don't collect
-    /// Cursor"; `Some` carries the resolved `state.vscdb` path, the CLI-config
-    /// path, and an optional token override.
+    /// Cursor settings, or `None` when it's disabled / undetectable (signed out
+    /// with no token, or `--no-cursor`). `Some` carries the resolved
+    /// `state.vscdb` path, the CLI-config path, and an optional token override.
+    /// Auto-detected, but the one collector that reaches the network.
     pub cursor: Option<CursorConfig>,
     pub days: u16,
     pub use_cache: bool,
@@ -124,13 +122,12 @@ pub struct Config {
     pub local_offset: UtcOffset,
 }
 
-/// Resolved Cursor opt-in settings (see `Config::cursor`).
+/// Resolved Cursor settings (see `Config::cursor`).
 #[derive(Debug, Clone)]
 pub struct CursorConfig {
     pub state_db: PathBuf,
     pub cli_config: PathBuf,
-    /// Token override from `--cursor-token` / `CURSOR_TOKEN`; `None` reads the
-    /// local `state.vscdb`.
+    /// Token override from `CURSOR_TOKEN`; `None` reads the local `state.vscdb`.
     pub token: Option<String>,
 }
 
@@ -167,8 +164,8 @@ pub fn run(args: Args) -> Result<()> {
         agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
         // Same treatment as agy: auto-detected, resolution failure swallowed.
         opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
-        // Cursor is the one opt-in, network-touching collector: only built when
-        // --cursor (or a token) is given, never auto-detected.
+        // Cursor is auto-detected (a signed-in state.vscdb) but is the one
+        // collector that reaches the network; `None` when signed out / disabled.
         cursor,
         days: args.days,
         use_cache: !args.no_cache,
@@ -370,7 +367,7 @@ fn default_opencode_dir() -> Result<PathBuf> {
 
 /// Build the Cursor config. Cursor is **auto-detected** like the other providers
 /// (no flag to turn it on): it runs whenever a session token is available — an
-/// explicit `--cursor-token` / `CURSOR_TOKEN`, or a local `state.vscdb` that
+/// explicit `CURSOR_TOKEN`, or a local `state.vscdb` that
 /// exists (you're signed into Cursor). `--no-cursor` disables it; signed out
 /// (no token on disk) it stays silent and never hits the network. Path
 /// resolution failures fall back to empty paths so an explicit token still works
@@ -379,11 +376,9 @@ fn cursor_config(args: &Args) -> Option<CursorConfig> {
     if args.no_cursor {
         return None;
     }
-    let token = args.cursor_token.clone().or_else(|| {
-        env::var("CURSOR_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty())
-    });
+    let token = env::var("CURSOR_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty());
     let state_db = args
         .cursor_state_db
         .clone()

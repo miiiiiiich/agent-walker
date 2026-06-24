@@ -80,7 +80,7 @@ Flags:
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `OPENCODE_HOME` when set) |
-| `--no-cursor` | Disable Cursor. Cursor is auto-detected when you're signed in and reaches the network to read its usage (see [Privacy](#privacy)); this turns it off. `--cursor-token` / `CURSOR_TOKEN` supplies the token directly |
+| `--no-cursor` | Disable Cursor. Cursor is auto-detected when you're signed in and reaches the network to read its usage (see [Privacy](#privacy)); this turns it off. `CURSOR_TOKEN` supplies the token directly |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename

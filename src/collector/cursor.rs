@@ -39,10 +39,10 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 
 const ACCESS_TOKEN_SQL: &str = "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'";
 
-/// Collect Cursor usage. `token_override` (from `--cursor-token` / `CURSOR_TOKEN`)
-/// wins over the local DB so a relocated or unreadable store can still be used.
-/// `cli_config` is `~/.cursor/cli-config.json`, the primary source for the
-/// account id (the JWT `sub` is the fallback).
+/// Collect Cursor usage. `token_override` (from `CURSOR_TOKEN`) wins over the
+/// local DB so a relocated or unreadable store can still be used. `cli_config`
+/// is `~/.cursor/cli-config.json`, a fallback source for the account id (the JWT
+/// `sub` is authoritative).
 pub fn collect(
     state_db: &Path,
     cli_config: &Path,
@@ -125,10 +125,15 @@ fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
     }
 }
 
-/// The account id for the cookie: `cli-config.json` `authInfo.authId` first,
-/// then the JWT `sub`. Both are normalized the same way.
+/// The account id for the cookie. The JWT `sub` is authoritative — it's the
+/// account that owns this very token, so it always matches — and `cli-config.json`
+/// `authInfo.authId` is only a fallback for a malformed JWT (a stale or
+/// different-account cli-config would otherwise 401 a perfectly good token).
 fn account_id(cli_config: &Path, jwt: &str) -> Option<String> {
-    if let Some(id) = std::fs::read_to_string(cli_config)
+    if let Some(id) = jwt_subject(jwt).and_then(|subject| normalize_subject(&subject)) {
+        return Some(id);
+    }
+    std::fs::read_to_string(cli_config)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|cfg| {
@@ -137,10 +142,6 @@ fn account_id(cli_config: &Path, jwt: &str) -> Option<String> {
                 .map(ToOwned::to_owned)
         })
         .and_then(|subject| normalize_subject(&subject))
-    {
-        return Some(id);
-    }
-    jwt_subject(jwt).and_then(|subject| normalize_subject(&subject))
 }
 
 /// The `sub` claim from a JWT (`header.payload.signature`, base64url, no pad).
@@ -211,6 +212,8 @@ fn parse_csv(
     let Some(header) = lines.next() else {
         return;
     };
+    // Strip a UTF-8 BOM so the first column name still matches "Date".
+    let header = header.trim_start_matches('\u{feff}');
     let columns: Vec<String> = split_csv_line(header);
     let index = |name: &str| columns.iter().position(|column| column == name);
 
@@ -281,6 +284,10 @@ fn parse_csv(
                 .trim()
                 .trim_start_matches('$')
                 .parse::<f64>()
+                .ok()
+                // Reject NaN / inf / negative from a malformed cell; a label like
+                // "Free" lands here too and reads as a reported $0.
+                .filter(|cost| cost.is_finite() && *cost >= 0.0)
                 .unwrap_or(0.0)
         });
 

@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session token from `state.vscdb` and queries Cursor's own usage dashboard for
   per-model tokens (input / output / cache) and Cursor's reported cost. It's
   auto-detected when you're signed in; nothing is sent when you're signed out,
-  and `--no-cursor` disables it. `--cursor-token` / `CURSOR_TOKEN` supplies the
+  and `--no-cursor` disables it. `CURSOR_TOKEN` supplies the
   token directly. Cursor exposes no project, tools, sessions, or durations, so
   those panels stay empty for it.
 - Usage events can now carry a provider-reported cost (`reported_cost_usd`),

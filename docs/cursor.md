@@ -24,7 +24,7 @@ The cookie is `<accountId>::<jwt>`:
 - the **accountId** comes from `~/.cursor/cli-config.json` (`authInfo.authId`),
   falling back to the JWT `sub` claim.
 
-`--cursor-token` / `CURSOR_TOKEN` supplies the JWT directly (skip the local DB),
+`CURSOR_TOKEN` supplies the JWT directly (skip the local DB),
 `--cursor-state-db` points at a non-standard `state.vscdb`, and `--no-cursor`
 turns the whole thing off.
 
