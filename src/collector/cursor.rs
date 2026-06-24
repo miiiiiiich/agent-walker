@@ -1,4 +1,5 @@
-//! Cursor collector — **opt-in**, the only provider that reaches the network.
+//! Cursor collector — auto-detected, and the only provider that reaches the
+//! network.
 //!
 //! Cursor keeps no per-request token counts on disk (the local stores hold chat
 //! text, accepted-line attribution, and the auth token — never token usage), so
@@ -104,7 +105,10 @@ fn read_access_token(state_db: &Path) -> Option<String> {
     let token: String = conn
         .query_row(ACCESS_TOKEN_SQL, [], |row| row.get(0))
         .ok()?;
-    let token = token.trim();
+    // Cursor stores this token raw, but other VS Code `ItemTable` values are
+    // JSON-serialized strings; strip surrounding quotes defensively (a JWT never
+    // contains `"`, so this is a no-op on the raw form).
+    let token = token.trim().trim_matches('"');
     if token.len() < 10 {
         return None;
     }
@@ -145,8 +149,9 @@ fn jwt_subject(jwt: &str) -> Option<String> {
 /// bridged OAuth subject (`google-oauth2|<id>`, `github|<id>`, `oidc|<id>`) is
 /// kept verbatim.
 fn normalize_subject(subject: &str) -> Option<String> {
-    if let Some((_, tail)) = subject.rsplit_once('|')
-        && let Some(rest) = tail.strip_prefix("user_")
+    // A `…|user_XXX` suffix or an already-bare `user_XXX` collapses to `user_XXX`.
+    let tail = subject.rsplit_once('|').map_or(subject, |(_, tail)| tail);
+    if let Some(rest) = tail.strip_prefix("user_")
         && !rest.is_empty()
         && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     {
@@ -237,14 +242,14 @@ fn parse_csv(
             continue;
         }
 
-        let input_without = parse_u64(cell(input_idx));
-        let input_with = input_with_idx.map_or(input_without, |idx| parse_u64(cell(idx)));
+        // The two input columns are disjoint, not nested: `Total Tokens` is
+        // `Input (w/o Cache Write)` + `Input (w/ Cache Write)` + `Cache Read` +
+        // `Output Tokens`. So `Input (w/ Cache Write)` *is* the cache-write count
+        // (default 0 if the column is absent), not a superset to subtract from.
         let usage = TokenUsage {
-            input_tokens: input_without,
+            input_tokens: parse_u64(cell(input_idx)),
             output_tokens: parse_u64(cell(output_idx)),
-            // "Input (w/ Cache Write)" includes the cache-write tokens that
-            // "Input (w/o Cache Write)" omits; their difference is the write.
-            cache_creation_input_tokens: input_with.saturating_sub(input_without),
+            cache_creation_input_tokens: input_with_idx.map_or(0, |idx| parse_u64(cell(idx))),
             cache_read_input_tokens: parse_u64(cell(cache_read_idx)),
             ..TokenUsage::default()
         };
@@ -257,7 +262,17 @@ fn parse_csv(
             collection.stats.parse_errors += 1;
         }
 
-        let reported_cost_usd = cost_idx.map(&cell).and_then(|raw| raw.parse::<f64>().ok());
+        // Every Cursor row carries an authoritative cost. A non-numeric label
+        // (e.g. "Free"/"Included" for in-plan requests) is a reported $0, not a
+        // missing value — so a present Cost column always yields `Some`, never a
+        // `None` that would wrongly route the row to LiteLLM pricing.
+        let reported_cost_usd = cost_idx.map(|idx| {
+            cell(idx)
+                .trim()
+                .trim_start_matches('$')
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        });
 
         let model = {
             let value = cell(model_idx).trim();
@@ -318,8 +333,10 @@ fn split_csv_line(line: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    // Total = 100 (w/ cache write) + 76054 (w/o) + 723008 (cache read) + 8093
+    // (output) = 807255, so this row checksums cleanly.
     const CSV: &str = "Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n\
-        \"2026-06-22T13:09:44.478Z\",\"\",\"\",\"free\",\"composer-2.5-fast\",\"No\",\"100\",\"76054\",\"723008\",\"8093\",\"999999\",\"0.71\"\n";
+        \"2026-06-22T13:09:44.478Z\",\"\",\"\",\"free\",\"composer-2.5-fast\",\"No\",\"100\",\"76054\",\"723008\",\"8093\",\"807255\",\"0.71\"\n";
 
     fn parse(csv: &str, floor: Option<OffsetDateTime>) -> Collection {
         let mut collection = Collection::new(Provider::Cursor, std::path::PathBuf::from("x"));
@@ -335,26 +352,49 @@ mod tests {
         assert_eq!(event.usage.input_tokens, 76054);
         assert_eq!(event.usage.output_tokens, 8093);
         assert_eq!(event.usage.cache_read_input_tokens, 723_008);
-        // 100 (w/ cache write) - 76054 (w/o) saturates to 0, not a wraparound.
-        assert_eq!(event.usage.cache_creation_input_tokens, 0);
+        // "Input (w/ Cache Write)" is the cache-write count directly.
+        assert_eq!(event.usage.cache_creation_input_tokens, 100);
         assert_eq!(event.model.as_deref(), Some("composer-2.5-fast"));
         assert!(event.project.is_none());
         assert_eq!(event.reported_cost_usd, Some(0.71));
+        // The row checksums against Total Tokens, so no parse warning.
+        assert_eq!(collection.stats.parse_errors, 0);
     }
 
     #[test]
-    fn cache_write_is_the_difference_of_the_two_input_columns() {
+    fn cache_write_comes_from_the_w_cache_write_column() {
+        // The two input columns are disjoint: cache-write is the "w/ Cache Write"
+        // value itself, not the difference between the columns.
         let csv = "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\",\"500\",\"200\",\"10\",\"5\"\n";
         let event = &parse(csv, None).usage_events[0];
         assert_eq!(event.usage.input_tokens, 200);
-        assert_eq!(event.usage.cache_creation_input_tokens, 300);
+        assert_eq!(event.usage.cache_creation_input_tokens, 500);
+    }
+
+    #[test]
+    fn free_cost_label_is_reported_zero_not_litellm() {
+        // A non-numeric Cost ("Free") is a reported $0, not a missing value.
+        let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens,Cost\n\
+            \"2026-06-22T13:09:44Z\",\"claude-sonnet\",\"10\",\"0\",\"5\",\"Free\"\n";
+        let event = &parse(csv, None).usage_events[0];
+        assert_eq!(event.reported_cost_usd, Some(0.0));
+    }
+
+    #[test]
+    fn cost_with_dollar_sign_parses() {
+        let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens,Cost\n\
+            \"2026-06-22T13:09:44Z\",\"m\",\"10\",\"0\",\"5\",\"$0.42\"\n";
+        let event = &parse(csv, None).usage_events[0];
+        assert_eq!(event.reported_cost_usd, Some(0.42));
     }
 
     #[test]
     fn total_tokens_mismatch_is_a_soft_warning_not_a_drop() {
-        // Total says 999 but the parts sum to 807155 → counted, row still kept.
-        let collection = parse(CSV, None);
+        // Total claims 999 but the parts sum to more → counted, row still kept.
+        let csv = "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens\n\
+            \"2026-06-22T13:09:44Z\",\"m\",\"100\",\"76054\",\"723008\",\"8093\",\"999\"\n";
+        let collection = parse(csv, None);
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.stats.parse_errors, 1);
     }
@@ -380,6 +420,11 @@ mod tests {
         );
         assert_eq!(
             normalize_subject("github|user_01ABC").as_deref(),
+            Some("user_01ABC")
+        );
+        // An already-bare id (no provider prefix) is accepted as-is.
+        assert_eq!(
+            normalize_subject("user_01ABC").as_deref(),
             Some("user_01ABC")
         );
     }
