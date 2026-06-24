@@ -55,11 +55,17 @@ pub fn collect(
     let jwt = if let Some(token) = token_override {
         token.trim().to_owned()
     } else {
-        let Some(token) = read_access_token(state_db) else {
-            collection.stats.unreadable_files += 1;
-            return collection;
-        };
-        token
+        match read_access_token(state_db) {
+            Ok(Some(token)) => token,
+            // Signed out (no token row): stay silent — no tab, no request, and
+            // not counted as unreadable.
+            Ok(None) => return collection,
+            // The store exists but couldn't be opened/read — a real failure.
+            Err(()) => {
+                collection.stats.unreadable_files += 1;
+                return collection;
+            }
+        }
     };
     let Some(user_id) = account_id(cli_config, &jwt) else {
         collection.stats.unreadable_files += 1;
@@ -95,24 +101,28 @@ pub fn collect(
 }
 
 /// Read `cursorAuth/accessToken` from the Electron `state.vscdb` (read-only, so
-/// SQLite never writes Cursor's live store).
-fn read_access_token(state_db: &Path) -> Option<String> {
+/// SQLite never writes Cursor's live store). `Ok(None)` is the signed-out state
+/// (store present, no token row) — distinct from `Err(())`, an actual open/read
+/// failure — so the caller can stay silent when signed out instead of reporting
+/// an unreadable file.
+fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
     if !state_db.exists() {
-        return None;
+        return Ok(None);
     }
-    let conn = Connection::open_with_flags(state_db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn =
+        Connection::open_with_flags(state_db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| ())?;
     let _ = conn.busy_timeout(Duration::from_millis(500));
-    let token: String = conn
-        .query_row(ACCESS_TOKEN_SQL, [], |row| row.get(0))
-        .ok()?;
-    // Cursor stores this token raw, but other VS Code `ItemTable` values are
-    // JSON-serialized strings; strip surrounding quotes defensively (a JWT never
-    // contains `"`, so this is a no-op on the raw form).
-    let token = token.trim().trim_matches('"');
-    if token.len() < 10 {
-        return None;
+    match conn.query_row(ACCESS_TOKEN_SQL, [], |row| row.get::<_, String>(0)) {
+        Ok(token) => {
+            // Cursor stores this token raw, but other VS Code `ItemTable` values
+            // are JSON-serialized strings; strip surrounding quotes defensively
+            // (a JWT never contains `"`, so this is a no-op on the raw form).
+            let token = token.trim().trim_matches('"');
+            Ok((token.len() >= 10).then(|| token.to_owned()))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(_) => Err(()),
     }
-    Some(token.to_owned())
 }
 
 /// The account id for the cookie: `cli-config.json` `authInfo.authId` first,

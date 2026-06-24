@@ -37,10 +37,12 @@ and the next run picks it up.
 Per usage event, from the CSV columns (resolved by header name, since Cursor
 adds columns over time):
 
-- **Tokens** — `Input (w/o Cache Write)` → input, `Input (w/ Cache Write) − Input
-  (w/o Cache Write)` → cache-write, `Cache Read` → cache-read, `Output Tokens` →
-  output. `Total Tokens` is used as a checksum; a mismatch is counted as a parse
-  warning but the row is still kept.
+- **Tokens** — `Input (w/o Cache Write)` → input, `Input (w/ Cache Write)` →
+  cache-write, `Cache Read` → cache-read, `Output Tokens` → output. The two input
+  columns are disjoint (`Total Tokens` is their sum plus cache-read and output),
+  so cache-write is that column directly, not a difference. `Total Tokens` is
+  used as a checksum; a mismatch is counted as a parse warning but the row is
+  still kept.
 - **Model** — `Model` (e.g. `composer-2.5-fast`).
 - **Cost** — the CSV's own `Cost` column, carried as the event's reported cost.
 - **Timestamp** — `Date`.
