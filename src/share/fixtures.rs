@@ -32,6 +32,7 @@ pub(crate) fn sample_summary() -> Summary {
             name: "claude-opus-4-8".to_owned(),
             usage: usage.clone(),
             events: 10,
+            reported_cost_usd: None,
         }],
         agents: Vec::new(),
         tools: Vec::new(),

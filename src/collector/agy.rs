@@ -153,6 +153,7 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                         attribution_agent: None,
                         project: None,
                         usage: TokenUsage::default(),
+                        reported_cost_usd: None,
                     },
                 });
             }

@@ -8,7 +8,7 @@ use clap_complete::Shell;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
-use crate::collector::{agy, claude, codex, opencode};
+use crate::collector::{agy, claude, codex, cursor, opencode};
 use crate::format::snapshot_app;
 use crate::model::{AppSummary, Collection};
 use crate::ui;
@@ -44,6 +44,23 @@ pub struct Args {
     /// local SQLite store.
     #[arg(long, value_name = "DIR")]
     pub opencode_dir: Option<PathBuf>,
+
+    /// Opt in to Cursor. Unlike every other provider this reaches the network:
+    /// it reads your local Cursor session token and queries Cursor's own usage
+    /// dashboard (an undocumented endpoint) for tokens and cost — Cursor keeps no
+    /// usage on disk. Off by default; nothing is sent unless you pass this.
+    #[arg(long)]
+    pub cursor: bool,
+
+    /// Cursor session JWT to use instead of reading the local `state.vscdb`
+    /// (also read from the `CURSOR_TOKEN` env var). Implies `--cursor`.
+    #[arg(long, value_name = "TOKEN")]
+    pub cursor_token: Option<String>,
+
+    /// Override the path to Cursor's `state.vscdb` (default is the platform
+    /// config dir, e.g. `~/Library/Application Support/Cursor/...`).
+    #[arg(long, value_name = "PATH")]
+    pub cursor_state_db: Option<PathBuf>,
 
     /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
     /// month of logs. The codename level is always computed from the most recent
@@ -95,11 +112,25 @@ pub struct Config {
     /// auto-detected like Antigravity: the tab appears only when `opencode.db`
     /// exists there.
     pub opencode_dir: Option<PathBuf>,
+    /// Cursor is opt-in (it reaches the network). `None` means "don't collect
+    /// Cursor"; `Some` carries the resolved `state.vscdb` path, the CLI-config
+    /// path, and an optional token override.
+    pub cursor: Option<CursorConfig>,
     pub days: u16,
     pub use_cache: bool,
     /// Local UTC offset captured at startup (single-threaded moment), used to
     /// bucket all timestamps into the user's local days and hours.
     pub local_offset: UtcOffset,
+}
+
+/// Resolved Cursor opt-in settings (see `Config::cursor`).
+#[derive(Debug, Clone)]
+pub struct CursorConfig {
+    pub state_db: PathBuf,
+    pub cli_config: PathBuf,
+    /// Token override from `--cursor-token` / `CURSOR_TOKEN`; `None` reads the
+    /// local `state.vscdb`.
+    pub token: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -116,6 +147,9 @@ pub fn run(args: Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    // Resolve Cursor opt-in before the struct literal below moves other `args`
+    // fields out (a borrow of `args` after a partial move won't compile).
+    let cursor = cursor_config(&args);
     let config = Config {
         demo: demo_enabled(),
         // `map_or_else(default, Ok)` keeps the default lazy, so a `--claude-dir`
@@ -132,6 +166,9 @@ pub fn run(args: Args) -> Result<()> {
         agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
         // Same treatment as agy: auto-detected, resolution failure swallowed.
         opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
+        // Cursor is the one opt-in, network-touching collector: only built when
+        // --cursor (or a token) is given, never auto-detected.
+        cursor,
         days: args.days,
         use_cache: !args.no_cache,
         local_offset,
@@ -227,7 +264,7 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         .max(u64::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30) + 1);
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
-    let (codex_result, agy_result, opencode_result, claude_collection) =
+    let (codex_result, agy_result, opencode_result, cursor_result, claude_collection) =
         std::thread::scope(|scope| {
             let codex_handle = scope.spawn(|| {
                 codex::collect(
@@ -236,6 +273,19 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
                     config.use_cache,
                     config.local_offset,
                 )
+            });
+            // Cursor is opt-in and the only collector that hits the network, so
+            // it runs in its own thread alongside the local ones.
+            let cursor_handle = scope.spawn(|| {
+                config.cursor.as_ref().map(|cursor| {
+                    cursor::collect(
+                        &cursor.state_db,
+                        &cursor.cli_config,
+                        cursor.token.as_deref(),
+                        mtime_floor,
+                        config.local_offset,
+                    )
+                })
             });
             // Antigravity and OpenCode are probed whenever their directory
             // resolved; the collector returns an empty collection for a missing
@@ -262,6 +312,7 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
                 codex_handle.join(),
                 agy_handle.join(),
                 opencode_handle.join(),
+                cursor_handle.join(),
                 claude_collection,
             )
         });
@@ -275,6 +326,9 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
     }
     if let Some(oc) = opencode_result.map_err(|_| anyhow!("OpenCode collector thread panicked"))? {
         collections.push(oc);
+    }
+    if let Some(cursor) = cursor_result.map_err(|_| anyhow!("Cursor collector thread panicked"))? {
+        collections.push(cursor);
     }
 
     let providers = collections
@@ -311,6 +365,31 @@ fn default_agy_dir() -> Result<PathBuf> {
 
 fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
+}
+
+/// Build the Cursor config when the user opted in (`--cursor`, `--cursor-token`,
+/// or `CURSOR_TOKEN`). Returns `None` otherwise so the collector never runs and
+/// nothing is sent to the network. A `--cursor-state-db` override wins; the
+/// default path resolves from the platform config dir.
+fn cursor_config(args: &Args) -> Option<CursorConfig> {
+    let token = args.cursor_token.clone().or_else(|| {
+        env::var("CURSOR_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+    });
+    if !args.cursor && token.is_none() {
+        return None;
+    }
+    let state_db = args
+        .cursor_state_db
+        .clone()
+        .or_else(|| crate::paths::cursor_state_db().ok())?;
+    let cli_config = crate::paths::cursor_cli_config().ok()?;
+    Some(CursorConfig {
+        state_db,
+        cli_config,
+        token,
+    })
 }
 
 fn demo_enabled() -> bool {
@@ -357,6 +436,7 @@ mod tests {
                 date: date!(2026 - 06 - 12),
                 model: model.to_owned(),
                 usage,
+                reported_cost_usd: None,
             }],
             models: Vec::new(),
             agents: Vec::new(),

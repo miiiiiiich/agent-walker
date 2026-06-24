@@ -27,7 +27,12 @@ pub(super) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let mut total = 0.0_f64;
     let mut per_model: Vec<(String, f64)> = Vec::new();
     for model in &summary.models {
-        if let Some(cost) = usage_cost_usd(&model.name, &model.usage) {
+        // Prefer the provider's own reported cost (Cursor: its models aren't in
+        // LiteLLM); fall back to LiteLLM pricing for everyone else.
+        if let Some(cost) = model
+            .reported_cost_usd
+            .or_else(|| usage_cost_usd(&model.name, &model.usage))
+        {
             total += cost;
             per_model.push((short_model_name(&model.name), cost));
         }
@@ -95,7 +100,11 @@ fn window_cost_usd(summary: &Summary, days: u16) -> f64 {
         .model_daily
         .iter()
         .filter(|entry| entry.date >= start)
-        .filter_map(|entry| usage_cost_usd(&entry.model, &entry.usage))
+        .filter_map(|entry| {
+            entry
+                .reported_cost_usd
+                .or_else(|| usage_cost_usd(&entry.model, &entry.usage))
+        })
         .sum()
 }
 

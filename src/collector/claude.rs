@@ -272,6 +272,7 @@ fn parse_line(
                 attribution_agent: attribution_agent.clone(),
                 project: project.map(ToOwned::to_owned),
                 usage,
+                reported_cost_usd: None,
             },
         });
     }

@@ -83,10 +83,19 @@ pub fn summarize(
             .then_with(|| left.name.cmp(&right.name))
     });
     let favorite_model = models.first().map(|stat| stat.name.clone());
+    let model_daily_reported = aggregates.model_daily_reported;
     let model_daily = aggregates
         .model_daily_usage
         .into_iter()
-        .map(|((date, model), usage)| ModelDailyStat { date, model, usage })
+        .map(|((date, model), usage)| {
+            let reported_cost_usd = model_daily_reported.get(&(date, model.clone())).copied();
+            ModelDailyStat {
+                date,
+                model,
+                usage,
+                reported_cost_usd,
+            }
+        })
         .collect::<Vec<_>>();
 
     let mut agents = aggregates
@@ -271,6 +280,7 @@ mod tests {
                         cache_read_input_tokens: 80,
                         ..TokenUsage::default()
                     },
+                    reported_cost_usd: None,
                 },
                 UsageEvent {
                     timestamp: Some(datetime!(2026-06-08 10:00 UTC)),
@@ -286,6 +296,7 @@ mod tests {
                         cache_read_input_tokens: 40,
                         ..TokenUsage::default()
                     },
+                    reported_cost_usd: None,
                 },
             ],
             tool_events: vec![crate::model::ToolEvent {
@@ -355,6 +366,7 @@ mod tests {
                 input_tokens: tokens,
                 ..TokenUsage::default()
             },
+            reported_cost_usd: None,
         };
         let events = vec![
             event(datetime!(2026-06-30 10:00 UTC), 1_000_000), // 30d + every window

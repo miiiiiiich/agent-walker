@@ -70,7 +70,11 @@ impl ShareCard {
         let cost: f64 = summary
             .model_daily
             .iter()
-            .filter_map(|entry| usage_cost_usd(&entry.model, &entry.usage))
+            .filter_map(|entry| {
+                entry
+                    .reported_cost_usd
+                    .or_else(|| usage_cost_usd(&entry.model, &entry.usage))
+            })
             .sum();
         let parallel = {
             let levels = summary.orchestration.time_by_level;

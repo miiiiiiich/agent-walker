@@ -11,6 +11,7 @@ pub enum Provider {
     Codex,
     Agy,
     OpenCode,
+    Cursor,
 }
 
 impl Provider {
@@ -21,6 +22,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Agy => "Agy",
             Self::OpenCode => "OpenCode",
+            Self::Cursor => "Cursor",
         }
     }
 }
@@ -96,6 +98,11 @@ pub struct UsageEvent {
     /// (Claude: project directory name; Codex: `session_meta` cwd).
     pub project: Option<String>,
     pub usage: TokenUsage,
+    /// Provider-reported cost in USD for this event, when the source gives an
+    /// authoritative figure that the `LiteLLM` model→price path can't (Cursor's
+    /// own models aren't in the pricing table). `None` means "price it from
+    /// `LiteLLM` like every other provider".
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +218,9 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
+    /// Summed provider-reported cost for this model-day, if any event carried
+    /// one (see `UsageEvent::reported_cost_usd`). Preferred over `LiteLLM`.
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +228,9 @@ pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
     pub events: usize,
+    /// Summed provider-reported cost for this model over the period, if any
+    /// event carried one. Preferred over `LiteLLM` pricing.
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

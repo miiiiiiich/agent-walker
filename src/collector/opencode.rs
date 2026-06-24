@@ -233,6 +233,9 @@ fn parse_messages(
                 .and_then(Value::as_str)
                 .map(project_from_cwd),
             usage,
+            // OpenCode records a per-message cost, but like every non-Cursor
+            // provider we price from LiteLLM for consistency (see docs/opencode).
+            reported_cost_usd: None,
         });
 
         if let Some(completed_ms) = value.pointer("/time/completed").and_then(Value::as_i64) {

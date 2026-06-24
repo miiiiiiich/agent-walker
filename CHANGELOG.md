@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Cursor support (**opt-in**, `--cursor`). Cursor keeps no usage on disk, so —
+  unlike every other provider — this reaches the network: it reads the local
+  Cursor session token from `state.vscdb` and queries Cursor's own usage
+  dashboard for per-model tokens (input / output / cache) and Cursor's reported
+  cost. Off by default; nothing is sent unless you pass the flag. `--cursor-token`
+  / `CURSOR_TOKEN` supplies the token directly. Cursor exposes no project, tools,
+  sessions, or durations, so those panels stay empty for it.
+- Usage events can now carry a provider-reported cost (`reported_cost_usd`),
+  preferred over the LiteLLM price when present — Cursor's models aren't in the
+  LiteLLM table, so its own reported figure is used.
+
 ## [0.5.0] - 2026-06-23
 
 ### Added
