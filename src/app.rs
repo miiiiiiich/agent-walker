@@ -383,11 +383,19 @@ fn cursor_config(args: &Args) -> Option<CursorConfig> {
     let state_db = args
         .cursor_state_db
         .clone()
-        .or_else(|| crate::paths::cursor_state_db().ok())?;
-    let cli_config = crate::paths::cursor_cli_config().ok()?;
+        .or_else(|| crate::paths::cursor_state_db().ok());
+    // A token is needed from *somewhere*: an explicit override, or a readable
+    // `state.vscdb`. With neither there's nothing to do. But an explicit token
+    // must keep working even when the home/config dir can't be resolved (CI,
+    // sandbox) — so a failed path resolution falls back to an empty path rather
+    // than silently disabling the collector. `cli_config` is best-effort too:
+    // the account id falls back to the JWT `sub` when it can't be read.
+    if token.is_none() && state_db.is_none() {
+        return None;
+    }
     Some(CursorConfig {
-        state_db,
-        cli_config,
+        state_db: state_db.unwrap_or_default(),
+        cli_config: crate::paths::cursor_cli_config().unwrap_or_default(),
         token,
     })
 }

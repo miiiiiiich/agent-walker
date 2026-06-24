@@ -26,6 +26,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
+use tracing::debug;
 
 use crate::model::{Collection, Provider, SourceKind, TokenUsage, UsageEvent};
 
@@ -65,10 +66,15 @@ pub fn collect(
 
     let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{jwt}");
     // Auth expiry, a network failure, or an endpoint change all land here;
-    // surface it as an unreadable source rather than a panic.
-    let Ok(csv) = fetch_csv(&cookie) else {
-        collection.stats.unreadable_files += 1;
-        return collection;
+    // surface it as an unreadable source rather than a panic, and log the reason
+    // since this is an undocumented endpoint that's hard to debug blind.
+    let csv = match fetch_csv(&cookie) {
+        Ok(csv) => csv,
+        Err(reason) => {
+            debug!("cursor: usage fetch failed: {reason}");
+            collection.stats.unreadable_files += 1;
+            return collection;
+        }
     };
     collection.stats.files_seen += 1;
 
@@ -147,10 +153,10 @@ fn normalize_subject(subject: &str) -> Option<String> {
     None
 }
 
-/// `GET` the usage CSV with the browser-equivalent headers. A 401/403 means the
-/// session expired (re-login in Cursor); any other non-2xx or transport failure
-/// is returned as an error for the caller to record as unreadable.
-fn fetch_csv(cookie: &str) -> Result<String, ()> {
+/// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
+/// short reason for the log: a 401/403 means the session expired (re-login in
+/// Cursor), other statuses and transport failures pass their own message.
+fn fetch_csv(cookie: &str) -> Result<String, String> {
     let response = ureq::get(CSV_URL)
         .timeout(Duration::from_secs(20))
         .set("Cookie", cookie)
@@ -158,8 +164,16 @@ fn fetch_csv(cookie: &str) -> Result<String, ()> {
         .set("User-Agent", USER_AGENT)
         .set("Accept", "*/*")
         .call()
-        .map_err(|_| ())?;
-    response.into_string().map_err(|_| ())
+        .map_err(|err| match err {
+            ureq::Error::Status(401 | 403, _) => {
+                "session expired — re-login in Cursor to refresh the token".to_owned()
+            }
+            ureq::Error::Status(code, _) => format!("HTTP {code} from the usage endpoint"),
+            ureq::Error::Transport(transport) => format!("network error: {transport}"),
+        })?;
+    response
+        .into_string()
+        .map_err(|err| format!("reading the response body: {err}"))
 }
 
 /// Parse the dashboard CSV. Columns are resolved by header name (Cursor inserts
