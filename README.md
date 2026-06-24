@@ -40,11 +40,12 @@ reads the session logs on your disk and answers, in one screen:
   log content and no usage data, but it does let GitHub's CDN see your IP,
   the same as any `git pull`. Block it with a firewall rule or run offline if
   that matters to you.
-- **Cursor is the one exception, and it is opt-in.** Only when you pass
-  `--cursor` does agent-walker read your local Cursor session token and query
-  Cursor's own usage dashboard (Cursor keeps no usage on disk). That sends your
-  session cookie to Cursor to read your own usage; nothing Cursor-related runs
-  without the flag. See [docs/cursor.md](docs/cursor.md).
+- **Cursor is the one exception.** It's auto-detected when you're signed into
+  Cursor locally, and reading its usage reaches the network: agent-walker uses
+  your local Cursor session token to query Cursor's own usage dashboard (Cursor
+  keeps no usage on disk). That sends your session cookie to Cursor to read your
+  own usage. When you're signed out nothing is sent, and `--no-cursor` turns it
+  off entirely. See [docs/cursor.md](docs/cursor.md).
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
@@ -79,7 +80,7 @@ Flags:
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `OPENCODE_HOME` when set) |
-| `--cursor` | Opt in to Cursor — reads your local Cursor session token and queries Cursor's usage dashboard over the network (off by default; see [Privacy](#privacy)). `--cursor-token` / `CURSOR_TOKEN` supplies the token directly |
+| `--no-cursor` | Disable Cursor. Cursor is auto-detected when you're signed in and reaches the network to read its usage (see [Privacy](#privacy)); this turns it off. `--cursor-token` / `CURSOR_TOKEN` supplies the token directly |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename
@@ -102,7 +103,7 @@ card — just glance before you post.
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
 | OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
-| Cursor | Cursor usage dashboard (network) | **opt-in** (`--cursor`); tokens, models, and Cursor-reported cost — no project/tools (Cursor exposes none). Reads the session token from `state.vscdb` — [details](docs/cursor.md) |
+| Cursor | Cursor usage dashboard (network) | auto-detected when signed in (**reaches the network**; `--no-cursor` to disable); tokens, models, and Cursor-reported cost — no project/tools (Cursor exposes none). Reads the session token from `state.vscdb` — [details](docs/cursor.md) |
 | Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above

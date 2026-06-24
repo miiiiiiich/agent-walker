@@ -45,15 +45,16 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub opencode_dir: Option<PathBuf>,
 
-    /// Opt in to Cursor. Unlike every other provider this reaches the network:
-    /// it reads your local Cursor session token and queries Cursor's own usage
-    /// dashboard (an undocumented endpoint) for tokens and cost — Cursor keeps no
-    /// usage on disk. Off by default; nothing is sent unless you pass this.
+    /// Disable Cursor. Cursor is auto-detected when you're signed in locally
+    /// (its `state.vscdb` holds a session token), and — unlike every other
+    /// provider — reading its usage reaches the network: it queries Cursor's own
+    /// dashboard (an undocumented endpoint), since Cursor keeps no usage on disk.
+    /// Pass this to turn that off. Nothing is sent when you're signed out.
     #[arg(long)]
-    pub cursor: bool,
+    pub no_cursor: bool,
 
     /// Cursor session JWT to use instead of reading the local `state.vscdb`
-    /// (also read from the `CURSOR_TOKEN` env var). Implies `--cursor`.
+    /// (also read from the `CURSOR_TOKEN` env var).
     #[arg(long, value_name = "TOKEN")]
     pub cursor_token: Option<String>,
 
@@ -367,30 +368,31 @@ fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
 }
 
-/// Build the Cursor config when the user opted in (`--cursor`, `--cursor-token`,
-/// or `CURSOR_TOKEN`). Returns `None` otherwise so the collector never runs and
-/// nothing is sent to the network. A `--cursor-state-db` override wins; the
-/// default path resolves from the platform config dir.
+/// Build the Cursor config. Cursor is **auto-detected** like the other providers
+/// (no flag to turn it on): it runs whenever a session token is available — an
+/// explicit `--cursor-token` / `CURSOR_TOKEN`, or a local `state.vscdb` that
+/// exists (you're signed into Cursor). `--no-cursor` disables it; signed out
+/// (no token on disk) it stays silent and never hits the network. Path
+/// resolution failures fall back to empty paths so an explicit token still works
+/// in CI / sandboxes where the home dir can't be resolved.
 fn cursor_config(args: &Args) -> Option<CursorConfig> {
+    if args.no_cursor {
+        return None;
+    }
     let token = args.cursor_token.clone().or_else(|| {
         env::var("CURSOR_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty())
     });
-    if !args.cursor && token.is_none() {
-        return None;
-    }
     let state_db = args
         .cursor_state_db
         .clone()
         .or_else(|| crate::paths::cursor_state_db().ok());
-    // A token is needed from *somewhere*: an explicit override, or a readable
-    // `state.vscdb`. With neither there's nothing to do. But an explicit token
-    // must keep working even when the home/config dir can't be resolved (CI,
-    // sandbox) — so a failed path resolution falls back to an empty path rather
-    // than silently disabling the collector. `cli_config` is best-effort too:
-    // the account id falls back to the JWT `sub` when it can't be read.
-    if token.is_none() && state_db.is_none() {
+    // Nothing to collect unless there's a token source: an explicit token, or a
+    // Cursor store present on disk. (A present store with no token — signed out —
+    // is handled in the collector: it reads no token and makes no request.)
+    let store_present = state_db.as_ref().is_some_and(|path| path.exists());
+    if token.is_none() && !store_present {
         return None;
     }
     Some(CursorConfig {
@@ -443,7 +445,8 @@ mod tests {
             model_daily: vec![crate::model::ModelDailyStat {
                 date: date!(2026 - 06 - 12),
                 model: model.to_owned(),
-                usage,
+                usage: usage.clone(),
+                unreported_usage: usage,
                 reported_cost_usd: None,
             }],
             models: Vec::new(),

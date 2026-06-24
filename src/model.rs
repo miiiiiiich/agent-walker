@@ -218,8 +218,14 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
+    /// The subset of `usage` from events that carried NO provider-reported cost,
+    /// i.e. the tokens that must be priced from `LiteLLM`. When a model name is
+    /// shared on the same day by a reporting provider (Cursor) and a
+    /// non-reporting one (Claude Code), this keeps the two cost paths additive.
+    pub unreported_usage: TokenUsage,
     /// Summed provider-reported cost for this model-day, if any event carried
-    /// one (see `UsageEvent::reported_cost_usd`). Preferred over `LiteLLM`.
+    /// one (see `UsageEvent::reported_cost_usd`). Added to the `LiteLLM` price of
+    /// `unreported_usage`.
     pub reported_cost_usd: Option<f64>,
 }
 
@@ -227,9 +233,12 @@ pub struct ModelDailyStat {
 pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
+    /// Subset of `usage` priced from `LiteLLM` (events with no reported cost) —
+    /// see `ModelDailyStat::unreported_usage`.
+    pub unreported_usage: TokenUsage,
     pub events: usize,
     /// Summed provider-reported cost for this model over the period, if any
-    /// event carried one. Preferred over `LiteLLM` pricing.
+    /// event carried one. Added to the `LiteLLM` price of `unreported_usage`.
     pub reported_cost_usd: Option<f64>,
 }
 

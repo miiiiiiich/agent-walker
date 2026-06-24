@@ -70,10 +70,9 @@ impl ShareCard {
         let cost: f64 = summary
             .model_daily
             .iter()
-            .filter_map(|entry| {
-                entry
-                    .reported_cost_usd
-                    .or_else(|| usage_cost_usd(&entry.model, &entry.usage))
+            .map(|entry| {
+                entry.reported_cost_usd.unwrap_or(0.0)
+                    + usage_cost_usd(&entry.model, &entry.unreported_usage).unwrap_or(0.0)
             })
             .sum();
         let parallel = {

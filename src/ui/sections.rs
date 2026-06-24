@@ -27,12 +27,12 @@ pub(super) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let mut total = 0.0_f64;
     let mut per_model: Vec<(String, f64)> = Vec::new();
     for model in &summary.models {
-        // Prefer the provider's own reported cost (Cursor: its models aren't in
-        // LiteLLM); fall back to LiteLLM pricing for everyone else.
-        if let Some(cost) = model
-            .reported_cost_usd
-            .or_else(|| usage_cost_usd(&model.name, &model.usage))
-        {
+        // Provider-reported cost (Cursor) plus the LiteLLM price of the tokens
+        // that had no reported cost — additive so a model name shared by a
+        // reporting and a non-reporting provider prices both halves.
+        let cost = model.reported_cost_usd.unwrap_or(0.0)
+            + usage_cost_usd(&model.name, &model.unreported_usage).unwrap_or(0.0);
+        if cost > 0.0 {
             total += cost;
             per_model.push((short_model_name(&model.name), cost));
         }
@@ -100,10 +100,9 @@ fn window_cost_usd(summary: &Summary, days: u16) -> f64 {
         .model_daily
         .iter()
         .filter(|entry| entry.date >= start)
-        .filter_map(|entry| {
-            entry
-                .reported_cost_usd
-                .or_else(|| usage_cost_usd(&entry.model, &entry.usage))
+        .map(|entry| {
+            entry.reported_cost_usd.unwrap_or(0.0)
+                + usage_cost_usd(&entry.model, &entry.unreported_usage).unwrap_or(0.0)
         })
         .sum()
 }

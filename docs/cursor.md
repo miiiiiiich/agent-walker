@@ -1,8 +1,9 @@
 # Cursor
 
-Cursor is the one provider that is **opt-in** and reaches the network. Pass
-`--cursor` (or set `CURSOR_TOKEN`); without it, nothing Cursor-related runs and
-nothing is sent anywhere.
+Cursor is **auto-detected** like the other providers — its tab appears whenever
+you're signed into Cursor locally — but it's the one provider that **reaches the
+network** to do it. When you're signed out (no token on disk) nothing is sent;
+`--no-cursor` disables it entirely.
 
 ## Why it needs the network
 
@@ -24,7 +25,8 @@ The cookie is `<accountId>::<jwt>`:
   falling back to the JWT `sub` claim.
 
 `--cursor-token` / `CURSOR_TOKEN` supplies the JWT directly (skip the local DB),
-and `--cursor-state-db` points at a non-standard `state.vscdb`.
+`--cursor-state-db` points at a non-standard `state.vscdb`, and `--no-cursor`
+turns the whole thing off.
 
 This endpoint is **undocumented** and can change or break without notice. A
 `401`/`403` means the session expired — re-login in Cursor to refresh the token,

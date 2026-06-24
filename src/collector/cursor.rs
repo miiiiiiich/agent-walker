@@ -8,8 +8,9 @@
 //! cookie, and `GET` the usage CSV.
 //!
 //! This is the one collector that sends anything off the machine (the user's own
-//! session cookie, to Cursor, to read the user's own usage), so it never runs
-//! unless explicitly enabled — there is no auto-detection. It is also an
+//! session cookie, to Cursor, to read the user's own usage). It's auto-detected
+//! from a signed-in `state.vscdb` like the other providers, but makes no request
+//! when signed out (no token) and is disabled by `--no-cursor`. It is also an
 //! undocumented endpoint that can change without notice.
 //!
 //! Cursor's usage events carry **no project/repo identifier** and its models
@@ -64,7 +65,14 @@ pub fn collect(
         return collection;
     };
 
-    let cookie = format!("WorkosCursorSessionToken={user_id}%3A%3A{jwt}");
+    // Percent-encode the account id: bridged-OAuth ids contain `|`
+    // (`google-oauth2|123`), which a strict cookie parser / CDN in front of
+    // cursor.com can reject. The server percent-decodes the value (the `::`
+    // separator is sent as `%3A%3A`), so `%7C` round-trips back to `|`.
+    let cookie = format!(
+        "WorkosCursorSessionToken={}%3A%3A{jwt}",
+        user_id.replace('|', "%7C")
+    );
     // Auth expiry, a network failure, or an endpoint change all land here;
     // surface it as an unreadable source rather than a panic, and log the reason
     // since this is an undocumented endpoint that's hard to debug blind.
