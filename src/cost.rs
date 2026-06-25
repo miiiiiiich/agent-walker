@@ -56,7 +56,9 @@ pub fn pricing_as_of() -> Option<String> {
 }
 
 /// Fetch the upstream `LiteLLM` database and reduce it to the snapshot
-/// format: bare claude-*/gpt-* model ids with per-token costs.
+/// format: bare model ids (any provider) with per-token costs. No provider
+/// allowlist — a model is priced if its id is in the table; unknown ids stay
+/// $0. Provider/region duplicates and absurd rates are the actual guards.
 fn fetch_snapshot_json() -> Option<String> {
     let response = ureq::get(PRICING_URL)
         .timeout(Duration::from_secs(10))
@@ -77,7 +79,13 @@ fn fetch_snapshot_json() -> Option<String> {
         {
             continue; // provider/region variants; keep bare model ids only
         }
-        if !(key.starts_with("claude-") || key.starts_with("gpt-")) {
+        // Keep only conversational models. This drops embedding / image / audio /
+        // rerank entries and non-model spec rows (e.g. `sample_spec`) that would
+        // otherwise enter the table once the provider allowlist is gone.
+        if !matches!(
+            entry.get("mode").and_then(serde_json::Value::as_str),
+            Some("chat" | "completion" | "responses")
+        ) {
             continue;
         }
         // Reject non-finite, negative, or absurd rates (> $1/token) so a bad
@@ -150,19 +158,35 @@ fn replace_loaded(snapshot: Option<Snapshot>) {
     }
 }
 
-/// Strip deployment decorations the logs add to model ids
-/// ("claude-opus-4-8[1m]" -> "claude-opus-4-8").
+/// Reduce a logged model label to a `LiteLLM`-style id:
+/// strip deployment decorations ("claude-opus-4-8[1m]" -> "claude-opus-4-8"),
+/// drop a trailing tier annotation ("Gemini 3.5 Flash (High)" -> "gemini 3.5
+/// flash"), and hyphenate spaces so a display name maps to its bare id
+/// ("gemini 3.5 flash" -> "gemini-3.5-flash").
 fn normalize(model_name: &str) -> String {
     let lower = model_name.to_ascii_lowercase();
-    lower
+    let no_deploy = lower
         .split_once('[')
-        .map_or(lower.clone(), |(head, _)| head.to_owned())
-        .trim()
-        .to_owned()
+        .map_or(lower.as_str(), |(head, _)| head);
+    let no_tier = no_deploy
+        .split_once('(')
+        .map_or(no_deploy, |(head, _)| head);
+    let mut normalized = String::new();
+    for word in no_tier.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push('-');
+        }
+        normalized.push_str(word);
+    }
+    normalized
 }
 
-/// Look up pricing: exact snapshot match first, then the longest snapshot
-/// key the name starts with (date-suffixed ids).
+/// Look up pricing: exact snapshot match first, then the longest snapshot key
+/// the name extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
+/// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
+/// plain word suffix (`gemini-pro-default`) must not collide with a shorter base
+/// key — without that guard, dropping the provider allowlist would let unrelated
+/// ids misprice.
 pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     let mut name = normalize(model_name);
     if name == "codex" || name == "openai" {
@@ -179,7 +203,15 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     if let Some(pricing) = snapshot
         .models
         .iter()
-        .filter(|(key, _)| name.starts_with(key.as_str()))
+        .filter(|(key, _)| {
+            name.strip_prefix(key.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|suffix| {
+                    // A date/version suffix (`-20250929`) or the `-latest` alias
+                    // extends a base key; a plain word (`-default`) must not.
+                    suffix == "latest" || suffix.starts_with(|c: char| c.is_ascii_digit())
+                })
+        })
         .max_by_key(|(key, _)| key.len())
         .map(|(_, pricing)| *pricing)
     {
@@ -257,6 +289,16 @@ mod tests {
                         cache_write_1h: 0.0,
                     },
                 ),
+                (
+                    "gemini-3.5-flash".to_owned(),
+                    Pricing {
+                        input: 1.5 / 1e6,
+                        output: 9.0 / 1e6,
+                        cache_read: 0.15 / 1e6,
+                        cache_write_5m: 0.0,
+                        cache_write_1h: 0.0,
+                    },
+                ),
             ]),
         }));
     }
@@ -303,6 +345,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_word_suffix_prefix_match() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // A non-date suffix must not collide with the shorter base key — only
+        // `-<digit>…` (date/version) extends a prefix match.
+        assert!(usage_cost_usd("claude-sonnet-4-5-experimental", &usage).is_none());
+    }
+
+    #[test]
+    fn prices_latest_alias_via_prefix() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // The `-latest` alias has no bare LiteLLM key; it must price off the base.
+        let cost = usage_cost_usd("claude-sonnet-4-5-latest", &usage)
+            .expect("-latest alias should price off the base key");
+        assert!((cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn falls_back_to_short_rate_when_split_overflows() {
         install_test_pricing();
         let usage = TokenUsage {
@@ -327,6 +394,24 @@ mod tests {
         };
         let cost = usage_cost_usd("gpt-5.5", &usage).expect("gpt should be priced");
         assert!((cost - 40.0).abs() < 1e-9);
-        assert!(usage_cost_usd("Gemini 3.5 Flash (High)", &usage).is_none());
+        assert!(usage_cost_usd("totally-unknown-model", &usage).is_none());
+    }
+
+    #[test]
+    fn prices_antigravity_display_name() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // Antigravity's display name normalizes (drop tier, hyphenate spaces) to
+        // the bare LiteLLM id `gemini-3.5-flash`.
+        let cost = usage_cost_usd("Gemini 3.5 Flash (High)", &usage)
+            .expect("gemini display name should price");
+        // 1.5 (input) + 9.0 (output) = 10.5
+        assert!((cost - 10.5).abs() < 1e-9);
+        // Versionless fallback id stays unpriced — too ambiguous to map.
+        assert!(usage_cost_usd("gemini-pro-default", &usage).is_none());
     }
 }

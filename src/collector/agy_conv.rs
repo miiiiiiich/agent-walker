@@ -18,7 +18,8 @@
 //!     #10 varint  thinking / reasoning tokens
 //!     #11 string  response id (dedup key)
 //!   #9.#4                          per-generation {#1 sec, #2 nanos} timestamp
-//!   #19 string                     model id
+//!   #19 string                     internal model id (e.g. "gemini-3-flash-a")
+//!   #21 string                     display name (e.g. "Gemini 3.5 Flash (High)")
 //! trajectory_metadata_blob.#1.#1   workspace URI (project)
 //! trajectory_metadata_blob.#2      {#1 sec, #2 nanos} session-created timestamp
 //! ```
@@ -238,8 +239,14 @@ fn parse_gen(
         .unwrap_or(fallback_ts_ms);
     let timestamp = ms_to_offset(timestamp, local_offset);
 
-    let model = string_field(chat_model, 19)
-        .filter(|text| !text.trim().is_empty())
+    // Prefer the display name (#21, e.g. "Gemini 3.5 Flash (High)") — it's the
+    // product-accurate label and prices correctly (the internal id #19 is a
+    // cryptic, version-mismatched codename like "gemini-3-flash-a"). Fall back
+    // to #19 when the display name is missing.
+    let is_non_empty = |text: &&str| !text.trim().is_empty();
+    let model = string_field(chat_model, 21)
+        .filter(is_non_empty)
+        .or_else(|| string_field(chat_model, 19).filter(is_non_empty))
         .map(ToOwned::to_owned);
 
     let usage = TokenUsage {
@@ -488,6 +495,25 @@ mod tests {
         assert_eq!(e.usage.output_tokens, 340); // 300 + 40 (thinking folded in)
         assert_eq!(e.usage.reasoning_output_tokens, 40);
         assert_eq!(e.model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn prefers_display_name_over_internal_id() {
+        // chat_model with both #19 (internal id) and #21 (display name).
+        let mut usage = Vec::new();
+        usage.extend(varint(9, 10));
+        usage.extend(varint(10, 0));
+        usage.extend(varint(3, 10));
+        usage.extend(lenf(11, b"r9"));
+        let mut chat = Vec::new();
+        chat.extend(lenf(4, &usage));
+        chat.extend(lenf(19, b"gemini-3-flash-a"));
+        chat.extend(lenf(21, b"Gemini 3.5 Flash (High)"));
+        let blob = lenf(1, &chat);
+        let ParseGen::Event(e) = parse(&blob) else {
+            panic!("expected event");
+        };
+        assert_eq!(e.model.as_deref(), Some("Gemini 3.5 Flash (High)"));
     }
 
     #[test]

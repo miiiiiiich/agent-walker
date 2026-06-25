@@ -34,8 +34,11 @@ change degrades to "no/less data," never to wrong numbers. See
 
 ## Cost
 
-Cost is **not** shown yet. Antigravity's model ids (`gemini-3-flash-agent`, …)
-don't match the LiteLLM pricing table's ids, and the pricing path is currently
-limited to `claude-*` / `gpt-*` models, so gemini usage prices to nothing. Tokens
-still count toward the totals; only the COST panel is blank for Antigravity (the
-same way OpenCode's local Ollama models count tokens but show $0).
+Cost is estimated from the LiteLLM table, the same as every other agent. The
+gen blob carries two model labels: an internal id (`#19`, e.g.
+`gemini-3-flash-a` — a version-mismatched codename) and a display name (`#21`,
+e.g. `Gemini 3.5 Flash (High)`). The collector uses the **display name** — it's
+the product-accurate label, and after normalization (drop the `(tier)`,
+hyphenate spaces) it maps straight to LiteLLM's bare id (`gemini-3.5-flash`).
+A row with no display name falls back to the internal id, which is usually
+versionless (`gemini-pro-default`) and stays $0 rather than guess a generation.

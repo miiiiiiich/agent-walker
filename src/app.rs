@@ -213,9 +213,9 @@ pub fn load_report(config: &Config) -> Result<AppSummary> {
 }
 
 /// A provider earns a tab only if it has real activity. Token volume catches
-/// Claude / Codex; sessions, tools, and completions catch Antigravity, which
-/// logs activity but no tokens. Everything false ⇒ the directory was missing or
-/// empty, so the tab is dropped instead of showing a blank tab.
+/// most agents; sessions, tools, and completions are the fallback for a session
+/// that logged activity but no usage tokens. Everything false ⇒ the directory
+/// was missing or empty, so the tab is dropped instead of showing a blank tab.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
