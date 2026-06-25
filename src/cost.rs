@@ -183,9 +183,10 @@ fn normalize(model_name: &str) -> String {
 
 /// Look up pricing: exact snapshot match first, then the longest snapshot key
 /// the name extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
-/// `claude-sonnet-4-5`). The suffix must be `-<digit>…` so a plain word suffix
-/// (`gemini-pro-default`) never collides with a shorter base key — without that
-/// guard, dropping the provider allowlist would let unrelated ids misprice.
+/// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
+/// plain word suffix (`gemini-pro-default`) must not collide with a shorter base
+/// key — without that guard, dropping the provider allowlist would let unrelated
+/// ids misprice.
 pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     let mut name = normalize(model_name);
     if name == "codex" || name == "openai" {
@@ -203,11 +204,13 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
         .models
         .iter()
         .filter(|(key, _)| {
-            name.strip_prefix(key.as_str()).is_some_and(|rest| {
-                rest.strip_prefix('-')
-                    .and_then(|s| s.chars().next())
-                    .is_some_and(|c| c.is_ascii_digit())
-            })
+            name.strip_prefix(key.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|suffix| {
+                    // A date/version suffix (`-20250929`) or the `-latest` alias
+                    // extends a base key; a plain word (`-default`) must not.
+                    suffix == "latest" || suffix.starts_with(|c: char| c.is_ascii_digit())
+                })
         })
         .max_by_key(|(key, _)| key.len())
         .map(|(_, pricing)| *pricing)
@@ -351,6 +354,19 @@ mod tests {
         // A non-date suffix must not collide with the shorter base key — only
         // `-<digit>…` (date/version) extends a prefix match.
         assert!(usage_cost_usd("claude-sonnet-4-5-experimental", &usage).is_none());
+    }
+
+    #[test]
+    fn prices_latest_alias_via_prefix() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // The `-latest` alias has no bare LiteLLM key; it must price off the base.
+        let cost = usage_cost_usd("claude-sonnet-4-5-latest", &usage)
+            .expect("-latest alias should price off the base key");
+        assert!((cost - 3.0).abs() < 1e-9);
     }
 
     #[test]
