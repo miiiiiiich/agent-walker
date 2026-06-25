@@ -10,9 +10,11 @@
 //!
 //! This is the one collector that sends anything off the machine (the user's own
 //! session cookie, to Cursor, to read the user's own usage). It's auto-detected
-//! from a signed-in `state.vscdb` like the other providers, but makes no request
-//! when signed out (no token) and is disabled by `--no-cursor`. It is also an
-//! undocumented endpoint that can change without notice.
+//! from a signed-in `state.vscdb` like the other providers, and — like them —
+//! simply skips (no tab, no error) when the pieces aren't all there: no Cursor
+//! store, signed out (no token), or the fetch doesn't come back. So no request
+//! is made unless you're actually signed in. It is also an undocumented endpoint
+//! that can change without notice.
 //!
 //! Cursor's usage events carry **no project/repo identifier** and its models
 //! (`composer-2.5-fast`, …) aren't in the `LiteLLM` table, so the CSV's own

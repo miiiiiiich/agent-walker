@@ -27,7 +27,7 @@ AI エージェントがマシンに残すログから作る、ローカルの�
 
 - ログは**マシンの外に出ない** — 利用状況やエラーをサーバーに送ることはしない。
 - 常時の outbound 通信は、ダッシュボードがレポートを読み込み・再読み込みするときに発行する、公開モデル価格メタデータ（[LiteLLM 価格DB](https://github.com/BerriAI/litellm)・MIT ライセンス）への `GET` だけ。ログ内容も利用状況も送らないが、`git pull` と同じく GitHub の CDN 側からは IP が見える。気になるならファイアウォールで遮断する／オフラインで使う。
-- **唯一の例外が Cursor。** Cursor にローカルでサインインしていると自動検出され、利用状況を読むためにネットワークへ出る — ローカルにトークンを持たない Cursor 自身の利用状況ダッシュボードに、手元のセッショントークンで問い合わせる。自分のセッション Cookie を Cursor に送って自分の利用状況を読む形。サインアウト中は何も送らず、`--no-cursor` で完全に無効化できる。[docs/cursor.md](docs/cursor.md) 参照。
+- **唯一の例外が Cursor。** Cursor にローカルでサインインしていると自動検出され、利用状況を読むためにネットワークへ出る — ローカルにトークンを持たない Cursor 自身の利用状況ダッシュボードに、手元のセッショントークンで問い合わせる。自分のセッション Cookie を Cursor に送って自分の利用状況を読む形。読むものが無ければ（未インストール／サインアウト）スキップ＝送信しないので、サインイン中以外は何も出ない。[docs/cursor.md](docs/cursor.md) 参照。
 - リリースバイナリは [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations) 付き：
 
 ```sh
@@ -61,7 +61,6 @@ bunx agent-walker
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `OPENCODE_HOME` も自動で読む） |
-| `--no-cursor` | Cursor を無効化。Cursor はサインイン中に自動検出され、利用状況を読むためにネットワークへ出る（[プライバシー](#プライバシー)参照）。これで止める。JWT を直接渡すなら `CURSOR_TOKEN` 環境変数（コマンドラインだと `ps`・履歴に漏れる） |
 | `--completions <shell>` | シェル補完を出力して終了 |
 
 ## codename を共有
@@ -79,7 +78,7 @@ bunx agent-walker
 | Claude Code | `~/.claude/projects/**/*.jsonl` | トークン / モデル / ツール / サブエージェント / プロジェクト / ターン時間 — [詳細](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | トークン / モデル / ツール / タスク時間 / プロジェクト — [詳細](docs/codex.md) |
 | OpenCode | `~/.local/share/opencode/opencode*.db` | 自動検出（SQLite を read-only スナップショット・`OPENCODE_DB` も尊重）。トークン / モデル / ツール / 時間 / プロジェクト — [詳細](docs/opencode.md) |
-| Cursor | Cursor 利用状況ダッシュボード（ネットワーク） | サインイン中に自動検出（**ネットワークへ出る**・`--no-cursor` で無効化）。トークン / モデル / Cursor 報告のコスト — プロジェクトやツールは無し（Cursor が出さない）。セッショントークンは `state.vscdb` から読む — [詳細](docs/cursor.md) |
+| Cursor | Cursor 利用状況ダッシュボード（ネットワーク） | サインイン中に自動検出（**ネットワークへ出る**・未インストール/サインアウトならスキップ）。トークン / モデル / Cursor 報告のコスト — プロジェクトやツールは無し（Cursor が出さない）。セッショントークンは `state.vscdb` から読む — [詳細](docs/cursor.md) |
 | Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出（ログがあるときだけタブ表示）。セッションとツールの流れのみ（ログにトークンなし） — [詳細](docs/agy.md) |
 
 各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。

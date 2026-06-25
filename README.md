@@ -44,8 +44,9 @@ reads the session logs on your disk and answers, in one screen:
   Cursor locally, and reading its usage reaches the network: agent-walker uses
   your local Cursor session token to query Cursor's own usage dashboard (Cursor
   keeps no usage on disk). That sends your session cookie to Cursor to read your
-  own usage. When you're signed out nothing is sent, and `--no-cursor` turns it
-  off entirely. See [docs/cursor.md](docs/cursor.md).
+  own usage. It's skipped (no request) whenever there's nothing to read — Cursor
+  not installed, or signed out — so nothing is sent unless you're signed in. See
+  [docs/cursor.md](docs/cursor.md).
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
@@ -80,7 +81,6 @@ Flags:
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `OPENCODE_HOME` when set) |
-| `--no-cursor` | Disable Cursor. Cursor is auto-detected when you're signed in and reaches the network to read its usage (see [Privacy](#privacy)); this turns it off. `CURSOR_TOKEN` supplies the token directly |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename
@@ -103,7 +103,7 @@ card — just glance before you post.
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
 | OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
-| Cursor | Cursor usage dashboard (network) | auto-detected when signed in (**reaches the network**; `--no-cursor` to disable); tokens, models, and Cursor-reported cost — no project/tools (Cursor exposes none). Reads the session token from `state.vscdb` — [details](docs/cursor.md) |
+| Cursor | Cursor usage dashboard (network) | auto-detected when signed in (**reaches the network**; skipped when not installed / signed out); tokens, models, and Cursor-reported cost — no project/tools (Cursor exposes none). Reads the session token from `state.vscdb` — [details](docs/cursor.md) |
 | Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above

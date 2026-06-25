@@ -45,14 +45,6 @@ pub struct Args {
     #[arg(long, value_name = "DIR")]
     pub opencode_dir: Option<PathBuf>,
 
-    /// Disable Cursor. Cursor is auto-detected when you're signed in locally
-    /// (its `state.vscdb` holds a session token), and — unlike every other
-    /// provider — reading its usage reaches the network: it queries Cursor's own
-    /// dashboard (an undocumented endpoint), since Cursor keeps no usage on disk.
-    /// Pass this to turn that off. Nothing is sent when you're signed out.
-    #[arg(long)]
-    pub no_cursor: bool,
-
     /// Override the path to Cursor's `state.vscdb` (default is the platform
     /// config dir, e.g. `~/Library/Application Support/Cursor/...`). To supply a
     /// session JWT directly, set the `CURSOR_TOKEN` env var — a token on the
@@ -110,10 +102,10 @@ pub struct Config {
     /// auto-detected like Antigravity: the tab appears only when `opencode.db`
     /// exists there.
     pub opencode_dir: Option<PathBuf>,
-    /// Cursor settings, or `None` when it's disabled / undetectable (signed out
-    /// with no token, or `--no-cursor`). `Some` carries the resolved
-    /// `state.vscdb` path, the CLI-config path, and an optional token override.
-    /// Auto-detected, but the one collector that reaches the network.
+    /// Cursor settings, or `None` when there's nothing to read (no Cursor store
+    /// and no `CURSOR_TOKEN`). `Some` carries the resolved `state.vscdb` path,
+    /// the CLI-config path, and an optional token override. Auto-detected, but
+    /// the one collector that reaches the network.
     pub cursor: Option<CursorConfig>,
     pub days: u16,
     pub use_cache: bool,
@@ -366,16 +358,13 @@ fn default_opencode_dir() -> Result<PathBuf> {
 }
 
 /// Build the Cursor config. Cursor is **auto-detected** like the other providers
-/// (no flag to turn it on): it runs whenever a session token is available — an
-/// explicit `CURSOR_TOKEN`, or a local `state.vscdb` that
-/// exists (you're signed into Cursor). `--no-cursor` disables it; signed out
-/// (no token on disk) it stays silent and never hits the network. Path
-/// resolution failures fall back to empty paths so an explicit token still works
-/// in CI / sandboxes where the home dir can't be resolved.
+/// (no flag to turn it on or off): it runs whenever there's something to read —
+/// an explicit `CURSOR_TOKEN`, or a local `state.vscdb` that exists. With
+/// neither there's nothing to detect, so it's skipped. Signed out (store exists
+/// but no token) it stays silent and never hits the network — handled in the
+/// collector. Path resolution failures fall back to empty paths so an explicit
+/// token still works in CI / sandboxes where the home dir can't be resolved.
 fn cursor_config(args: &Args) -> Option<CursorConfig> {
-    if args.no_cursor {
-        return None;
-    }
     let token = env::var("CURSOR_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());

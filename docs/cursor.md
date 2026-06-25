@@ -2,8 +2,9 @@
 
 Cursor is **auto-detected** like the other providers — its tab appears whenever
 you're signed into Cursor locally — but it's the one provider that **reaches the
-network** to do it. When you're signed out (no token on disk) nothing is sent;
-`--no-cursor` disables it entirely.
+network** to do it. It's skipped (no request) when there's nothing to read:
+Cursor not installed, signed out (no token), or the fetch doesn't return. So
+nothing is sent unless you're signed in.
 
 ## Why it needs the network
 
@@ -21,12 +22,13 @@ The cookie is `<accountId>::<jwt>`:
 - the **JWT** is read from Cursor's local Electron store
   (`…/Cursor/User/globalStorage/state.vscdb`, `ItemTable` key
   `cursorAuth/accessToken`) — read-only, so SQLite never writes your live store;
-- the **accountId** comes from `~/.cursor/cli-config.json` (`authInfo.authId`),
-  falling back to the JWT `sub` claim.
+- the **accountId** is the JWT's own `sub` claim (authoritative — it owns the
+  token), with `~/.cursor/cli-config.json` (`authInfo.authId`) as a fallback for
+  a malformed JWT.
 
-`CURSOR_TOKEN` supplies the JWT directly (skip the local DB),
-`--cursor-state-db` points at a non-standard `state.vscdb`, and `--no-cursor`
-turns the whole thing off.
+`CURSOR_TOKEN` supplies the JWT directly (skip the local DB) and
+`--cursor-state-db` points at a non-standard `state.vscdb`. There's no flag to
+turn Cursor on or off — sign out of Cursor if you don't want it read.
 
 This endpoint is **undocumented** and can change or break without notice. A
 `401`/`403` means the session expired — re-login in Cursor to refresh the token,
