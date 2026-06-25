@@ -76,7 +76,7 @@ bunx agent-walker
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | トークン / モデル / ツール / サブエージェント / プロジェクト / ターン時間 — [詳細](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | トークン / モデル / ツール / タスク時間 / プロジェクト — [詳細](docs/codex.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出（ログがあるときだけタブ表示）。セッションとツールの流れのみ（ログにトークンなし） — [詳細](docs/agy.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出。会話ごとの SQLite（ラベル無し protobuf をフィールド番号でデコード・行ごとに自己検証）からトークン/モデル/プロジェクト、ログから activity/ツール。コストは $0（gemini の id が未価格） — [詳細](docs/agy.md) |
 
 各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
 
@@ -96,7 +96,7 @@ Claude Code は既定で**約30日でトランスクリプトを整理する**�
 
 - コストは **API 換算の見積もり**（実請求ではない）。LiteLLM の価格、キャッシュ読み書きは別レート。pricing fetch 日付は、pricing が読めて端末幅に余裕があるとき COST パネルに表示される。
 - トークンは**キャッシュ込み**（入力 + 出力 + キャッシュ書込 + 読込）。Claude は毎ターン全コンテキストを再送するので、ヘビーに使うほど合計の大部分はキャッシュ読込＝安価な再読込で、新規の作業量とは別物。
-- **Antigravity はトークン/コスト非計上**（中身不明な protobuf）。タブは自動検出されるが、Total の合計トークンには加算されない（活動のみ反映）。
+- **Antigravity のトークンはラベル無し protobuf（会話ごと SQLite）から読む**。フィールド番号でデコードし行ごとに自己検証するので合計に加算される。ただしコストは $0（gemini の id が価格表に未対応）。
 - 各エージェント自身の利用表示とは一致しない（集計の窓やキャッシュの数え方が違う）。
 - Antigravity のログのタイムスタンプはタイムゾーンなし＝ローカル想定。
 - Windows バイナリは 0.3 以降で配布。Windows Terminal / PowerShell で動き、ログは `%USERPROFILE%` から読む。WSL でもそのまま動く（パスは Linux 形式のまま）。

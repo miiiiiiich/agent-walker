@@ -1,16 +1,13 @@
-//! Antigravity (`agy`) collector — **auto-detected; the tab shows only when
-//! logs are present, and carries activity only (no token usage).**
+//! Antigravity (`agy`) collector — **auto-detected; shows when local data is
+//! present.**
 //!
-//! Why activity-only: Antigravity's text logs (`log/*.log`, `history.jsonl`)
-//! record the model, turns, and tool confirmations but **no token usage**, so
-//! every event here carries `TokenUsage::default()` (zero). The real usage lives
-//! in `conversations/*.{db,pb}` as unlabeled protobuf blobs (table
-//! `gen_metadata`) — token-magnitude integers are present but which field is
-//! prompt / output / cached is unknown, and the schema is Google-internal and
-//! liable to change. Because every agy event is zero-token, it never moves the
-//! token totals; the tab simply appears when logs exist and sorts last. This
-//! parser is kept intact for the day that store becomes readable (decode
-//! `gen_metadata`, identify the token fields, fill `usage`).
+//! Two sources: the text logs (`log/*.log`, `history.jsonl`) give the session /
+//! tool activity timeline, and the per-conversation SQLite stores
+//! (`conversations/*.db`) give the real token usage, model, and project — see
+//! [`super::agy_conv`], which decodes the unlabeled `gen_metadata` protobuf and
+//! self-verifies the field map. Tokens used to be unavailable (the store was
+//! left unparsed), so this collector was activity-only; it now contributes full
+//! usage like the others.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -20,12 +17,8 @@ use std::time::SystemTime;
 use serde_json::Value;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
-use crate::collector::{
-    FileEvents, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached,
-};
-use crate::model::{
-    Collection, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
-};
+use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
+use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
 
 pub fn collect(
     root: &Path,
@@ -57,6 +50,14 @@ pub fn collect(
         parse_file(path, local_offset)
     });
     merge_into(&mut collection, per_file);
+
+    // Real token usage comes from the per-conversation SQLite stores, not the
+    // text logs (which only carry activity). The logs above still provide the
+    // session/tool timeline; these add tokens, model, and project.
+    let usage =
+        super::agy_conv::collect_usage(root, mtime_floor, local_offset, &mut collection.stats);
+    collection.usage_events.extend(usage);
+    collection.stats.usage_events = collection.usage_events.len();
     collection
 }
 
@@ -116,7 +117,6 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let log_session_id = fallback_session_id(path);
-    let mut current_model = None;
     let mut current_conversation_id = None;
     let reader = BufReader::new(file);
 
@@ -127,33 +127,17 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             continue;
         };
         let timestamp = parse_log_timestamp(path, &line, local_offset);
-        if line.contains("model_config_manager.go")
-            && let Some(model) = quoted_value(&line, "label=\"")
-        {
-            current_model = Some(model);
-            continue;
-        }
 
         if line.contains("HandleUserInput called with text") {
             let session_id = current_conversation_id
                 .clone()
                 .or_else(|| log_session_id.clone());
+            // Activity only — real tokens/model come from conversations/*.db
+            // (see `agy_conv`), so no zero-token usage event is emitted here.
             if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
                 events.session_touches.push(SessionTouch {
                     timestamp,
-                    session_id: session_id.clone(),
-                });
-                events.usage_events.push(KeyedUsageEvent {
-                    key: None,
-                    event: UsageEvent {
-                        timestamp: Some(timestamp),
-                        session_id: Some(session_id),
-                        model: current_model.clone().or_else(|| Some("Gemini".to_owned())),
-                        source_kind: SourceKind::Main,
-                        attribution_agent: None,
-                        project: None,
-                        usage: TokenUsage::default(),
-                    },
+                    session_id,
                 });
             }
             continue;
@@ -218,18 +202,6 @@ fn log_year(path: &Path) -> Option<i32> {
     let file_stem = path.file_stem()?.to_str()?;
     let raw_date = file_stem.strip_prefix("cli-")?.get(0..8)?;
     raw_date.get(0..4)?.parse::<i32>().ok()
-}
-
-fn quoted_value(line: &str, marker: &str) -> Option<String> {
-    let start = line.find(marker)? + marker.len();
-    let rest = line.get(start..)?;
-    let end = rest.find('"')?;
-    let value = rest.get(0..end)?;
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_owned())
-    }
 }
 
 fn value_after(line: &str, marker: &str) -> Option<String> {
@@ -307,12 +279,9 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 2);
-        assert_eq!(collection.usage_events.len(), 1);
-        assert_eq!(
-            collection.usage_events[0].model.as_deref(),
-            Some("Gemini 3.5 Flash (High)")
-        );
-        assert_eq!(collection.usage_events[0].usage.token_volume(), 0);
+        // The text logs are activity/tools only — token usage now comes from
+        // conversations/*.db (none in this fixture), so no usage events here.
+        assert!(collection.usage_events.is_empty());
         assert_eq!(collection.tool_events[0].tool_name, "command:bun");
         assert!(collection.session_touches.len() >= 2);
     }

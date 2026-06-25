@@ -96,7 +96,7 @@ card — just glance before you post.
 | Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
 | OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+| Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected; tokens, models, and projects from its per-conversation SQLite (an unlabeled protobuf, decoded by field number and self-verified per row), plus activity/tools from the logs. Cost shows $0 — its gemini model ids aren't priced yet — [details](docs/agy.md) |
 
 Each agent counts and caches tokens differently. The per-agent pages above
 explain what's read, how tokens/cache/cost are counted, and the caveats.
@@ -130,9 +130,10 @@ indefinitely; no setting needed.
   reads). Claude Code re-sends the full context every turn, so for heavy
   users the bulk of the total tends to be cache reads — real but cheaply
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
-- **Antigravity tokens/cost are not counted** — its usage lives in an
-  undocumented protobuf format. Its tab is auto-detected, but the Total token
-  count still excludes it (activity only); see [docs/agy.md](docs/agy.md).
+- **Antigravity tokens are read from an undocumented protobuf** (its
+  per-conversation SQLite), decoded by field number and self-verified per row, so
+  they count toward the totals. Its **cost still shows $0** — its gemini model
+  ids aren't in the pricing table yet; see [docs/agy.md](docs/agy.md).
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.
