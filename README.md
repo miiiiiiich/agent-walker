@@ -96,18 +96,22 @@ card — just glance before you post.
 
 ![an agent-walker codename stats card](docs/card.png)
 
-## What it reads
+## Works with your agents
 
-| Agent | Location | Notes |
-|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
-| OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
-| Cursor | Cursor usage dashboard (network) | auto-detected when signed in (**reaches the network**; skipped when not installed / signed out); tokens, models, and Cursor-reported cost — no project/tools (Cursor exposes none). Reads the session token from `state.vscdb` — [details](docs/cursor.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected (tab shows only if logs exist); sessions and tool flow only — no token data in its logs — [details](docs/agy.md) |
+Every agent is auto-detected — install nothing, configure nothing, just run it.
 
-Each agent counts and caches tokens differently. The per-agent pages above
-explain what's read, how tokens/cache/cost are counted, and the caveats.
+| Agent | Tokens & cost | Models | Projects | Tools | Activity |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **[Claude Code](docs/claude.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
+| **[Antigravity](docs/agy.md)** | — | — | — | ✅ | ✅ |
+
+Local-only, except **Cursor** — it keeps no usage on disk, so it's read from
+Cursor's own dashboard over the network (only when you're signed in; see
+[Privacy](#privacy)). The per-agent pages explain exactly what's read, how
+tokens/cache/cost are counted, and the caveats.
 
 Everything is parsed in parallel and cached per file
 (`~/.cache/agent-walker/`), so warm starts skip the bulk of the work and only

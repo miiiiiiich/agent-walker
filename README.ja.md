@@ -71,17 +71,19 @@ bunx agent-walker
 
 ![agent-walker の codename カード](docs/card.png)
 
-## 読むもの
+## 対応エージェント
 
-| エージェント | 場所 | メモ |
-|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | トークン / モデル / ツール / サブエージェント / プロジェクト / ターン時間 — [詳細](docs/claude.md) |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | トークン / モデル / ツール / タスク時間 / プロジェクト — [詳細](docs/codex.md) |
-| OpenCode | `~/.local/share/opencode/opencode*.db` | 自動検出（SQLite を read-only スナップショット・`OPENCODE_DB` も尊重）。トークン / モデル / ツール / 時間 / プロジェクト — [詳細](docs/opencode.md) |
-| Cursor | Cursor 利用状況ダッシュボード（ネットワーク） | サインイン中に自動検出（**ネットワークへ出る**・未インストール/サインアウトならスキップ）。トークン / モデル / Cursor 報告のコスト — プロジェクトやツールは無し（Cursor が出さない）。セッショントークンは `state.vscdb` から読む — [詳細](docs/cursor.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出（ログがあるときだけタブ表示）。セッションとツールの流れのみ（ログにトークンなし） — [詳細](docs/agy.md) |
+全部自動検出 — 何も入れず、何も設定せず、ただ実行するだけ。
 
-各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
+| エージェント | トークン・コスト | モデル | プロジェクト | ツール | アクティビティ |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **[Claude Code](docs/claude.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
+| **[Antigravity](docs/agy.md)** | — | — | — | ✅ | ✅ |
+
+**Cursor 以外はローカル完結**。Cursor だけはローカルに利用状況が無いので、Cursor 自身のダッシュボードからネットワーク越しに読む（サインイン中だけ・[プライバシー](#プライバシー)参照）。各エージェントの詳細ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
 
 並列パース＋ファイル単位キャッシュ（`~/.cache/agent-walker/`）で、warm start は `(mtime, size)` が変わったログファイルだけ再パースする。ログは信頼しない入力として扱い、壊れた行は数えてスキップ（評価はしない）。
 
