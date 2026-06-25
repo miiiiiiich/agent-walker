@@ -2,7 +2,12 @@
 
 ## Where the data comes from
 
-`~/.codex/sessions/**/*.jsonl` — rollout session logs. Read-only.
+`~/.codex/sessions/**/*.jsonl` and `~/.codex/archived_sessions/**/*.jsonl` —
+rollout session logs. Read-only. The Codex desktop app *moves* (not copies) a
+session's JSONL from `sessions/` to `archived_sessions/` when it's archived, so
+both are scanned; a session that briefly exists in both (a stale copy) is
+deduplicated by relative path before parsing. `--codex-dir` overrides the
+**sessions** directory; its `archived_sessions` sibling is derived from it.
 
 ## What's captured
 
