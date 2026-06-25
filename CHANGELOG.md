@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Antigravity token usage. Previously activity-only, it now reads real per-model
+  token counts (input / cache-read / output / thinking), model, and project from
+  the CLI's per-conversation SQLite stores (`conversations/*.db`). The data is an
+  unlabeled protobuf decoded by field number and **self-verified per row** (the
+  stored output total must equal text + thinking), so a future format change
+  degrades to less data, never wrong numbers. Cost still shows $0 — its gemini
+  model ids aren't in the pricing table yet.
+
 ## [0.5.0] - 2026-06-23
 
 ### Added
