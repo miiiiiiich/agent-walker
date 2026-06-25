@@ -2,40 +2,28 @@
 
 ## Where the data comes from
 
-`~/.gemini/antigravity-cli` (read-only, auto-detected; point elsewhere with
-`--agy-dir`):
+`~/.gemini/antigravity-cli` — `history.jsonl` (timestamps) and `log/cli-*.log`
+(model name + confirmed commands). Read-only. Auto-detected: the Agy tab appears
+only when this directory holds logs (point elsewhere with `--agy-dir`).
 
-- `history.jsonl` + `log/cli-*.log` → the session / tool **activity** timeline.
-- `conversations/<uuid>.db` (SQLite) → **token usage, model, and project**, one
-  row per generation in the `gen_metadata` table.
+## What's captured — and what isn't
 
-## What's captured
+- ✅ **Activity**: session timestamps → active days, hourly profile, streak.
+- ✅ **Model**: the model name from the CLI log.
+- ✅ **Some tools**: only the commands you *confirmed* in approval dialogs
+  (`command:<exe>`).
+- ❌ **Tokens and cost are not captured.** agy reports ~0 tokens and $0.
 
-- ✅ **Tokens** — per generation: input (system prompt + new input), cache-read,
-  output (text), and thinking/reasoning. Thinking is folded into output so it
-  counts toward the total (same convention as OpenCode).
-- ✅ **Model** — e.g. `gemini-3-flash-agent`.
-- ✅ **Project** — the workspace path recorded in the conversation.
-- ✅ **Activity** — session timestamps → active days, hourly profile, streak.
-- ✅ **Some tools** — the commands you *confirmed* in approval dialogs
-  (`command:<exe>`) from the logs.
+## Why tokens are missing (design constraint)
 
-## The tokens are unlabeled protobuf — and self-verified
+Antigravity's real usage data lives in `.db` / `.pb` files as **protobuf blobs**
+that need Antigravity's private `.proto` schema to decode. That schema is
+undocumented and changes between versions, so parsing it would be fragile and
+break often. agent-walker deliberately does **not** read it.
 
-`gen_metadata` rows are Antigravity's internal **protobuf with no field names**,
-and there's no public schema. agent-walker reads the wire format directly and
-pulls the few fields it needs by number (cross-checked against the `tokscale`
-project, which maps them identically). Because the numbers are unofficial and
-could shift on an Antigravity update, **every row is self-verified**: the stored
-output total must equal text + thinking. A row that fails is skipped and counted
-as a parse error rather than contributing garbage tokens — so a future format
-change degrades to "no/less data," never to wrong numbers. See
-`src/collector/agy_conv.rs`.
+## What this means
 
-## Cost
-
-Cost is **not** shown yet. Antigravity's model ids (`gemini-3-flash-agent`, …)
-don't match the LiteLLM pricing table's ids, and the pricing path is currently
-limited to `claude-*` / `gpt-*` models, so gemini usage prices to nothing. Tokens
-still count toward the totals; only the COST panel is blank for Antigravity (the
-same way OpenCode's local Ollama models count tokens but show $0).
+Treat agy numbers as **activity-only**. If you use Antigravity meaningfully, its
+tokens and cost are **not** reflected in agent-walker's totals — including the
+Total view. This is a known gap, not a bug: it is the price of not coupling to
+an undocumented binary format.
