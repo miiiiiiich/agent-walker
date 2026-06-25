@@ -186,7 +186,7 @@ fn fetch_csv(cookie: &str) -> Result<String, String> {
     let response = ureq::get(CSV_URL)
         // The fetch is synchronous and the dashboard waits on it, so keep the
         // cap short — the CSV is tiny; a slow network shouldn't hang startup.
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(5))
         .set("Cookie", cookie)
         .set("Referer", REFERER)
         .set("User-Agent", USER_AGENT)
