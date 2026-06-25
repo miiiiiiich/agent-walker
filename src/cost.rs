@@ -204,8 +204,9 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
         .iter()
         .filter(|(key, _)| {
             name.strip_prefix(key.as_str()).is_some_and(|rest| {
-                let mut rest = rest.chars();
-                rest.next() == Some('-') && rest.next().is_some_and(|c| c.is_ascii_digit())
+                rest.strip_prefix('-')
+                    .and_then(|s| s.chars().next())
+                    .is_some_and(|c| c.is_ascii_digit())
             })
         })
         .max_by_key(|(key, _)| key.len())
