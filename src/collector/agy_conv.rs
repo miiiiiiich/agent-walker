@@ -24,10 +24,12 @@
 //! ```
 //!
 //! Because the numbers are unofficial and could shift on an Antigravity update,
-//! every row is self-verified: the precomputed output total `#3` must equal
-//! `#9 + #10`. A mismatch means the layout drifted, so the row is skipped and
-//! counted as a parse error rather than emitting garbage tokens.
+//! every row is self-verified against the precomputed output total `#3`: it must
+//! equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped and
+//! counted as a parse error. A row that omits `#3` can't be verified, so it's
+//! skipped too, but quietly (some healthy rows omit it — not an error).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,28 +64,60 @@ pub(super) fn collect_usage(
         .collect();
     dbs.sort();
 
+    // Dedupe retried generations (same response id) across every DB, so a retry
+    // never double-counts.
+    let mut seen = HashSet::new();
     for db in dbs {
+        let newest = newest_mtime_ms(&db);
         // Skip whole files older than the window (cheap mtime gate, like the
-        // JSONL collectors) so a long history doesn't reparse every run.
-        if let (Some(floor_ms), Ok(meta)) = (floor, std::fs::metadata(&db))
-            && meta
-                .modified()
-                .ok()
-                .and_then(systemtime_to_ms)
-                .is_some_and(|mtime| mtime < floor_ms)
+        // JSONL collectors) so a long history doesn't reparse every run. In WAL
+        // mode recent writes land in `<db>-wal`, so gate on the newest of the DB
+        // and its sidecars, not the main file alone.
+        if let (Some(floor_ms), Some(mtime)) = (floor, newest)
+            && mtime < floor_ms
         {
             continue;
         }
-        parse_db(&db, floor, local_offset, stats, &mut events);
+        parse_db(
+            &db,
+            floor,
+            newest,
+            local_offset,
+            stats,
+            &mut seen,
+            &mut events,
+        );
     }
     events
+}
+
+/// Newest mtime (ms) across the DB and its `-wal` / `-shm` sidecars.
+fn newest_mtime_ms(db: &Path) -> Option<i64> {
+    ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|suffix| {
+            let path = if suffix.is_empty() {
+                db.to_path_buf()
+            } else {
+                let mut name = db.as_os_str().to_owned();
+                name.push(suffix);
+                std::path::PathBuf::from(name)
+            };
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(systemtime_to_ms)
+        })
+        .max()
 }
 
 fn parse_db(
     db: &Path,
     floor_ms: Option<i64>,
+    db_mtime_ms: Option<i64>,
     local_offset: UtcOffset,
     stats: &mut ScanStats,
+    seen: &mut HashSet<String>,
     events: &mut Vec<UsageEvent>,
 ) {
     let Some(conn) = open_readonly(db) else {
@@ -97,6 +131,14 @@ fn parse_db(
         .unwrap_or("antigravity")
         .to_owned();
     let (session_ts, project) = trajectory_meta(&conn);
+    // Fallback chain for a row's time: its own stamp → the conversation's
+    // created-at → the DB file mtime (so a missing timestamp dates the event near
+    // when the file was written, never 1970).
+    let fallback_ts = if session_ts > 0 {
+        session_ts
+    } else {
+        db_mtime_ms.unwrap_or(0)
+    };
 
     let Ok(mut stmt) = conn.prepare("SELECT data FROM gen_metadata ORDER BY idx") else {
         return;
@@ -113,15 +155,16 @@ fn parse_db(
         match parse_gen(
             &blob,
             &session_id,
-            session_ts,
+            fallback_ts,
             project.as_deref(),
             local_offset,
+            seen,
         ) {
             ParseGen::Event(event) => {
                 if floor_ms.is_some_and(|floor| {
                     event
                         .timestamp
-                        .is_some_and(|ts| ts.unix_timestamp() * 1000 < floor)
+                        .is_some_and(|ts| ts.unix_timestamp_nanos() / 1_000_000 < i128::from(floor))
                 }) {
                     continue;
                 }
@@ -142,9 +185,10 @@ enum ParseGen {
 fn parse_gen(
     blob: &[u8],
     session_id: &str,
-    session_ts_ms: i64,
+    fallback_ts_ms: i64,
     project: Option<&str>,
     local_offset: UtcOffset,
+    seen: &mut HashSet<String>,
 ) -> ParseGen {
     let Some(chat_model) = message_field(blob, 1) else {
         return ParseGen::Empty;
@@ -163,12 +207,16 @@ fn parse_gen(
     let output_text = to_u64(v(9));
     let thinking = to_u64(v(10));
 
-    // Self-verify the field map: the stored output total (#3) must equal
-    // text + thinking. If it doesn't, the layout drifted — refuse the row.
-    if let Some(total) = varint_field(usage, 3)
-        && to_u64(total) != output_text.saturating_add(thinking)
-    {
-        return ParseGen::Drift;
+    // Self-verify the field map against the stored output total (#3):
+    // - present and == text + thinking → trusted.
+    // - present but != → the layout drifted; flag it (Drift → parse error).
+    // - absent → can't verify this row, so don't trust it, but absence happens in
+    //   healthy data (some rows omit #3), so skip it quietly rather than as an
+    //   error.
+    match varint_field(usage, 3) {
+        Some(total) if to_u64(total) == output_text.saturating_add(thinking) => {}
+        Some(_) => return ParseGen::Drift,
+        None => return ParseGen::Empty,
     }
 
     let input = system.saturating_add(new_input);
@@ -176,11 +224,18 @@ fn parse_gen(
         return ParseGen::Empty;
     }
 
+    // Skip a retried generation already counted (same response id, field #11).
+    if let Some(id) = string_field(usage, 11).filter(|id| !id.trim().is_empty())
+        && !seen.insert(id.to_owned())
+    {
+        return ParseGen::Empty;
+    }
+
     let timestamp = message_field(chat_model, 9)
         .and_then(|node| message_field(node, 4))
         .and_then(proto_timestamp_ms)
         .filter(|&ms| ms > 0)
-        .unwrap_or(session_ts_ms);
+        .unwrap_or(fallback_ts_ms);
     let timestamp = ms_to_offset(timestamp, local_offset);
 
     let model = string_field(chat_model, 19)
@@ -225,8 +280,22 @@ fn trajectory_meta(conn: &Connection) -> (i64, Option<String>) {
         .unwrap_or(0);
     let project = message_field(&blob, 1)
         .and_then(|folder| string_field(folder, 1))
-        .map(|uri| uri.trim_start_matches("file://").to_owned());
+        .map(file_uri_to_path);
     (ts, project)
+}
+
+/// `file:///Users/me/x` → `/Users/me/x`; `file:///C:/Users/me/x` →
+/// `C:/Users/me/x` (drop the slash Windows leaves before the drive letter).
+fn file_uri_to_path(uri: &str) -> String {
+    let path = uri.trim_start_matches("file://");
+    // A Windows drive path is `/C:/...`; strip the leading slash so it reads as
+    // `C:/...`. Unix paths (`/Users/...`) keep their leading slash.
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' && bytes[1].is_ascii_alphabetic() {
+        path[1..].to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 fn open_readonly(db: &Path) -> Option<Connection> {
@@ -370,37 +439,46 @@ mod tests {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gen_blob(
         system: u64,
         input: u64,
         cache: u64,
         output: u64,
         think: u64,
-        total: u64,
+        total: Option<u64>,
+        resp_id: &str,
     ) -> Vec<u8> {
         let mut usage = Vec::new();
         usage.extend(varint(1, system));
         usage.extend(varint(2, input));
-        usage.extend(varint(3, total));
+        if let Some(total) = total {
+            usage.extend(varint(3, total));
+        }
         usage.extend(varint(5, cache));
         usage.extend(varint(9, output));
         usage.extend(varint(10, think));
-        usage.extend(lenf(11, b"resp-1"));
+        usage.extend(lenf(11, resp_id.as_bytes()));
         let mut chat = Vec::new();
         chat.extend(lenf(4, &usage));
         chat.extend(lenf(19, b"gemini-3-flash"));
         lenf(1, &chat)
     }
 
+    fn parse(blob: &[u8]) -> ParseGen {
+        parse_gen(blob, "s1", 1, None, UtcOffset::UTC, &mut HashSet::new())
+    }
+
     #[test]
     fn maps_tokens_and_model() {
-        let blob = gen_blob(1132, 500, 16000, 300, 40, 340);
+        let blob = gen_blob(1132, 500, 16000, 300, 40, Some(340), "r1");
         let ParseGen::Event(e) = parse_gen(
             &blob,
             "s1",
             1_700_000_000_000,
             Some("/x/proj"),
             UtcOffset::UTC,
+            &mut HashSet::new(),
         ) else {
             panic!("expected event");
         };
@@ -414,19 +492,45 @@ mod tests {
     #[test]
     fn self_verify_rejects_drifted_total() {
         // #3 (999) != #9 + #10 (300 + 40) → layout drift → Drift, not garbage.
-        let blob = gen_blob(1132, 500, 0, 300, 40, 999);
+        let blob = gen_blob(1132, 500, 0, 300, 40, Some(999), "r1");
+        assert!(matches!(parse(&blob), ParseGen::Drift));
+    }
+
+    #[test]
+    fn missing_output_total_is_skipped_quietly() {
+        // No #3 at all → can't self-verify → skip (not trusted), but quietly:
+        // some healthy rows omit it, so it's not an error.
+        let blob = gen_blob(1132, 500, 0, 300, 40, None, "r1");
+        assert!(matches!(parse(&blob), ParseGen::Empty));
+    }
+
+    #[test]
+    fn duplicate_response_id_is_skipped() {
+        let blob = gen_blob(1132, 500, 0, 300, 40, Some(340), "dup");
+        let mut seen = HashSet::new();
         assert!(matches!(
-            parse_gen(&blob, "s1", 1, None, UtcOffset::UTC),
-            ParseGen::Drift
+            parse_gen(&blob, "s1", 1, None, UtcOffset::UTC, &mut seen),
+            ParseGen::Event(_)
+        ));
+        // Same response id again (a retry) → not counted twice.
+        assert!(matches!(
+            parse_gen(&blob, "s1", 1, None, UtcOffset::UTC, &mut seen),
+            ParseGen::Empty
         ));
     }
 
     #[test]
     fn all_zero_is_empty() {
-        let blob = gen_blob(0, 0, 0, 0, 0, 0);
-        assert!(matches!(
-            parse_gen(&blob, "s1", 1, None, UtcOffset::UTC),
-            ParseGen::Empty
-        ));
+        let blob = gen_blob(0, 0, 0, 0, 0, Some(0), "r1");
+        assert!(matches!(parse(&blob), ParseGen::Empty));
+    }
+
+    #[test]
+    fn windows_file_uri_drops_the_drive_slash() {
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/me/repo"),
+            "C:/Users/me/repo"
+        );
+        assert_eq!(file_uri_to_path("file:///Users/me/repo"), "/Users/me/repo");
     }
 }
