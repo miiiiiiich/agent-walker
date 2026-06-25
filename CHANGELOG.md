@@ -26,8 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the CLI's per-conversation SQLite stores (`conversations/*.db`). The data is an
   unlabeled protobuf decoded by field number and **self-verified per row** (the
   stored output total must equal text + thinking), so a future format change
-  degrades to less data, never wrong numbers. Cost still shows $0 — its gemini
-  model ids aren't in the pricing table yet.
+  degrades to less data, never wrong numbers. Cost is estimated like every other
+  agent (see Changed).
+
+### Changed
+
+- Pricing is no longer restricted to `claude-*` / `gpt-*`. Any model whose id is
+  in the LiteLLM table is priced (Gemini included), so new providers cost out
+  with no per-provider code. Region/variant duplicates and absurd rates are
+  still filtered, non-chat entries are dropped, and a prefix match now requires a
+  date/version suffix so unrelated ids can't collide with a shorter base key.
 
 ## [0.5.0] - 2026-06-23
 
