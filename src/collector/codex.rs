@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -24,20 +25,46 @@ pub fn collect(
 ) -> Collection {
     let mut collection = Collection::new(Provider::Codex, root.to_path_buf());
 
-    // Codex *moves* (not copies) a session's JSONL from `sessions/` to
-    // `archived_sessions/` when the desktop app archives it, so a sessions-only
-    // scan silently drops archived history. Scan the sibling `archived_sessions`
-    // too; a session that exists in both dirs dedupes via keyed events.
-    let archived = root.parent().map(|parent| parent.join("archived_sessions"));
-    let mut files = Vec::new();
+    // Codex *moves* (not copies) a session's JSONL from `sessions/` to the
+    // sibling `archived_sessions/` when the desktop app archives it, so a
+    // sessions-only scan silently drops archived history. Scan both. Resolve the
+    // sibling from the canonical path so a relative root (e.g. `.`) still finds
+    // `../archived_sessions`, falling back to the raw parent when the path can't
+    // be canonicalized (root missing).
+    let archived = root
+        .canonicalize()
+        .ok()
+        .as_deref()
+        .unwrap_or(root)
+        .parent()
+        .map(|parent| parent.join("archived_sessions"));
+
+    // A session can briefly exist in both dirs (a stale `sessions/` copy left
+    // after archiving). Dedupe by relative path before parsing — keeping the
+    // larger, more-complete file — so duration events and session touches (which
+    // merge_into does not key-dedupe) can't double-count.
+    let file_len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
-        if dir.exists() {
-            files.extend(list_files(dir, "jsonl", mtime_floor, &mut collection.stats));
+        if !dir.exists() {
+            continue;
+        }
+        for path in list_files(dir, "jsonl", mtime_floor, &mut collection.stats) {
+            let rel = path.strip_prefix(dir).unwrap_or(&path).to_path_buf();
+            match chosen.get_mut(&rel) {
+                Some(existing) if file_len(&path) > file_len(existing) => *existing = path,
+                Some(_) => {}
+                None => {
+                    chosen.insert(rel, path);
+                }
+            }
         }
     }
-    if files.is_empty() {
+    if chosen.is_empty() {
         return collection;
     }
+    let mut files: Vec<PathBuf> = chosen.into_values().collect();
+    files.sort();
 
     let per_file = parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
         parse_file(path, local_offset)
@@ -578,9 +605,14 @@ mod tests {
 
         let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
 
-        assert_eq!(collection.stats.files_seen, 2); // both files read
-        assert_eq!(collection.usage_events.len(), 1); // deduped to one turn
+        // The stale duplicate is filtered by relative path before parsing, so
+        // only one file is read. Its two timestamped lines yield two session
+        // touches — not four — proving the duplicate didn't double-count (the
+        // bug this guards: session_touches / duration_events aren't key-deduped).
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
+        assert_eq!(collection.session_touches.len(), 2);
     }
 
     /// Shell-wrapper tool calls (`exec_command` etc.) are decomposed to the real
