@@ -23,11 +23,22 @@ pub fn collect(
     local_offset: UtcOffset,
 ) -> Collection {
     let mut collection = Collection::new(Provider::Codex, root.to_path_buf());
-    if !root.exists() {
+
+    // Codex *moves* (not copies) a session's JSONL from `sessions/` to
+    // `archived_sessions/` when the desktop app archives it, so a sessions-only
+    // scan silently drops archived history. Scan the sibling `archived_sessions`
+    // too; a session that exists in both dirs dedupes via keyed events.
+    let archived = root.parent().map(|parent| parent.join("archived_sessions"));
+    let mut files = Vec::new();
+    for dir in std::iter::once(root).chain(archived.as_deref()) {
+        if dir.exists() {
+            files.extend(list_files(dir, "jsonl", mtime_floor, &mut collection.stats));
+        }
+    }
+    if files.is_empty() {
         return collection;
     }
 
-    let files = list_files(root, "jsonl", mtime_floor, &mut collection.stats);
     let per_file = parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
         parse_file(path, local_offset)
     });
@@ -502,6 +513,74 @@ mod tests {
             .map(|event| event.usage.token_volume())
             .sum();
         assert_eq!(total, 220);
+    }
+
+    /// The Codex desktop app *moves* a session's JSONL from `sessions/` to the
+    /// sibling `archived_sessions/`, so the collector must scan both.
+    #[test]
+    fn scans_sibling_archived_sessions() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let sessions_day = temp.path().join("sessions/2026/06/01");
+        let archived_day = temp.path().join("archived_sessions/2026/06/01");
+        fs::create_dir_all(&sessions_day).expect("test dirs should be created");
+        fs::create_dir_all(&archived_day).expect("test dirs should be created");
+        fs::write(
+            sessions_day.join("rollout-active.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+        fs::write(
+            archived_day.join("rollout-archived.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s2","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":20,"total_tokens":220}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
+
+        // Both the active and the archived session are counted.
+        assert_eq!(collection.stats.files_seen, 2);
+        assert_eq!(collection.usage_events.len(), 2);
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 330); // 110 (active) + 220 (archived)
+    }
+
+    /// A session present in *both* dirs (a stale `sessions/` copy left after an
+    /// archive) must not double-count — the keyed events dedupe it to one turn.
+    #[test]
+    fn dedups_session_present_in_sessions_and_archive() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let sessions_day = temp.path().join("sessions/2026/06/01");
+        let archived_day = temp.path().join("archived_sessions/2026/06/01");
+        fs::create_dir_all(&sessions_day).expect("test dirs should be created");
+        fs::create_dir_all(&archived_day).expect("test dirs should be created");
+        let lines = concat!(
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n"
+        );
+        fs::write(sessions_day.join("rollout-s1.jsonl"), lines).expect("fixture should be written");
+        fs::write(archived_day.join("rollout-s1.jsonl"), lines).expect("fixture should be written");
+
+        let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 2); // both files read
+        assert_eq!(collection.usage_events.len(), 1); // deduped to one turn
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
     }
 
     /// Shell-wrapper tool calls (`exec_command` etc.) are decomposed to the real
