@@ -171,7 +171,14 @@ fn normalize(model_name: &str) -> String {
     let no_tier = no_deploy
         .split_once('(')
         .map_or(no_deploy, |(head, _)| head);
-    no_tier.split_whitespace().collect::<Vec<_>>().join("-")
+    let mut normalized = String::new();
+    for word in no_tier.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push('-');
+        }
+        normalized.push_str(word);
+    }
+    normalized
 }
 
 /// Look up pricing: exact snapshot match first, then the longest snapshot key

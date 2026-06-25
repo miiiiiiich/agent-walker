@@ -243,10 +243,10 @@ fn parse_gen(
     // product-accurate label and prices correctly (the internal id #19 is a
     // cryptic, version-mismatched codename like "gemini-3-flash-a"). Fall back
     // to #19 when the display name is missing.
-    let non_empty = |text: &str| !text.trim().is_empty();
+    let is_non_empty = |text: &&str| !text.trim().is_empty();
     let model = string_field(chat_model, 21)
-        .filter(|text| non_empty(text))
-        .or_else(|| string_field(chat_model, 19).filter(|text| non_empty(text)))
+        .filter(is_non_empty)
+        .or_else(|| string_field(chat_model, 19).filter(is_non_empty))
         .map(ToOwned::to_owned);
 
     let usage = TokenUsage {
