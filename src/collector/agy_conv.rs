@@ -259,6 +259,7 @@ fn parse_gen(
         attribution_agent: None,
         project: project.map(project_from_cwd),
         usage,
+        reported_cost_usd: None,
     }))
 }
 

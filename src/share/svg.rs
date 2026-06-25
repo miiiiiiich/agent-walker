@@ -123,30 +123,29 @@ fn draw_header(s: &mut String, card: &ShareCard) {
         s,
         r#"<text x="{LX}" y="76" fill="{C_DIM}" font-size="15" font-weight="700" letter-spacing="4">CODENAME</text>"#
     );
-    if card.animal == "Chick" {
-        let _ = write!(
-            s,
-            r#"<text x="{LX}" y="118" fill="{C_TEXT}" font-size="34" font-weight="800">Chick</text>"#
-        );
-    } else {
-        let color = ops_color(&card.ops);
-        let _ = write!(
-            s,
-            r#"<text x="{LX}" y="118" font-size="34" font-weight="800" letter-spacing="0.5"><tspan fill="{color}">{}</tspan><tspan fill="{C_TEXT}"> {}</tspan></text>"#,
-            xml_escape(&card.ops),
-            xml_escape(&card.animal)
-        );
-    }
+    let color = ops_color(&card.ops);
+    let _ = write!(
+        s,
+        r#"<text x="{LX}" y="118" font-size="34" font-weight="800" letter-spacing="0.5"><tspan fill="{color}">{}</tspan><tspan fill="{C_TEXT}"> {}</tspan></text>"#,
+        xml_escape(&card.ops),
+        xml_escape(&card.animal)
+    );
 
     let _ = write!(
         s,
         r#"<text x="{RX}" y="74" fill="{C_MUTED}" font-size="18" text-anchor="end"><tspan fill="{C_TEXT}" font-weight="700">{}/{}</tspan> days active   ·   <tspan fill="{C_TEXT}" font-weight="700">{}</tspan> sessions</text>"#,
         card.active_days, card.period_days, card.sessions
     );
+    // Cursor's reported cost is an actual charge, not an API-equivalent estimate.
+    let cost_label = if card.has_reported_cost {
+        "cost"
+    } else {
+        "api-equiv"
+    };
     let _ = write!(
         s,
-        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{} tokens   ·   {} api-equiv</text>"#,
-        card.tokens, card.cost
+        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{} tokens   ·   {} {}</text>"#,
+        card.tokens, card.cost, cost_label
     );
 
     let _ = write!(

@@ -6,7 +6,8 @@
 //! serves every OPS tint.
 
 /// Inner SVG `<g>` for the codename `animal`, sized in a `0 0 1024 1024` user
-/// space, or `None` for the no-data "Chick" floor (which carries no badge).
+/// space, or `None` for an unknown animal. Every real rank — down to the "Ant"
+/// floor — has a badge.
 pub(crate) fn badge_inner(animal: &str) -> Option<&'static str> {
     let svg = match animal {
         "Hound" => include_str!("../../assets/badges/hound.svg"),

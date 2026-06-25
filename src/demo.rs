@@ -216,6 +216,7 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
                     attribution_agent: None,
                     project: Some(pick_project(rng)),
                     usage: usage_block(rng, session_volume / chunks),
+                    reported_cost_usd: None,
                 });
 
                 for (tool, weight) in CLAUDE_TOOLS {
@@ -297,6 +298,7 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
             attribution_agent: None,
             project: Some(pick_project(rng)),
             usage: usage_block(rng, volume),
+            reported_cost_usd: None,
         });
         collection.session_touches.push(SessionTouch {
             timestamp,

@@ -202,11 +202,8 @@ fn centre_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Codename badge: title (OPS in its colour, animal in white) above the braille
-/// animal in the OPS colour. Empty for the no-data "Chick" floor.
+/// animal in the OPS colour.
 fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
-    if codename.animal == "Chick" {
-        return Vec::new();
-    }
     let color = ops_color(codename.ops);
     let icon: Vec<&str> = badge::braille_for(codename.animal)
         .lines()

@@ -24,6 +24,10 @@ pub struct ShareCard {
     pub(crate) active_days: usize,
     pub(crate) tokens: String,
     pub(crate) cost: String,
+    /// True when `cost` includes a provider-reported figure (Cursor), which is an
+    /// actual charge fetched over the network — not an API-equivalent estimate
+    /// from local logs. Softens the caption's "API-equivalent / 100% local" copy.
+    pub(crate) has_reported_cost: bool,
     pub(crate) sessions: usize,
     /// Top models: (short name, share%, ratio-to-largest, `formatted_tokens`).
     pub(crate) models: Vec<(String, String, f64, String)>,
@@ -70,8 +74,15 @@ impl ShareCard {
         let cost: f64 = summary
             .model_daily
             .iter()
-            .filter_map(|entry| usage_cost_usd(&entry.model, &entry.usage))
+            .map(|entry| {
+                entry.reported_cost_usd.unwrap_or(0.0)
+                    + usage_cost_usd(&entry.model, &entry.unreported_usage).unwrap_or(0.0)
+            })
             .sum();
+        let has_reported_cost = summary
+            .model_daily
+            .iter()
+            .any(|entry| entry.reported_cost_usd.is_some());
         let parallel = {
             let levels = summary.orchestration.time_by_level;
             // Seconds come from untrusted logs; stay on the saturating discipline
@@ -151,6 +162,7 @@ impl ShareCard {
             active_days: summary.active_days,
             tokens: format_tokens(total),
             cost: format_usd(cost),
+            has_reported_cost,
             sessions: summary.sessions,
             models,
             hourly,
@@ -163,10 +175,14 @@ impl ShareCard {
 
     /// A ready-to-post caption (X body / clipboard text).
     pub fn caption(&self) -> String {
-        let mut stats = vec![
-            format!("{} tokens", self.tokens),
-            format!("{} API-equivalent", self.cost),
-        ];
+        // Cursor's reported cost is an actual charge, not an API-equivalent
+        // estimate, so don't label it as one.
+        let cost_label = if self.has_reported_cost {
+            format!("{} cost", self.cost)
+        } else {
+            format!("{} API-equivalent", self.cost)
+        };
+        let mut stats = vec![format!("{} tokens", self.tokens), cost_label];
         if let Some((four_plus_pct, peak)) = &self.parallel
             && *four_plus_pct > 0
         {
@@ -185,10 +201,14 @@ impl ShareCard {
         {
             let _ = write!(caption, "\n{unattended} turns ran 20m+.");
         }
-        let _ = write!(
-            caption,
-            "\n\nTracked 100% locally with agent-walker — your logs never leave your machine.\nhttps://{REPO_URL}"
-        );
+        // The "100% local / logs never leave" claim only holds without Cursor,
+        // whose usage is fetched from its dashboard over the network.
+        let provenance = if self.has_reported_cost {
+            "Tracked with agent-walker (Cursor usage read from its dashboard)."
+        } else {
+            "Tracked 100% locally with agent-walker — your logs never leave your machine."
+        };
+        let _ = write!(caption, "\n\n{provenance}\nhttps://{REPO_URL}");
         caption
     }
 }

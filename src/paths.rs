@@ -82,6 +82,25 @@ pub fn opencode_home() -> Result<PathBuf> {
     })
 }
 
+/// Cursor's Electron `state.vscdb`, where the auth token lives. Cursor follows
+/// the VS Code layout under the platform config dir: `Application Support`
+/// (macOS), `%APPDATA%` (Windows), `~/.config` (Linux).
+pub fn cursor_state_db() -> Result<PathBuf> {
+    let base =
+        dirs::config_dir().ok_or_else(|| anyhow!("could not locate the user config directory"))?;
+    Ok(base
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb"))
+}
+
+/// Cursor CLI config, which carries the account's `authId` used to build the
+/// session cookie.
+pub fn cursor_cli_config() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".cursor").join("cli-config.json"))
+}
+
 /// Base directory for `agent-walker`'s parse cache. Stays at
 /// `<home>/.cache/agent-walker` on every platform so a macOS/Linux user
 /// upgrading does not lose their warmed cache; on Windows this resolves under

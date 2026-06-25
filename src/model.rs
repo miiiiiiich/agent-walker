@@ -11,6 +11,7 @@ pub enum Provider {
     Codex,
     Agy,
     OpenCode,
+    Cursor,
 }
 
 impl Provider {
@@ -21,6 +22,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Agy => "Agy",
             Self::OpenCode => "OpenCode",
+            Self::Cursor => "Cursor",
         }
     }
 }
@@ -96,6 +98,11 @@ pub struct UsageEvent {
     /// (Claude: project directory name; Codex: `session_meta` cwd).
     pub project: Option<String>,
     pub usage: TokenUsage,
+    /// Provider-reported cost in USD for this event, when the source gives an
+    /// authoritative figure that the `LiteLLM` model→price path can't (Cursor's
+    /// own models aren't in the pricing table). `None` means "price it from
+    /// `LiteLLM` like every other provider".
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,13 +218,28 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
+    /// The subset of `usage` from events that carried NO provider-reported cost,
+    /// i.e. the tokens that must be priced from `LiteLLM`. When a model name is
+    /// shared on the same day by a reporting provider (Cursor) and a
+    /// non-reporting one (Claude Code), this keeps the two cost paths additive.
+    pub unreported_usage: TokenUsage,
+    /// Summed provider-reported cost for this model-day, if any event carried
+    /// one (see `UsageEvent::reported_cost_usd`). Added to the `LiteLLM` price of
+    /// `unreported_usage`.
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
+    /// Subset of `usage` priced from `LiteLLM` (events with no reported cost) —
+    /// see `ModelDailyStat::unreported_usage`.
+    pub unreported_usage: TokenUsage,
     pub events: usize,
+    /// Summed provider-reported cost for this model over the period, if any
+    /// event carried one. Added to the `LiteLLM` price of `unreported_usage`.
+    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

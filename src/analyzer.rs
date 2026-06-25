@@ -83,10 +83,23 @@ pub fn summarize(
             .then_with(|| left.name.cmp(&right.name))
     });
     let favorite_model = models.first().map(|stat| stat.name.clone());
+    let model_daily_reported = aggregates.model_daily_reported;
+    let mut model_daily_unreported = aggregates.model_daily_unreported;
     let model_daily = aggregates
         .model_daily_usage
         .into_iter()
-        .map(|((date, model), usage)| ModelDailyStat { date, model, usage })
+        .map(|((date, model), usage)| {
+            let key = (date, model.clone());
+            let reported_cost_usd = model_daily_reported.get(&key).copied();
+            let unreported_usage = model_daily_unreported.remove(&key).unwrap_or_default();
+            ModelDailyStat {
+                date,
+                model,
+                usage,
+                unreported_usage,
+                reported_cost_usd,
+            }
+        })
         .collect::<Vec<_>>();
 
     let mut agents = aggregates
@@ -271,6 +284,7 @@ mod tests {
                         cache_read_input_tokens: 80,
                         ..TokenUsage::default()
                     },
+                    reported_cost_usd: None,
                 },
                 UsageEvent {
                     timestamp: Some(datetime!(2026-06-08 10:00 UTC)),
@@ -286,6 +300,7 @@ mod tests {
                         cache_read_input_tokens: 40,
                         ..TokenUsage::default()
                     },
+                    reported_cost_usd: None,
                 },
             ],
             tool_events: vec![crate::model::ToolEvent {
@@ -355,6 +370,7 @@ mod tests {
                 input_tokens: tokens,
                 ..TokenUsage::default()
             },
+            reported_cost_usd: None,
         };
         let events = vec![
             event(datetime!(2026-06-30 10:00 UTC), 1_000_000), // 30d + every window
@@ -382,5 +398,55 @@ mod tests {
         // The display totals, by contrast, DO follow --days (3M vs 10M).
         assert_eq!(week.total_usage.token_volume(), 3_000_000);
         assert_eq!(quarter.total_usage.token_volume(), 10_000_000);
+    }
+
+    #[test]
+    fn reported_and_unreported_costs_split_per_model() {
+        // Same model name on the same day: one event reports a cost (Cursor),
+        // one doesn't (Claude Code). The model's reported cost and its
+        // LiteLLM-priced (unreported) token subset must stay separable.
+        let now = datetime!(2026-06-08 12:00 UTC);
+        let usage = |input: u64| TokenUsage {
+            input_tokens: input,
+            ..TokenUsage::default()
+        };
+        let event = |reported: Option<f64>, input: u64| UsageEvent {
+            timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
+            session_id: None,
+            model: Some("shared-model".to_owned()),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            project: None,
+            usage: usage(input),
+            reported_cost_usd: reported,
+        };
+        let collection = Collection {
+            provider: Provider::Combined,
+            root: "/tmp".into(),
+            usage_events: vec![event(Some(0.5), 100), event(None, 300)],
+            tool_events: Vec::new(),
+            session_touches: Vec::new(),
+            duration_events: Vec::new(),
+            stats: ScanStats::default(),
+        };
+
+        let summary = summarize(&collection, now, 7, UtcOffset::UTC);
+        let model = summary
+            .models
+            .iter()
+            .find(|stat| stat.name == "shared-model")
+            .expect("model present");
+        assert_eq!(model.usage.input_tokens, 400);
+        assert_eq!(model.reported_cost_usd, Some(0.5));
+        // Only the unreported 300 tokens should be priced from LiteLLM.
+        assert_eq!(model.unreported_usage.input_tokens, 300);
+
+        let day = summary
+            .model_daily
+            .iter()
+            .find(|stat| stat.model == "shared-model")
+            .expect("model-day present");
+        assert_eq!(day.reported_cost_usd, Some(0.5));
+        assert_eq!(day.unreported_usage.input_tokens, 300);
     }
 }

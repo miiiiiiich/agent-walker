@@ -34,12 +34,19 @@ reads the session logs on your disk and answers, in one screen:
 
 - Your logs **never leave your machine** — agent-walker does not phone home
   with usage or error data.
-- The only outbound traffic is a `GET` of public model-pricing metadata from
-  [LiteLLM's pricing database](https://github.com/BerriAI/litellm)
+- The only always-on outbound traffic is a `GET` of public model-pricing
+  metadata from [LiteLLM's pricing database](https://github.com/BerriAI/litellm)
   (MIT-licensed) when the dashboard loads or reloads a report. It carries no
   log content and no usage data, but it does let GitHub's CDN see your IP,
   the same as any `git pull`. Block it with a firewall rule or run offline if
   that matters to you.
+- **Cursor is the one exception.** It's auto-detected when you're signed into
+  Cursor locally, and reading its usage reaches the network: agent-walker uses
+  your local Cursor session token to query Cursor's own usage dashboard (Cursor
+  keeps no usage on disk). That sends your session cookie to Cursor to read your
+  own usage. It's skipped (no request) whenever there's nothing to read — Cursor
+  not installed, or signed out — so nothing is sent unless you're signed in. See
+  [docs/cursor.md](docs/cursor.md).
 - Release binaries carry [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations):
 
 ```sh
@@ -89,17 +96,22 @@ card — just glance before you post.
 
 ![an agent-walker codename stats card](docs/card.png)
 
-## What it reads
+## Works with your agents
 
-| Agent | Location | Notes |
-|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | tokens, models, tools, subagents, projects, turn durations — [details](docs/claude.md) |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | tokens, models, tools, task durations, projects — [details](docs/codex.md) |
-| OpenCode | `~/.local/share/opencode/opencode*.db` | auto-detected (SQLite, read-only snapshot; honors `OPENCODE_DB`); tokens, models, tools, durations, projects — [details](docs/opencode.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | auto-detected; tokens, models, and projects from its per-conversation SQLite (an unlabeled protobuf, decoded by field number and self-verified per row), plus activity/tools from the logs. Cost shows $0 — its gemini model ids aren't priced yet — [details](docs/agy.md) |
+Every agent is auto-detected — install nothing, configure nothing, just run it.
 
-Each agent counts and caches tokens differently. The per-agent pages above
-explain what's read, how tokens/cache/cost are counted, and the caveats.
+| Agent | Tokens & cost | Models | Projects | Tools | Activity |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **[Claude Code](docs/claude.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
+| **[Antigravity](docs/agy.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+Local-only, except **Cursor** — it keeps no usage on disk, so it's read from
+Cursor's own dashboard over the network (only when you're signed in; see
+[Privacy](#privacy)). The per-agent pages explain exactly what's read, how
+tokens/cache/cost are counted, and the caveats.
 
 Everything is parsed in parallel and cached per file
 (`~/.cache/agent-walker/`), so warm starts skip the bulk of the work and only

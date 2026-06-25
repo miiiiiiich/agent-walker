@@ -16,18 +16,38 @@ use super::utils;
 /// per-model aggregates.
 pub(super) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let label_width = utils::kv_label_width(width);
+    // Cursor contributes its own reported cost (an actual charge, not a LiteLLM
+    // estimate), so qualify the annotation when any of it is in the total.
+    let has_reported = summary
+        .models
+        .iter()
+        .any(|model| model.reported_cost_usd.is_some());
     let annotation = if width < 44 {
-        "api-equivalent".to_owned()
+        if has_reported {
+            "incl. reported".to_owned()
+        } else {
+            "api-equivalent".to_owned()
+        }
     } else {
-        crate::cost::pricing_as_of().map_or_else(
+        let base = crate::cost::pricing_as_of().map_or_else(
             || "api-equivalent · cache-aware".to_owned(),
             |date| format!("api-equivalent · rates {date}"),
-        )
+        );
+        if has_reported {
+            format!("{base} · incl. provider-reported")
+        } else {
+            base
+        }
     };
     let mut total = 0.0_f64;
     let mut per_model: Vec<(String, f64)> = Vec::new();
     for model in &summary.models {
-        if let Some(cost) = usage_cost_usd(&model.name, &model.usage) {
+        // Provider-reported cost (Cursor) plus the LiteLLM price of the tokens
+        // that had no reported cost — additive so a model name shared by a
+        // reporting and a non-reporting provider prices both halves.
+        let cost = model.reported_cost_usd.unwrap_or(0.0)
+            + usage_cost_usd(&model.name, &model.unreported_usage).unwrap_or(0.0);
+        if cost > 0.0 {
             total += cost;
             per_model.push((short_model_name(&model.name), cost));
         }
@@ -95,7 +115,10 @@ fn window_cost_usd(summary: &Summary, days: u16) -> f64 {
         .model_daily
         .iter()
         .filter(|entry| entry.date >= start)
-        .filter_map(|entry| usage_cost_usd(&entry.model, &entry.usage))
+        .map(|entry| {
+            entry.reported_cost_usd.unwrap_or(0.0)
+                + usage_cost_usd(&entry.model, &entry.unreported_usage).unwrap_or(0.0)
+        })
         .sum()
 }
 

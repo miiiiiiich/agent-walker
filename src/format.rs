@@ -60,6 +60,13 @@ pub fn format_usd(value: f64) -> String {
     } else if value >= 100.0 {
         format!("${value:.0}")
     } else {
+        // A sum that rounds to zero cents is "$0.00", never a "-0.00" artifact
+        // from negative zero or a sub-cent residue.
+        let value = if (value * 100.0).round() == 0.0 {
+            0.0
+        } else {
+            value
+        };
         format!("${value:.2}")
     }
 }
@@ -293,6 +300,15 @@ mod tests {
         assert_eq!(format_tokens(1_200), "1.2K");
         assert_eq!(format_tokens(1_200_000), "1.2M");
         assert_eq!(format_tokens(1_200_000_000), "1.2B");
+    }
+
+    #[test]
+    fn usd_rounding_to_zero_is_never_negative() {
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(-0.0), "$0.00");
+        // A sub-cent residue rounds to a clean zero, not "-0.00".
+        assert_eq!(format_usd(-0.0001), "$0.00");
+        assert_eq!(format_usd(12.5), "$12.50");
     }
 
     #[test]

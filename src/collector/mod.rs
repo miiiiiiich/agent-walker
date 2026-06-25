@@ -2,6 +2,7 @@ pub mod agy;
 mod agy_conv;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod opencode;
 
 use std::collections::{HashMap, HashSet};
@@ -16,13 +17,16 @@ use tracing::debug;
 
 use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent, UsageEvent};
 
-/// Bumped to 7 when session-touch compression moved from UTC to local-day
-/// bucketing: cached `FileEvents` carry compressed touches that depend on the
-/// local offset. A cache is now invalidated by EITHER a version bump OR a
-/// changed `local_offset` (recorded in `CacheFile::offset_seconds`), so a
-/// machine-TZ change is detected and the cache rebuilt automatically — no
-/// `--no-cache` needed. The per-file key remains (mtime, size).
-const CACHE_VERSION: u32 = 7;
+/// Bump whenever the serialized layout of a cached `FileEvents` changes —
+/// stale caches would otherwise deserialize into garbage.
+/// - 7: session-touch compression moved from UTC to local-day bucketing (cached
+///   touches depend on the local offset; a cache is invalidated by EITHER a
+///   version bump OR a changed `local_offset`, recorded in
+///   `CacheFile::offset_seconds`, so a machine-TZ change rebuilds automatically).
+/// - 8: `UsageEvent` gained `reported_cost_usd`, changing its bincode layout.
+///
+/// The per-file key remains (mtime, size); `--no-cache` is never required.
+const CACHE_VERSION: u32 = 8;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo

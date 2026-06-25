@@ -4,7 +4,7 @@ use super::{REPO_URL, ShareCard, badge_art, render_png};
 use crate::model::ToolStat;
 
 /// The 24 codename animals — same set as `codename::GRID` (order independent;
-/// this only checks every animal has a badge). Chick carries no badge.
+/// this only checks every animal has a badge). "Ant" is the floor and has one.
 const ANIMALS: [&str; 24] = [
     "Hound",
     "Fox",
@@ -64,7 +64,6 @@ fn bundled_badges_are_path_only() {
             );
         }
     }
-    assert!(badge_art::badge_inner("Chick").is_none());
     assert!(badge_art::badge_inner("Nope").is_none());
 }
 

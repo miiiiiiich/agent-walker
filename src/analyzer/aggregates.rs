@@ -9,6 +9,14 @@ pub(super) struct Aggregates {
     pub(super) total_usage: TokenUsage,
     pub(super) daily_usage: BTreeMap<Date, TokenUsage>,
     pub(super) model_daily_usage: BTreeMap<(Date, String), TokenUsage>,
+    /// Provider-reported cost summed per (date, model). A key is present only
+    /// when at least one event for it carried a reported cost; absence means
+    /// "price from `LiteLLM`".
+    pub(super) model_daily_reported: BTreeMap<(Date, String), f64>,
+    /// Per (date, model) usage from events with NO reported cost — the portion
+    /// still priced from `LiteLLM` even when the same model-day also has reported
+    /// cost from another provider.
+    pub(super) model_daily_unreported: BTreeMap<(Date, String), TokenUsage>,
     pub(super) model_map: HashMap<String, ModelAccumulator>,
     pub(super) agent_map: HashMap<String, AgentAccumulator>,
     pub(super) tool_map: HashMap<String, usize>,
@@ -63,11 +71,22 @@ impl Aggregates {
         self.model_map
             .entry(model_name.clone())
             .or_default()
-            .add(&event.usage, date);
+            .add(&event.usage, event.reported_cost_usd);
         self.model_daily_usage
-            .entry((date, model_name))
+            .entry((date, model_name.clone()))
             .or_default()
             .add_assign(&event.usage);
+        if let Some(cost) = event.reported_cost_usd {
+            *self
+                .model_daily_reported
+                .entry((date, model_name))
+                .or_insert(0.0) += cost;
+        } else {
+            self.model_daily_unreported
+                .entry((date, model_name))
+                .or_default()
+                .add_assign(&event.usage);
+        }
 
         if let Some(project) = &event.project {
             self.project_map
@@ -161,20 +180,30 @@ impl ProjectAccumulator {
 #[derive(Default)]
 pub(super) struct ModelAccumulator {
     usage: TokenUsage,
+    /// Usage from events with no reported cost (priced via `LiteLLM`).
+    unreported_usage: TokenUsage,
     events: usize,
+    reported_cost: Option<f64>,
 }
 
 impl ModelAccumulator {
-    fn add(&mut self, usage: &TokenUsage, _date: Date) {
+    fn add(&mut self, usage: &TokenUsage, reported_cost: Option<f64>) {
         self.usage.add_assign(usage);
         self.events += 1;
+        if let Some(cost) = reported_cost {
+            self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
+        } else {
+            self.unreported_usage.add_assign(usage);
+        }
     }
 
     pub(super) fn into_stat(self, name: String) -> ModelStat {
         ModelStat {
             name,
             usage: self.usage,
+            unreported_usage: self.unreported_usage,
             events: self.events,
+            reported_cost_usd: self.reported_cost,
         }
     }
 }

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cursor support. Cursor keeps no usage on disk, so — unlike every other
+  provider — reading it reaches the network: agent-walker reads the local Cursor
+  session token from `state.vscdb` and queries Cursor's own usage dashboard for
+  per-model tokens (input / output / cache) and Cursor's reported cost. It's
+  auto-detected when you're signed in and skipped (no request) when there's
+  nothing to read — not installed, signed out, or the fetch doesn't return — so
+  nothing is sent unless you're signed in. `CURSOR_TOKEN` supplies the token
+  directly. Cursor exposes no project, tools, sessions, or durations, so those
+  panels stay empty for it.
+- Usage events can now carry a provider-reported cost (`reported_cost_usd`),
+  preferred over the LiteLLM price when present — Cursor's models aren't in the
+  LiteLLM table, so its own reported figure is used.
 - Antigravity token usage. Previously activity-only, it now reads real per-model
   token counts (input / cache-read / output / thinking), model, and project from
   the CLI's per-conversation SQLite stores (`conversations/*.db`). The data is an

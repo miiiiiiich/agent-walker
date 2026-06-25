@@ -26,7 +26,8 @@ AI エージェントがマシンに残すログから作る、ローカルの�
 ## プライバシー
 
 - ログは**マシンの外に出ない** — 利用状況やエラーをサーバーに送ることはしない。
-- 唯一の outbound 通信は、ダッシュボードがレポートを読み込み・再読み込みするときに発行する、公開モデル価格メタデータ（[LiteLLM 価格DB](https://github.com/BerriAI/litellm)・MIT ライセンス）への `GET`。ログ内容も利用状況も送らないが、`git pull` と同じく GitHub の CDN 側からは IP が見える。気になるならファイアウォールで遮断する／オフラインで使う。
+- 常時の outbound 通信は、ダッシュボードがレポートを読み込み・再読み込みするときに発行する、公開モデル価格メタデータ（[LiteLLM 価格DB](https://github.com/BerriAI/litellm)・MIT ライセンス）への `GET` だけ。ログ内容も利用状況も送らないが、`git pull` と同じく GitHub の CDN 側からは IP が見える。気になるならファイアウォールで遮断する／オフラインで使う。
+- **唯一の例外が Cursor。** Cursor にローカルでサインインしていると自動検出され、利用状況を読むためにネットワークへ出る — ローカルにトークンを持たない Cursor 自身の利用状況ダッシュボードに、手元のセッショントークンで問い合わせる。自分のセッション Cookie を Cursor に送って自分の利用状況を読む形。読むものが無ければ（未インストール／サインアウト）スキップ＝送信しないので、サインイン中以外は何も出ない。[docs/cursor.md](docs/cursor.md) 参照。
 - リリースバイナリは [GitHub Artifact Attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations) 付き：
 
 ```sh
@@ -59,7 +60,7 @@ bunx agent-walker
 | `--days <N>` | グラフの集計期間（既定 30。codename のトークン量レベルは常に直近 30 日からとるので、`--days` を変えても rank はぶれない） |
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
-| `--claude-dir` / `--codex-dir` / `--agy-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` も自動で読む） |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `OPENCODE_HOME` も自動で読む） |
 | `--completions <shell>` | シェル補完を出力して終了 |
 
 ## codename を共有
@@ -70,15 +71,19 @@ bunx agent-walker
 
 ![agent-walker の codename カード](docs/card.png)
 
-## 読むもの
+## 対応エージェント
 
-| エージェント | 場所 | メモ |
-|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | トークン / モデル / ツール / サブエージェント / プロジェクト / ターン時間 — [詳細](docs/claude.md) |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` | トークン / モデル / ツール / タスク時間 / プロジェクト — [詳細](docs/codex.md) |
-| Antigravity CLI | `~/.gemini/antigravity-cli` | 自動検出。会話ごとの SQLite（ラベル無し protobuf をフィールド番号でデコード・行ごとに自己検証）からトークン/モデル/プロジェクト、ログから activity/ツール。コストは $0（gemini の id が未価格） — [詳細](docs/agy.md) |
+全部自動検出 — 何も入れず、何も設定せず、ただ実行するだけ。
 
-各エージェントはトークンとキャッシュの数え方が違う。上の per-agent ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
+| エージェント | トークン・コスト | モデル | プロジェクト | ツール | アクティビティ |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **[Claude Code](docs/claude.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
+| **[Antigravity](docs/agy.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Cursor 以外はローカル完結**。Cursor だけはローカルに利用状況が無いので、Cursor 自身のダッシュボードからネットワーク越しに読む（サインイン中だけ・[プライバシー](#プライバシー)参照）。各エージェントの詳細ページに、何を読むか・トークン/キャッシュ/コストの数え方・注意点を書いてある（英語）。
 
 並列パース＋ファイル単位キャッシュ（`~/.cache/agent-walker/`）で、warm start は `(mtime, size)` が変わったログファイルだけ再パースする。ログは信頼しない入力として扱い、壊れた行は数えてスキップ（評価はしない）。
 
