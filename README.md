@@ -144,8 +144,9 @@ indefinitely; no setting needed.
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens are read from an undocumented protobuf** (its
   per-conversation SQLite), decoded by field number and self-verified per row, so
-  they count toward the totals. Its **cost still shows $0** — its gemini model
-  ids aren't in the pricing table yet; see [docs/agy.md](docs/agy.md).
+  they count toward the totals. Cost is estimated from its Gemini model's
+  display name via the same LiteLLM table as every other agent; see
+  [docs/agy.md](docs/agy.md).
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.
