@@ -106,7 +106,7 @@ Every agent is auto-detected — install nothing, configure nothing, just run it
 | **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
-| **[Antigravity](docs/agy.md)** | — | — | — | ✅ | ✅ |
+| **[Antigravity](docs/agy.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Local-only, except **Cursor** — it keeps no usage on disk, so it's read from
 Cursor's own dashboard over the network (only when you're signed in; see
@@ -142,9 +142,10 @@ indefinitely; no setting needed.
   reads). Claude Code re-sends the full context every turn, so for heavy
   users the bulk of the total tends to be cache reads — real but cheaply
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
-- **Antigravity tokens/cost are not counted** — its usage lives in an
-  undocumented protobuf format. Its tab is auto-detected, but the Total token
-  count still excludes it (activity only); see [docs/agy.md](docs/agy.md).
+- **Antigravity tokens are read from an undocumented protobuf** (its
+  per-conversation SQLite), decoded by field number and self-verified per row, so
+  they count toward the totals. Its **cost still shows $0** — its gemini model
+  ids aren't in the pricing table yet; see [docs/agy.md](docs/agy.md).
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.

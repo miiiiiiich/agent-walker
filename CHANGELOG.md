@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Usage events can now carry a provider-reported cost (`reported_cost_usd`),
   preferred over the LiteLLM price when present — Cursor's models aren't in the
   LiteLLM table, so its own reported figure is used.
+- Antigravity token usage. Previously activity-only, it now reads real per-model
+  token counts (input / cache-read / output / thinking), model, and project from
+  the CLI's per-conversation SQLite stores (`conversations/*.db`). The data is an
+  unlabeled protobuf decoded by field number and **self-verified per row** (the
+  stored output total must equal text + thinking), so a future format change
+  degrades to less data, never wrong numbers. Cost still shows $0 — its gemini
+  model ids aren't in the pricing table yet.
 
 ## [0.5.0] - 2026-06-23
 
