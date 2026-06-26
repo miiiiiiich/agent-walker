@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-06-26
 
 ### Added
 
@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no per-provider code. Region/variant duplicates and absurd rates are
   still filtered, non-chat entries are dropped, and a prefix match now requires a
   date/version suffix so unrelated ids can't collide with a shorter base key.
+- The no-data codename floor now renders as **Ant** (previously Chick).
+- Bump `dirs` 5 → 6 (dependency-only; no behavior change for the directory
+  lookups this uses).
+
+### Fixed
+
+- Codex `archived_sessions/` is now scanned. The desktop app *moves* (not copies)
+  a session's JSONL from `sessions/` to `archived_sessions/` when archived, so
+  those sessions silently dropped out of the totals; both directories are now
+  read and deduplicated by relative path before parsing, so duplicates can't
+  double-count session or duration stats.
 
 ## [0.5.0] - 2026-06-23
 
