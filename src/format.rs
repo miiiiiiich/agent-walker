@@ -146,7 +146,48 @@ fn sanitize_label(label: &str) -> String {
     }
 }
 
+/// Strip a *known* `<provider>/` namespace from a gateway/proxy model id (agent
+/// runners and routers use `provider/model` ids), so the model shows by its real
+/// name. An *unknown* prefix is left intact — the surviving `/` then makes
+/// `sanitize_label` collapse it to "Other", which is what keeps an arbitrary
+/// `org/repo` (or a path) from reaching the card. A stale list degrades safely: a
+/// new provider's model just shows as "Other" until it's added here.
+fn strip_known_provider_prefix(name: &str) -> &str {
+    const PROVIDERS: &[&str] = &[
+        "openai",
+        "anthropic",
+        "google",
+        "vertex_ai",
+        "vertex",
+        "meta-llama",
+        "meta",
+        "mistralai",
+        "mistral",
+        "x-ai",
+        "xai",
+        "deepseek",
+        "qwen",
+        "cohere",
+        "perplexity",
+        "azure",
+        "bedrock",
+        "openrouter",
+        "together",
+        "fireworks",
+        "groq",
+        "ollama",
+    ];
+    if let Some((prefix, rest)) = name.split_once('/')
+        && !rest.is_empty()
+        && PROVIDERS.contains(&prefix.to_ascii_lowercase().as_str())
+    {
+        return rest;
+    }
+    name
+}
+
 fn short_model_name_raw(name: &str) -> String {
+    let name = strip_known_provider_prefix(name);
     let lower = name.to_ascii_lowercase();
     let family = if lower.contains("opus") {
         "Opus"
@@ -386,5 +427,18 @@ mod tests {
         );
         // A local-model id keeps its `:tag` (Ollama / OpenCode) — not collapsed.
         assert_eq!(short_model_name("qwen3:8b"), "qwen3:8b");
+    }
+
+    #[test]
+    fn strips_known_provider_namespace_but_collapses_unknown() {
+        // Gateway / OpenCode `provider/model` ids show by their real name.
+        assert_eq!(short_model_name("openai/gpt-4o"), "GPT 4o");
+        assert_eq!(short_model_name("google/gemini-2.5-pro"), "gemini-2.5-pro");
+        assert_eq!(short_model_name("anthropic/claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(short_model_name("mistralai/mistral-large"), "mistral-large");
+        // An UNKNOWN prefix is not stripped, so the surviving '/' collapses it —
+        // a `org/repo` (or path) can't smuggle a repo name onto the card.
+        assert_eq!(short_model_name("myorg/secret-repo"), "Other");
+        assert_eq!(short_model_name("openai/secret/repo"), "Other");
     }
 }

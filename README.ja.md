@@ -60,7 +60,9 @@ bunx agent-walker
 | `--days <N>` | グラフの集計期間（既定 30。codename のトークン量レベルは常に直近 30 日からとるので、`--days` を変えても rank はぶれない） |
 | `--share <path>` | カードを PNG 出力＋キャプション表示して終了 |
 | `--no-cache` | パースキャッシュを無視して全再走査 |
+| `--no-cursor` | Cursor コレクタを無効化。Cursor はマシン外に資格情報（Cursor のセッション cookie を cursor.com へ）を送る唯一のコレクタなので、これを付けるとネットワークリクエストを一切行わない |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | 非標準のログ場所を指定（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `OPENCODE_HOME` も自動で読む） |
+| `--cursor-state-db` | 非標準の Cursor `state.vscdb` を指定（または `CURSOR_TOKEN` でセッショントークンを直接渡す） |
 | `--completions <shell>` | シェル補完を出力して終了 |
 
 ## codename を共有
