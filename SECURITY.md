@@ -23,7 +23,8 @@ aggregate statistics.
      `cursor.com` to fetch *your own* usage figures — the same request the
      dashboard makes. This is the one collector that transmits a credential off
      the machine. It is skipped when you're signed out, and `--no-cursor`
-     disables it entirely (keeping agent-walker fully offline). The cookie goes
+     disables it entirely — stopping the only egress that carries a credential
+     (the anonymous LiteLLM pricing fetch above still runs). The cookie goes
      only to `cursor.com` (redirects are not followed) and is never written to
      disk, logs, or the shareable card.
 - Log lines and usage records are treated as untrusted input: malformed data is

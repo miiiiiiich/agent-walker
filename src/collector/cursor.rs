@@ -188,13 +188,29 @@ fn normalize_subject(subject: &str) -> Option<String> {
     {
         return Some(tail.to_owned());
     }
-    // Otherwise accept any single-pipe `<provider>|<id>` with non-empty halves.
+    // Otherwise accept any single-pipe `<provider>|<id>` with non-empty halves —
+    // but only when both halves are safe id characters. This subject is decoded
+    // from the JWT payload (arbitrary bytes once base64-decoded), and unlike the
+    // raw token it is NOT constrained to base64url, so a `sub` carrying a CR/LF
+    // or a cookie metacharacter would otherwise be interpolated straight into
+    // the `Cookie` header. Validating here is what makes the token's
+    // header-injection guard hold for the bridged-OAuth path too.
     match subject.split_once('|') {
-        Some((provider, id)) if !provider.is_empty() && !id.is_empty() && !id.contains('|') => {
+        Some((provider, id)) if is_safe_subject_part(provider) && is_safe_subject_part(id) => {
             Some(subject.to_owned())
         }
         _ => None,
     }
+}
+
+/// A non-empty `<provider>` / `<id>` half of a bridged-OAuth subject, restricted
+/// to characters safe to interpolate into a cookie value (no CR/LF, no `;`/`=`/
+/// `,`/space, no second `|`).
+fn is_safe_subject_part(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
@@ -571,5 +587,14 @@ mod tests {
         );
         assert_eq!(normalize_subject("weird-value"), None);
         assert_eq!(normalize_subject("a|b|c"), None);
+    }
+
+    #[test]
+    fn bridged_subject_with_unsafe_chars_is_rejected() {
+        // The subject is decoded from the JWT payload, so a `sub` carrying a
+        // CR/LF or a cookie metacharacter must not reach the Cookie header.
+        assert_eq!(normalize_subject("google-oauth2|123\r\nInjected: 1"), None);
+        assert_eq!(normalize_subject("google-oauth2|123; evil=1"), None);
+        assert_eq!(normalize_subject("prov ider|123"), None);
     }
 }

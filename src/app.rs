@@ -52,9 +52,11 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub cursor_state_db: Option<PathBuf>,
 
-    /// Disable the Cursor collector. Cursor is the only provider that reaches the
-    /// network — it sends your local Cursor session cookie to cursor.com to read
-    /// your own usage. Pass this to keep agent-walker fully offline.
+    /// Disable the Cursor collector. Cursor is the only collector that sends a
+    /// credential off the machine — your local Cursor session cookie, to
+    /// cursor.com, to read your own usage. Pass this to stop that egress.
+    /// (Anonymous model-pricing metadata is still fetched; it carries no
+    /// credential.)
     #[arg(long)]
     pub no_cursor: bool,
 

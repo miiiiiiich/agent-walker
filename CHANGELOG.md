@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `--no-cursor` disables the Cursor collector — the only one that reaches the
-  network — keeping agent-walker fully offline.
+- `--no-cursor` disables the Cursor collector — the only collector that sends a
+  credential off the machine — stopping that egress. (The anonymous LiteLLM
+  pricing fetch still runs.)
 
 ### Changed
 

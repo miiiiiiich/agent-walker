@@ -113,24 +113,28 @@ pub fn short_model_name(name: &str) -> String {
 /// Clamp a model label to a safe shape. Model names come from untrusted logs, so
 /// a crafted one could smuggle a repo name, an absolute path, or a token-like
 /// string onto the shareable card / clipboard — artifacts meant to carry none.
-/// Well-known families already collapse to a constant, so in practice this only
-/// reshapes an unrecognized passthrough name: keep a small printable set (no path
-/// separators, no control characters) and cap the length.
+///
+/// Stripping disallowed characters is not enough: it would still publish the
+/// readable fragments of a smuggled path (`gemini/Users/alice/secret` →
+/// `geminiUsersalicesecret`). So a label containing anything outside the
+/// model-name character set is treated as suspicious and collapsed to a generic
+/// value. Legitimate names (which only use that set) pass through unchanged,
+/// capped for layout; well-known families have already collapsed to a constant
+/// upstream, so this only ever judges an unrecognized passthrough name.
 fn sanitize_label(label: &str) -> String {
     const MAX: usize = 24;
-    // Bound the scan first: an untrusted name could be megabytes of disallowed
-    // characters, and `filter` alone would walk all of it before `take(MAX)`
-    // ever short-circuits. Only the first SCAN chars are ever examined.
+    // Bound the scan: an untrusted name could be megabytes long, and there's no
+    // need to examine past the first SCAN characters to make this decision.
     const SCAN: usize = 128;
-    let cleaned: String = label
-        .chars()
-        .take(SCAN)
-        .filter(|&ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+')
-        })
-        .take(MAX)
-        .collect();
-    let trimmed = cleaned.trim();
+    let allowed = |ch: char| {
+        ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+')
+    };
+    let prefix: String = label.chars().take(SCAN).collect();
+    if prefix.is_empty() || !prefix.chars().all(allowed) {
+        return "Other".to_owned();
+    }
+    let capped: String = prefix.chars().take(MAX).collect();
+    let trimmed = capped.trim();
     if trimmed.is_empty() {
         "Other".to_owned()
     } else {
@@ -358,22 +362,23 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_untrusted_model_names_for_the_card() {
-        // A crafted log model name can't smuggle a path, a newline, or angle
-        // brackets onto the shareable card — path separators and control/exotic
-        // characters are dropped and the label is length-capped.
-        let crafted = short_model_name("gemini/Users/secret/repo\n<script>");
-        assert!(!crafted.contains('/'));
-        assert!(!crafted.contains('\n'));
-        assert!(!crafted.contains('<'));
-        assert!(crafted.chars().count() <= 24);
-        // A legitimate display name with spaces and parens is preserved.
+    fn collapses_suspicious_model_names_for_the_card() {
+        // A crafted name containing a path / newline / angle brackets is
+        // collapsed to a generic label, NOT stripped-and-kept — so no readable
+        // repo or path fragment ("Users", "secret") reaches the card.
+        assert_eq!(
+            short_model_name("gemini/Users/secret/repo\n<script>"),
+            "Other"
+        );
+        // The gpt-prefixed passthrough is judged the same way.
+        assert_eq!(short_model_name("gpt-/etc/passwd"), "Other");
+        // Non-ASCII / control-only names collapse rather than yielding an empty
+        // chip.
+        assert_eq!(short_model_name("名前/\t"), "Other");
+        // A legitimate display name with spaces and parens is preserved verbatim.
         assert_eq!(
             short_model_name("Gemini 3.5 Flash (High)"),
             "Gemini 3.5 Flash (High)"
         );
-        // A name that's entirely disallowed characters collapses to "Other"
-        // rather than an empty chip.
-        assert_eq!(short_model_name("名前/\t"), "Other");
     }
 }
