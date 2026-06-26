@@ -133,13 +133,16 @@ fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
 
 /// A usable session token. Cursor stores the JWT raw, but other VS Code
 /// `ItemTable` values are JSON-serialized strings, so surrounding quotes are
-/// stripped defensively (a JWT never contains `"`). The token must be long
-/// enough to be a JWT and free of ASCII control characters — a CR/LF would let a
-/// crafted store or a malformed `CURSOR_TOKEN` inject extra `Cookie` headers.
+/// stripped defensively (a JWT never contains `"`). A `WorkOS` session token is a
+/// JWT — `header.payload.signature`, each segment base64url (`[A-Za-z0-9_-]`)
+/// joined by `.` — so the token is restricted to exactly that character set.
+/// That rejects not just CR/LF (header injection) but every cookie
+/// metacharacter (`;`, `=`, `,`, space) that could split or confuse the `Cookie`
+/// header. A token that doesn't fit is treated as unusable rather than sent.
 fn sanitize_token(raw: &str) -> Option<String> {
     let token = raw.trim().trim_matches('"').trim();
-    (token.len() >= 10 && token.bytes().all(|byte| !byte.is_ascii_control()))
-        .then(|| token.to_owned())
+    let is_jwt_byte = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.');
+    (token.len() >= 10 && token.bytes().all(is_jwt_byte)).then(|| token.to_owned())
 }
 
 /// The account id for the cookie. The JWT `sub` is authoritative — it's the
@@ -506,15 +509,23 @@ mod tests {
     }
 
     #[test]
-    fn control_chars_in_token_are_rejected() {
-        // A CR/LF in the stored token would let a crafted store inject extra
-        // Cookie headers; sanitize_token refuses it.
-        assert!(sanitize_token("abcdefghij\r\nInjected: 1").is_none());
-        assert!(sanitize_token("short").is_none());
+    fn only_jwt_chars_in_token_are_accepted() {
+        // A real JWT (base64url segments joined by '.') is accepted.
+        assert_eq!(
+            sanitize_token("eyJhbGci.eyJzdWIi.sig-na_ture").as_deref(),
+            Some("eyJhbGci.eyJzdWIi.sig-na_ture")
+        );
+        // Surrounding quotes / whitespace are stripped.
         assert_eq!(
             sanitize_token("  \"abcdefghij\"  ").as_deref(),
             Some("abcdefghij")
         );
+        // A CR/LF would inject extra Cookie headers; a ';'/'='/space could split
+        // or confuse the cookie — all rejected by the JWT-charset allowlist.
+        assert!(sanitize_token("abcdefghij\r\nInjected: 1").is_none());
+        assert!(sanitize_token("abcdefghij; evil=1").is_none());
+        assert!(sanitize_token("abcdefghij=padding").is_none());
+        assert!(sanitize_token("short").is_none());
     }
 
     #[test]

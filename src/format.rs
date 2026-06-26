@@ -118,8 +118,13 @@ pub fn short_model_name(name: &str) -> String {
 /// separators, no control characters) and cap the length.
 fn sanitize_label(label: &str) -> String {
     const MAX: usize = 24;
+    // Bound the scan first: an untrusted name could be megabytes of disallowed
+    // characters, and `filter` alone would walk all of it before `take(MAX)`
+    // ever short-circuits. Only the first SCAN chars are ever examined.
+    const SCAN: usize = 128;
     let cleaned: String = label
         .chars()
+        .take(SCAN)
         .filter(|&ch| {
             ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+')
         })
