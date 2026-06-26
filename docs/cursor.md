@@ -27,8 +27,10 @@ The cookie is `<accountId>::<jwt>`:
   a malformed JWT.
 
 `CURSOR_TOKEN` supplies the JWT directly (skip the local DB) and
-`--cursor-state-db` points at a non-standard `state.vscdb`. There's no flag to
-turn Cursor on or off — sign out of Cursor if you don't want it read.
+`--cursor-state-db` points at a non-standard `state.vscdb`. To stop the request
+entirely, pass `--no-cursor` (or sign out of Cursor) — Cursor is the only
+collector that sends a credential off the machine, so this is the one network
+egress you may want to disable.
 
 This endpoint is **undocumented** and can change or break without notice. A
 `401`/`403` means the session expired — re-login in Cursor to refresh the token,

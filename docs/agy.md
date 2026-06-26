@@ -26,10 +26,29 @@
 and there's no public schema. agent-walker reads the wire format directly and
 pulls the few fields it needs by number (cross-checked against the `tokscale`
 project, which maps them identically). Because the numbers are unofficial and
-could shift on an Antigravity update, **every row is self-verified**: the stored
-output total must equal text + thinking. A row that fails is skipped and counted
-as a parse error rather than contributing garbage tokens — so a future format
-change degrades to "no/less data," never to wrong numbers. See
+could shift on an Antigravity update, **every row is checked against the stored
+output total** (`#3`): it must equal text + thinking (`#9` + `#10`). A row that
+fails is skipped and counted as a parse error rather than contributing garbage
+tokens.
+
+What that check does and doesn't guarantee, stated honestly. Protobuf
+identifies fields by an explicit tag number on the wire, not by position, so
+adding or removing *unrelated* fields doesn't change what `#9`/`#10` decode to —
+the decoder simply skips tags it doesn't read. The `#3 == #9 + #10` check is
+therefore not a positional guard; it's a **mutual-consistency** check on the
+three output fields:
+
+- It catches a **re-meaning of the output fields**: if Antigravity reassigns the
+  output total (`#3`) or its parts (`#9` text, `#10` thinking) to different tag
+  numbers, our reads stop agreeing, the equality breaks, and the row is dropped.
+- It does **not** verify the input-side fields (system `#1`, new input `#2`,
+  cache read `#5`): there's no stored input total to check them against, so a
+  reassignment of those tags would be read as wrong numbers and pass the output
+  check undetected. That has never been observed, but it's the residual risk.
+
+So a re-meaning of the *output* fields degrades to "no/less data"; the gap is a
+silent re-meaning of an *input* field, which no row-level invariant can catch
+without an input checksum the format doesn't provide. See
 `src/collector/agy_conv.rs`.
 
 ## Cost

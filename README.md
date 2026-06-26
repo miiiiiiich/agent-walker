@@ -80,7 +80,9 @@ Flags:
 | `--days <N>` | Analysis window for the graphs (default 30; the codename's throughput level is always taken from the last 30 days, so the rank doesn't drift with `--days`) |
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
+| `--no-cursor` | Disable the Cursor collector — the only one that sends a credential off the machine (your Cursor session cookie, to cursor.com) — so it makes no network request |
 | `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `OPENCODE_HOME` when set) |
+| `--cursor-state-db` | Point at a non-standard Cursor `state.vscdb` (or set `CURSOR_TOKEN` to supply the session token directly) |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
 ## Share your codename
@@ -143,10 +145,11 @@ indefinitely; no setting needed.
   users the bulk of the total tends to be cache reads — real but cheaply
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens are read from an undocumented protobuf** (its
-  per-conversation SQLite), decoded by field number and self-verified per row, so
-  they count toward the totals. Cost is estimated from its Gemini model's
-  display name via the same LiteLLM table as every other agent; see
-  [docs/agy.md](docs/agy.md).
+  per-conversation SQLite), decoded by tag number and checked per row for mutual
+  consistency of the output fields (`#3 == #9 + #10`), which catches a re-meaning
+  of those output tags; the residual gap is noted in [docs/agy.md](docs/agy.md).
+  They count toward the totals. Cost is estimated from its Gemini model's display
+  name via the same LiteLLM table as every other agent.
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.
