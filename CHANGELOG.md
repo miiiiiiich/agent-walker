@@ -5,34 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-06-26
+
+Security and robustness hardening from a design/security review of 0.6.0.
 
 ### Added
 
 - `--no-cursor` disables the Cursor collector — the only collector that sends a
-  credential off the machine — stopping that egress. (The anonymous LiteLLM
-  pricing fetch still runs.)
+  credential off the machine — stopping that egress (the anonymous LiteLLM
+  pricing fetch still runs). Documented in the README and `docs/cursor.md`.
 
 ### Changed
 
-- Model labels are sanitized (printable set, length-capped, no path separators or
-  control characters) before they can reach the shareable card / clipboard, so a
-  crafted log can't smuggle a repo name, absolute path, or token-like string onto
-  an artifact meant to carry none.
+- Model labels are sanitized before they can reach the shareable card /
+  clipboard: a label containing path separators, control characters, or other
+  out-of-set characters collapses to `Other` (so a crafted log can't smuggle a
+  repo name, absolute path, or token-like string onto an artifact meant to carry
+  none), while legitimate names are preserved — including local-model `:tags`
+  (`qwen3:8b`) and known `provider/model` namespaces (`openai/gpt-4o`), whose
+  recognized provider prefix is stripped for display.
 - `SECURITY.md` now documents the Cursor session-cookie egress and lists every
-  provider read; `docs/agy.md` states honestly what the Antigravity per-row
-  output-total check does (catches a re-meaning of the output tags `#3`/`#9`/
-  `#10`) and doesn't (a re-meaning of the input tags) guarantee.
+  provider read; `docs/agy.md` corrects the Antigravity drift explanation —
+  protobuf identifies fields by tag, so the per-row `#3 == #9 + #10` check is a
+  mutual-consistency check on the output tags (it catches a re-meaning of those
+  output tags, not of the input tags).
 
 ### Fixed
 
 - The Cursor usage fetch no longer follows redirects, so the session cookie can
-  only ever reach `cursor.com` and never a redirect target. Tokens with ASCII
-  control characters are rejected (header-injection guard), and `CursorConfig`'s
-  `Debug` redacts the token so it can't leak into a log or panic message.
-- A present-but-unparseable Cursor token cell (e.g. a thousands-separated
-  `1,234` after a format change) now drops the row as a parse error instead of
-  silently recording 0 tokens — degrade to less data, never a wrong number.
+  only ever reach `cursor.com`, never a redirect target. The session token is
+  restricted to the JWT character set and bridged-OAuth account ids are
+  validated (rejecting CR/LF and cookie delimiters), closing a header-injection
+  path through the JWT-decoded account id; `CursorConfig`'s `Debug` redacts the
+  token so it can't leak into a log or panic message.
+- A Cursor CSV row with an unparseable token cell (e.g. a thousands-separated
+  `1,234`) or one truncated before the token columns now drops as a parse error
+  instead of silently recording 0 tokens — degrade to less data, never a wrong
+  number.
 
 ## [0.6.0] - 2026-06-26
 
@@ -183,6 +192,8 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.7.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.7.0
+[0.6.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.6.0
 [0.5.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.5.0
 [0.4.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.3.1
