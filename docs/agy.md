@@ -31,21 +31,25 @@ output total** (`#3`): it must equal text + thinking (`#9` + `#10`). A row that
 fails is skipped and counted as a parse error rather than contributing garbage
 tokens.
 
-What that check does and doesn't guarantee, stated honestly:
+What that check does and doesn't guarantee, stated honestly. Protobuf
+identifies fields by an explicit tag number on the wire, not by position, so
+adding or removing *unrelated* fields doesn't change what `#9`/`#10` decode to —
+the decoder simply skips tags it doesn't read. The `#3 == #9 + #10` check is
+therefore not a positional guard; it's a **mutual-consistency** check on the
+three output fields:
 
-- It catches **field renumbering** — the most likely kind of format drift.
-  Inserting or removing a field anywhere ahead of the output fields shifts what
-  `#9`/`#10` decode to, so the `#3 == #9 + #10` equality breaks and the row is
-  dropped.
-- It does **not** independently verify the input-side fields (system `#1`, new
-  input `#2`, cache read `#5`): there's no stored input total to check them
-  against. A pure *semantic* redefinition of those fields that left the wire
-  layout untouched would pass the output check and isn't detectable by any
-  checksum. That case has never been observed, but it's the residual risk.
+- It catches a **re-meaning of the output fields**: if Antigravity reassigns the
+  output total (`#3`) or its parts (`#9` text, `#10` thinking) to different tag
+  numbers, our reads stop agreeing, the equality breaks, and the row is dropped.
+- It does **not** verify the input-side fields (system `#1`, new input `#2`,
+  cache read `#5`): there's no stored input total to check them against, so a
+  reassignment of those tags would be read as wrong numbers and pass the output
+  check undetected. That has never been observed, but it's the residual risk.
 
-So a typical format change degrades to "no/less data"; the one gap is a silent
-input-field re-meaning, which we accept because no row-level invariant can catch
-it. See `src/collector/agy_conv.rs`.
+So a re-meaning of the *output* fields degrades to "no/less data"; the gap is a
+silent re-meaning of an *input* field, which no row-level invariant can catch
+without an input checksum the format doesn't provide. See
+`src/collector/agy_conv.rs`.
 
 ## Cost
 

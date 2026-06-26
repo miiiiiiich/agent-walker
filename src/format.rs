@@ -126,14 +126,18 @@ fn sanitize_label(label: &str) -> String {
     // Bound the scan: an untrusted name could be megabytes long, and there's no
     // need to examine past the first SCAN characters to make this decision.
     const SCAN: usize = 128;
+    // `:` is allowed so local-model ids keep their tag (Ollama / OpenCode use
+    // `qwen3:8b`-style names); path separators (`/`, `\`) stay out, so a smuggled
+    // absolute path is still collapsed rather than published.
     let allowed = |ch: char| {
-        ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+')
+        ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+' | ':')
     };
-    let prefix: String = label.chars().take(SCAN).collect();
-    if prefix.is_empty() || !prefix.chars().all(allowed) {
+    // Validate on the iterator (no temp allocation): a label is suspicious if
+    // it's empty or any of its first SCAN characters falls outside the set.
+    if label.is_empty() || label.chars().take(SCAN).any(|ch| !allowed(ch)) {
         return "Other".to_owned();
     }
-    let capped: String = prefix.chars().take(MAX).collect();
+    let capped: String = label.chars().take(MAX).collect();
     let trimmed = capped.trim();
     if trimmed.is_empty() {
         "Other".to_owned()
@@ -380,5 +384,7 @@ mod tests {
             short_model_name("Gemini 3.5 Flash (High)"),
             "Gemini 3.5 Flash (High)"
         );
+        // A local-model id keeps its `:tag` (Ollama / OpenCode) — not collapsed.
+        assert_eq!(short_model_name("qwen3:8b"), "qwen3:8b");
     }
 }

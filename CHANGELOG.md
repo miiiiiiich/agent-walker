@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an artifact meant to carry none.
 - `SECURITY.md` now documents the Cursor session-cookie egress and lists every
   provider read; `docs/agy.md` states honestly what the Antigravity per-row
-  output-total check does (catches field renumbering) and doesn't (an input-field
-  re-meaning with no wire change) guarantee.
+  output-total check does (catches a re-meaning of the output tags `#3`/`#9`/
+  `#10`) and doesn't (a re-meaning of the input tags) guarantee.
 
 ### Fixed
 

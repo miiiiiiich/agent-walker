@@ -203,17 +203,18 @@ fn normalize_subject(subject: &str) -> Option<String> {
     }
 }
 
-/// A non-empty `<provider>` / `<id>` half of a bridged-OAuth subject, restricted
-/// to characters safe to interpolate into a cookie value: no CR/LF, and none of
-/// the cookie metacharacters (`;`, `=`, `,`, space, `|`) that could split or
-/// confuse the header. `@` is allowed — it's a valid RFC 6265 cookie-octet and
-/// appears in email-based `sub` claims from enterprise OIDC / SAML providers, so
-/// rejecting it would silently lock out those accounts.
+/// A non-empty `<provider>` / `<id>` half of a bridged-OAuth subject that's safe
+/// to interpolate into a cookie value. The guard is a denylist, not a narrow
+/// allowlist: SSO subjects legitimately use `@`, `+`, `:`, etc. (all valid
+/// RFC 6265 cookie-octets), so only the characters that could actually break the
+/// header are rejected — ASCII control (incl CR/LF) and the cookie delimiters
+/// (space, `"`, `,`, `;`, `\`), plus a second `|` so each half stays a single
+/// segment. A narrower allowlist silently dropped enterprise/email accounts.
 fn is_safe_subject_part(part: &str) -> bool {
     !part.is_empty()
-        && part
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
+        && part.bytes().all(|byte| {
+            !byte.is_ascii_control() && !matches!(byte, b' ' | b'"' | b',' | b';' | b'\\' | b'|')
+        })
 }
 
 /// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
@@ -623,10 +624,15 @@ mod tests {
             normalize_subject("microsoft|abc123").as_deref(),
             Some("microsoft|abc123")
         );
-        // Email-based subjects from enterprise OIDC / SAML keep their `@`.
+        // Email-based / tagged subjects from enterprise OIDC / SAML keep their
+        // `@`, `+`, `:` — all valid cookie-octets.
         assert_eq!(
             normalize_subject("okta|user@company.com").as_deref(),
             Some("okta|user@company.com")
+        );
+        assert_eq!(
+            normalize_subject("saml|alice+tag@example.com").as_deref(),
+            Some("saml|alice+tag@example.com")
         );
         assert_eq!(normalize_subject("weird-value"), None);
         assert_eq!(normalize_subject("a|b|c"), None);

@@ -143,11 +143,11 @@ indefinitely; no setting needed.
   users the bulk of the total tends to be cache reads — real but cheaply
   billed context re-reads, not new work. See [docs/claude.md](docs/claude.md).
 - **Antigravity tokens are read from an undocumented protobuf** (its
-  per-conversation SQLite), decoded by field number and checked per row against
-  the stored output total (which catches field renumbering, the likely drift; the
-  residual gap is noted in [docs/agy.md](docs/agy.md)), so they count toward the
-  totals. Cost is estimated from its Gemini model's display name via the same
-  LiteLLM table as every other agent.
+  per-conversation SQLite), decoded by tag number and checked per row for mutual
+  consistency of the output fields (`#3 == #9 + #10`), which catches a re-meaning
+  of those output tags; the residual gap is noted in [docs/agy.md](docs/agy.md).
+  They count toward the totals. Cost is estimated from its Gemini model's display
+  name via the same LiteLLM table as every other agent.
 - These numbers **won't match each agent's own in-app usage display**: those use
   different time windows and count cache reads differently. See the per-agent
   pages above.
