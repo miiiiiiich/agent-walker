@@ -26,11 +26,26 @@
 and there's no public schema. agent-walker reads the wire format directly and
 pulls the few fields it needs by number (cross-checked against the `tokscale`
 project, which maps them identically). Because the numbers are unofficial and
-could shift on an Antigravity update, **every row is self-verified**: the stored
-output total must equal text + thinking. A row that fails is skipped and counted
-as a parse error rather than contributing garbage tokens — so a future format
-change degrades to "no/less data," never to wrong numbers. See
-`src/collector/agy_conv.rs`.
+could shift on an Antigravity update, **every row is checked against the stored
+output total** (`#3`): it must equal text + thinking (`#9` + `#10`). A row that
+fails is skipped and counted as a parse error rather than contributing garbage
+tokens.
+
+What that check does and doesn't guarantee, stated honestly:
+
+- It catches **field renumbering** — the most likely kind of format drift.
+  Inserting or removing a field anywhere ahead of the output fields shifts what
+  `#9`/`#10` decode to, so the `#3 == #9 + #10` equality breaks and the row is
+  dropped.
+- It does **not** independently verify the input-side fields (system `#1`, new
+  input `#2`, cache read `#5`): there's no stored input total to check them
+  against. A pure *semantic* redefinition of those fields that left the wire
+  layout untouched would pass the output check and isn't detectable by any
+  checksum. That case has never been observed, but it's the residual risk.
+
+So a typical format change degrades to "no/less data"; the one gap is a silent
+input-field re-meaning, which we accept because no row-level invariant can catch
+it. See `src/collector/agy_conv.rs`.
 
 ## Cost
 

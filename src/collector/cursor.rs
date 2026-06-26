@@ -55,7 +55,14 @@ pub fn collect(
     let mut collection = Collection::new(Provider::Cursor, state_db.to_path_buf());
 
     let jwt = if let Some(token) = token_override {
-        token.trim().to_owned()
+        // An explicit CURSOR_TOKEN that's too short or carries control
+        // characters is unusable — a real failure, not signed-out.
+        if let Some(token) = sanitize_token(token) {
+            token
+        } else {
+            collection.stats.unreadable_files += 1;
+            return collection;
+        }
     } else {
         match read_access_token(state_db) {
             Ok(Some(token)) => token,
@@ -115,16 +122,24 @@ fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
         Connection::open_with_flags(state_db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| ())?;
     let _ = conn.busy_timeout(Duration::from_millis(500));
     match conn.query_row(ACCESS_TOKEN_SQL, [], |row| row.get::<_, String>(0)) {
-        Ok(token) => {
-            // Cursor stores this token raw, but other VS Code `ItemTable` values
-            // are JSON-serialized strings; strip surrounding quotes defensively
-            // (a JWT never contains `"`, so this is a no-op on the raw form).
-            let token = token.trim().trim_matches('"');
-            Ok((token.len() >= 10).then(|| token.to_owned()))
-        }
+        // A present row that doesn't sanitize to a usable token (too short, or
+        // control characters) reads as `None` — effectively signed out — rather
+        // than a hard error.
+        Ok(token) => Ok(sanitize_token(&token)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Err(()),
     }
+}
+
+/// A usable session token. Cursor stores the JWT raw, but other VS Code
+/// `ItemTable` values are JSON-serialized strings, so surrounding quotes are
+/// stripped defensively (a JWT never contains `"`). The token must be long
+/// enough to be a JWT and free of ASCII control characters — a CR/LF would let a
+/// crafted store or a malformed `CURSOR_TOKEN` inject extra `Cookie` headers.
+fn sanitize_token(raw: &str) -> Option<String> {
+    let token = raw.trim().trim_matches('"').trim();
+    (token.len() >= 10 && token.bytes().all(|byte| !byte.is_ascii_control()))
+        .then(|| token.to_owned())
 }
 
 /// The account id for the cookie. The JWT `sub` is authoritative — it's the
@@ -183,7 +198,13 @@ fn normalize_subject(subject: &str) -> Option<String> {
 /// short reason for the log: a 401/403 means the session expired (re-login in
 /// Cursor), other statuses and transport failures pass their own message.
 fn fetch_csv(cookie: &str) -> Result<String, String> {
-    let response = ureq::get(CSV_URL)
+    // Don't follow redirects: the session cookie is attached by hand, so a 3xx
+    // from the endpoint must never carry it to another host. With redirects
+    // disabled the cookie only ever reaches cursor.com; a redirect is refused
+    // below rather than chased.
+    let agent = ureq::builder().redirects(0).build();
+    let response = agent
+        .get(CSV_URL)
         // The fetch is synchronous and the dashboard waits on it, so keep the
         // cap short — the CSV is tiny; a slow network shouldn't hang startup.
         .timeout(Duration::from_secs(5))
@@ -199,6 +220,14 @@ fn fetch_csv(cookie: &str) -> Result<String, String> {
             ureq::Error::Status(code, _) => format!("HTTP {code} from the usage endpoint"),
             ureq::Error::Transport(transport) => format!("network error: {transport}"),
         })?;
+    // With redirects disabled a 3xx returns as `Ok`; refuse it instead of
+    // reading a redirect target's body (the cookie was never sent there).
+    let status = response.status();
+    if (300..400).contains(&status) {
+        return Err(format!(
+            "unexpected redirect (HTTP {status}) from the usage endpoint"
+        ));
+    }
     response
         .into_string()
         .map_err(|err| format!("reading the response body: {err}"))
@@ -267,11 +296,29 @@ fn parse_csv(
         // `Input (w/o Cache Write)` + `Input (w/ Cache Write)` + `Cache Read` +
         // `Output Tokens`. So `Input (w/ Cache Write)` *is* the cache-write count
         // (default 0 if the column is absent), not a superset to subtract from.
+        //
+        // Required token cells parse strictly: an empty cell is a legitimate 0,
+        // but a present-but-unparseable value (e.g. a thousands-separated
+        // "1,234" after a format change) drops the whole row rather than
+        // silently recording 0 tokens — degrade to less data, never a wrong one.
+        let cache_creation = match input_with_idx {
+            Some(idx) => parse_required(cell(idx)),
+            None => Some(0),
+        };
+        let (Some(input_tokens), Some(output_tokens), Some(cache_read), Some(cache_creation)) = (
+            parse_required(cell(input_idx)),
+            parse_required(cell(output_idx)),
+            parse_required(cell(cache_read_idx)),
+            cache_creation,
+        ) else {
+            collection.stats.parse_errors += 1;
+            continue;
+        };
         let usage = TokenUsage {
-            input_tokens: parse_u64(cell(input_idx)),
-            output_tokens: parse_u64(cell(output_idx)),
-            cache_creation_input_tokens: input_with_idx.map_or(0, |idx| parse_u64(cell(idx))),
-            cache_read_input_tokens: parse_u64(cell(cache_read_idx)),
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
             ..TokenUsage::default()
         };
 
@@ -318,9 +365,21 @@ fn parse_csv(
 }
 
 /// Parse an unsigned count from a possibly-quoted CSV cell; anything malformed
-/// is treated as zero rather than aborting the row.
+/// is treated as zero rather than aborting the row. Used for the `Total Tokens`
+/// checksum, which is advisory — a bad value there shouldn't drop the row.
 fn parse_u64(cell: &str) -> u64 {
     cell.trim().parse::<u64>().unwrap_or(0)
+}
+
+/// Parse a *required* token cell. An empty cell is a legitimate 0; a
+/// present-but-unparseable value returns `None` so the caller drops the row
+/// instead of recording a wrong 0.
+fn parse_required(cell: &str) -> Option<u64> {
+    let cell = cell.trim();
+    if cell.is_empty() {
+        return Some(0);
+    }
+    cell.parse::<u64>().ok()
 }
 
 /// Split one CSV record, honoring `"`-quoted fields with embedded commas and
@@ -422,6 +481,40 @@ mod tests {
         let collection = parse(csv, None);
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn unparseable_token_cell_drops_row_not_records_zero() {
+        // A thousands-separated "1,234" (a plausible format change) is NOT a 0 —
+        // the row is dropped and counted as a parse error rather than silently
+        // recording wrong token counts.
+        let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
+            \"2026-06-22T13:09:44Z\",\"m\",\"1,234\",\"0\",\"5\"\n";
+        let collection = parse(csv, None);
+        assert!(collection.usage_events.is_empty());
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn empty_token_cell_is_zero_not_a_drop() {
+        // An absent value is a legitimate 0; the row is still recorded.
+        let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
+            \"2026-06-22T13:09:44Z\",\"m\",\"\",\"0\",\"5\"\n";
+        let event = &parse(csv, None).usage_events[0];
+        assert_eq!(event.usage.input_tokens, 0);
+        assert_eq!(event.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn control_chars_in_token_are_rejected() {
+        // A CR/LF in the stored token would let a crafted store inject extra
+        // Cookie headers; sanitize_token refuses it.
+        assert!(sanitize_token("abcdefghij\r\nInjected: 1").is_none());
+        assert!(sanitize_token("short").is_none());
+        assert_eq!(
+            sanitize_token("  \"abcdefghij\"  ").as_deref(),
+            Some("abcdefghij")
+        );
     }
 
     #[test]

@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--no-cursor` disables the Cursor collector — the only one that reaches the
+  network — keeping agent-walker fully offline.
+
+### Changed
+
+- Model labels are sanitized (printable set, length-capped, no path separators or
+  control characters) before they can reach the shareable card / clipboard, so a
+  crafted log can't smuggle a repo name, absolute path, or token-like string onto
+  an artifact meant to carry none.
+- `SECURITY.md` now documents the Cursor session-cookie egress and lists every
+  provider read; `docs/agy.md` states honestly what the Antigravity per-row
+  output-total check does (catches field renumbering) and doesn't (an input-field
+  re-meaning with no wire change) guarantee.
+
+### Fixed
+
+- The Cursor usage fetch no longer follows redirects, so the session cookie can
+  only ever reach `cursor.com` and never a redirect target. Tokens with ASCII
+  control characters are rejected (header-injection guard), and `CursorConfig`'s
+  `Debug` redacts the token so it can't leak into a log or panic message.
+- A present-but-unparseable Cursor token cell (e.g. a thousands-separated
+  `1,234` after a format change) now drops the row as a parse error instead of
+  silently recording 0 tokens — degrade to less data, never a wrong number.
+
 ## [0.6.0] - 2026-06-26
 
 ### Added

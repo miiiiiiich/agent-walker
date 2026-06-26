@@ -52,6 +52,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub cursor_state_db: Option<PathBuf>,
 
+    /// Disable the Cursor collector. Cursor is the only provider that reaches the
+    /// network — it sends your local Cursor session cookie to cursor.com to read
+    /// your own usage. Pass this to keep agent-walker fully offline.
+    #[arg(long)]
+    pub no_cursor: bool,
+
     /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
     /// month of logs. The codename level is always computed from the most recent
     /// 30 days, so changing this only resizes the graphs, never the title.
@@ -115,12 +121,24 @@ pub struct Config {
 }
 
 /// Resolved Cursor settings (see `Config::cursor`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CursorConfig {
     pub state_db: PathBuf,
     pub cli_config: PathBuf,
     /// Token override from `CURSOR_TOKEN`; `None` reads the local `state.vscdb`.
     pub token: Option<String>,
+}
+
+// Manual `Debug` so the session token never lands in a `{config:?}` dump (a log
+// line, stderr, a panic message). Only the presence of a token is shown.
+impl std::fmt::Debug for CursorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CursorConfig")
+            .field("state_db", &self.state_db)
+            .field("cli_config", &self.cli_config)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -264,8 +282,9 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
                     config.local_offset,
                 )
             });
-            // Cursor is opt-in and the only collector that hits the network, so
-            // it runs in its own thread alongside the local ones.
+            // Cursor is auto-detected (disable with --no-cursor) and the only
+            // collector that hits the network, so it runs in its own thread
+            // alongside the local ones.
             let cursor_handle = scope.spawn(|| {
                 config.cursor.as_ref().map(|cursor| {
                     cursor::collect(
@@ -358,13 +377,19 @@ fn default_opencode_dir() -> Result<PathBuf> {
 }
 
 /// Build the Cursor config. Cursor is **auto-detected** like the other providers
-/// (no flag to turn it on or off): it runs whenever there's something to read —
-/// an explicit `CURSOR_TOKEN`, or a local `state.vscdb` that exists. With
-/// neither there's nothing to detect, so it's skipped. Signed out (store exists
-/// but no token) it stays silent and never hits the network — handled in the
-/// collector. Path resolution failures fall back to empty paths so an explicit
-/// token still works in CI / sandboxes where the home dir can't be resolved.
+/// — it runs whenever there's something to read (an explicit `CURSOR_TOKEN`, or a
+/// local `state.vscdb` that exists) — but because it's the one collector that
+/// reaches the network, `--no-cursor` turns it off entirely. With nothing to
+/// detect it's skipped. Signed out (store exists but no token) it stays silent
+/// and never hits the network — handled in the collector. Path resolution
+/// failures fall back to empty paths so an explicit token still works in CI /
+/// sandboxes where the home dir can't be resolved.
 fn cursor_config(args: &Args) -> Option<CursorConfig> {
+    // The one network-reaching collector is opt-out: honor --no-cursor before
+    // touching the env or disk so nothing is read and no request is made.
+    if args.no_cursor {
+        return None;
+    }
     let token = env::var("CURSOR_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());

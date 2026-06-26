@@ -107,6 +107,33 @@ pub fn format_timestamp(timestamp: OffsetDateTime) -> String {
 }
 
 pub fn short_model_name(name: &str) -> String {
+    sanitize_label(&short_model_name_raw(name))
+}
+
+/// Clamp a model label to a safe shape. Model names come from untrusted logs, so
+/// a crafted one could smuggle a repo name, an absolute path, or a token-like
+/// string onto the shareable card / clipboard — artifacts meant to carry none.
+/// Well-known families already collapse to a constant, so in practice this only
+/// reshapes an unrecognized passthrough name: keep a small printable set (no path
+/// separators, no control characters) and cap the length.
+fn sanitize_label(label: &str) -> String {
+    const MAX: usize = 24;
+    let cleaned: String = label
+        .chars()
+        .filter(|&ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+')
+        })
+        .take(MAX)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "Other".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn short_model_name_raw(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let family = if lower.contains("opus") {
         "Opus"
@@ -323,5 +350,25 @@ mod tests {
         assert_eq!(short_model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
         assert_eq!(short_model_name("gpt-5.5"), "GPT 5.5");
         assert_eq!(short_model_name("custom-model"), "custom-model");
+    }
+
+    #[test]
+    fn sanitizes_untrusted_model_names_for_the_card() {
+        // A crafted log model name can't smuggle a path, a newline, or angle
+        // brackets onto the shareable card — path separators and control/exotic
+        // characters are dropped and the label is length-capped.
+        let crafted = short_model_name("gemini/Users/secret/repo\n<script>");
+        assert!(!crafted.contains('/'));
+        assert!(!crafted.contains('\n'));
+        assert!(!crafted.contains('<'));
+        assert!(crafted.chars().count() <= 24);
+        // A legitimate display name with spaces and parens is preserved.
+        assert_eq!(
+            short_model_name("Gemini 3.5 Flash (High)"),
+            "Gemini 3.5 Flash (High)"
+        );
+        // A name that's entirely disallowed characters collapses to "Other"
+        // rather than an empty chip.
+        assert_eq!(short_model_name("名前/\t"), "Other");
     }
 }
