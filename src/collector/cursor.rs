@@ -204,13 +204,16 @@ fn normalize_subject(subject: &str) -> Option<String> {
 }
 
 /// A non-empty `<provider>` / `<id>` half of a bridged-OAuth subject, restricted
-/// to characters safe to interpolate into a cookie value (no CR/LF, no `;`/`=`/
-/// `,`/space, no second `|`).
+/// to characters safe to interpolate into a cookie value: no CR/LF, and none of
+/// the cookie metacharacters (`;`, `=`, `,`, space, `|`) that could split or
+/// confuse the header. `@` is allowed — it's a valid RFC 6265 cookie-octet and
+/// appears in email-based `sub` claims from enterprise OIDC / SAML providers, so
+/// rejecting it would silently lock out those accounts.
 fn is_safe_subject_part(part: &str) -> bool {
     !part.is_empty()
         && part
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
 }
 
 /// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
@@ -311,34 +314,15 @@ fn parse_csv(
             continue;
         }
 
-        // The two input columns are disjoint, not nested: `Total Tokens` is
-        // `Input (w/o Cache Write)` + `Input (w/ Cache Write)` + `Cache Read` +
-        // `Output Tokens`. So `Input (w/ Cache Write)` *is* the cache-write count
-        // (default 0 if the column is absent), not a superset to subtract from.
-        //
-        // Required token cells parse strictly: an empty cell is a legitimate 0,
-        // but a present-but-unparseable value (e.g. a thousands-separated
-        // "1,234" after a format change) drops the whole row rather than
-        // silently recording 0 tokens — degrade to less data, never a wrong one.
-        let cache_creation = match input_with_idx {
-            Some(idx) => parse_required(cell(idx)),
-            None => Some(0),
-        };
-        let (Some(input_tokens), Some(output_tokens), Some(cache_read), Some(cache_creation)) = (
-            parse_required(cell(input_idx)),
-            parse_required(cell(output_idx)),
-            parse_required(cell(cache_read_idx)),
-            cache_creation,
+        let Some(usage) = row_usage(
+            &fields,
+            input_idx,
+            output_idx,
+            cache_read_idx,
+            input_with_idx,
         ) else {
             collection.stats.parse_errors += 1;
             continue;
-        };
-        let usage = TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens: cache_creation,
-            cache_read_input_tokens: cache_read,
-            ..TokenUsage::default()
         };
 
         // The CSV's own `Total Tokens` is a checksum; a mismatch is a soft
@@ -399,6 +383,49 @@ fn parse_required(cell: &str) -> Option<u64> {
         return Some(0);
     }
     cell.parse::<u64>().ok()
+}
+
+/// Token counts for one row, or `None` (a parse error) if the row is too short
+/// to reach the token columns or a required cell is present-but-unparseable.
+///
+/// The two input columns are disjoint, not nested: `Total Tokens` is
+/// `Input (w/o Cache Write)` + `Input (w/ Cache Write)` + `Cache Read` +
+/// `Output Tokens`, so `Input (w/ Cache Write)` *is* the cache-write count
+/// (default 0 if the column is absent), not a superset to subtract from.
+fn row_usage(
+    fields: &[String],
+    input_idx: usize,
+    output_idx: usize,
+    cache_read_idx: usize,
+    input_with_idx: Option<usize>,
+) -> Option<TokenUsage> {
+    // A row truncated before the token columns would read its missing cells as
+    // "" and parse to 0; require the row to actually reach every required column
+    // so a short row is a parse error, not a silent zero.
+    let required_max = [
+        Some(input_idx),
+        Some(output_idx),
+        Some(cache_read_idx),
+        input_with_idx,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+    if fields.len() <= required_max {
+        return None;
+    }
+    let cell = |idx: usize| fields.get(idx).map_or("", String::as_str);
+    Some(TokenUsage {
+        input_tokens: parse_required(cell(input_idx))?,
+        output_tokens: parse_required(cell(output_idx))?,
+        cache_read_input_tokens: parse_required(cell(cache_read_idx))?,
+        cache_creation_input_tokens: match input_with_idx {
+            Some(idx) => parse_required(cell(idx))?,
+            None => 0,
+        },
+        ..TokenUsage::default()
+    })
 }
 
 /// Split one CSV record, honoring `"`-quoted fields with embedded commas and
@@ -515,6 +542,17 @@ mod tests {
     }
 
     #[test]
+    fn truncated_row_is_a_parse_error_not_a_zero() {
+        // A row that stops before the token columns must NOT read its missing
+        // cells as 0 — it's a parse error and contributes no event.
+        let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
+            \"2026-06-22T13:09:44Z\",\"m\"\n";
+        let collection = parse(csv, None);
+        assert!(collection.usage_events.is_empty());
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
     fn empty_token_cell_is_zero_not_a_drop() {
         // An absent value is a legitimate 0; the row is still recorded.
         let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
@@ -584,6 +622,11 @@ mod tests {
         assert_eq!(
             normalize_subject("microsoft|abc123").as_deref(),
             Some("microsoft|abc123")
+        );
+        // Email-based subjects from enterprise OIDC / SAML keep their `@`.
+        assert_eq!(
+            normalize_subject("okta|user@company.com").as_deref(),
+            Some("okta|user@company.com")
         );
         assert_eq!(normalize_subject("weird-value"), None);
         assert_eq!(normalize_subject("a|b|c"), None);
