@@ -126,6 +126,7 @@ fn sanitize_label(label: &str) -> String {
     // Bound the scan: an untrusted name could be megabytes long, and there's no
     // need to examine past the first SCAN characters to make this decision.
     const SCAN: usize = 128;
+    let label = label.trim();
     // `:` is allowed so local-model ids keep their tag (Ollama / OpenCode use
     // `qwen3:8b`-style names); path separators (`/`, `\`) stay out, so a smuggled
     // absolute path is still collapsed rather than published.
@@ -137,13 +138,15 @@ fn sanitize_label(label: &str) -> String {
     if label.is_empty() || label.chars().take(SCAN).any(|ch| !allowed(ch)) {
         return "Other".to_owned();
     }
-    let capped: String = label.chars().take(MAX).collect();
-    let trimmed = capped.trim();
-    if trimmed.is_empty() {
-        "Other".to_owned()
-    } else {
-        trimmed.to_owned()
+    // The label is already end-trimmed; only the MAX cut can leave a trailing
+    // space, so trim that in place instead of allocating a second string.
+    let mut capped: String = label.chars().take(MAX).collect();
+    let trimmed_len = capped.trim_end().len();
+    if trimmed_len == 0 {
+        return "Other".to_owned();
     }
+    capped.truncate(trimmed_len);
+    capped
 }
 
 /// Strip a *known* `<provider>/` namespace from a gateway/proxy model id (agent
@@ -179,7 +182,9 @@ fn strip_known_provider_prefix(name: &str) -> &str {
     ];
     if let Some((prefix, rest)) = name.split_once('/')
         && !rest.is_empty()
-        && PROVIDERS.contains(&prefix.to_ascii_lowercase().as_str())
+        && PROVIDERS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(prefix))
     {
         return rest;
     }
