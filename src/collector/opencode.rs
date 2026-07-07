@@ -477,6 +477,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         write_db(dir.path());
         // Floor sits after every event in the fixture.
+        #[allow(clippy::duration_suboptimal_units)] // millis is a unix timestamp, not a span
         let floor = std::time::UNIX_EPOCH + Duration::from_millis(1_781_542_500_000);
         let collection = collect(dir.path(), Some(floor), false, UtcOffset::UTC);
         assert!(collection.usage_events.is_empty());

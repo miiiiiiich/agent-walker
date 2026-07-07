@@ -329,7 +329,7 @@ fn ops(hourly: &[u64; 24]) -> &'static str {
         return "Eclipse";
     }
     let mut bands = [("Aurora", aurora), ("Sol", sol), ("Luna", luna)];
-    bands.sort_by(|left, right| right.1.cmp(&left.1));
+    bands.sort_by_key(|band| std::cmp::Reverse(band.1));
     let top = bands[0].1 as f64 / total as f64 * 100.0;
     let second = bands[1].1 as f64 / total as f64 * 100.0;
     if top - second >= OPS_DOMINANCE_PT {
