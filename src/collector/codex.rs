@@ -43,7 +43,7 @@ pub fn collect(
     // after archiving). Dedupe by relative path before parsing — keeping the
     // larger, more-complete file — so duration events and session touches (which
     // merge_into does not key-dedupe) can't double-count.
-    let file_len = |path: &Path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let file_len = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
     let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
         if !dir.exists() {

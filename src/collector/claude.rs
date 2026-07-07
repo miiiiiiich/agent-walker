@@ -490,7 +490,7 @@ mod tests {
         )
         .expect("fixture should be written");
 
-        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        let future = SystemTime::now() + std::time::Duration::from_hours(1);
         let collection = collect(temp.path(), Some(future), false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 0);
