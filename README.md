@@ -92,9 +92,11 @@ shareable stats card. Instead of leading with a raw token count, the card reads
 *how* you work: a GitHub-style activity grid, your hour-of-day rhythm, and a
 per-model split, with parallelism and task-time as plain numbers.
 
-Your usage also earns a **codename** — a rank you climb as you go. Exactly how
-it's earned is left as a puzzle, and repository names never appear on the
-card — just glance before you post.
+Your usage also earns a **codename** — one ladder you climb as you go: letter
+ranks from E up to SS, each split into a few steps, and every step is an
+animal — 24 in all, Ant to Lion. Exactly where the lines sit is left as a
+puzzle, and repository names never appear on the card — just glance before
+you post.
 
 ![an agent-walker codename stats card](docs/card.png)
 

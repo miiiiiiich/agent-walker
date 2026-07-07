@@ -18,8 +18,10 @@ pub struct ShareCard {
     pub(crate) codename: String,
     /// Time-of-day word ("Aurora"/"Sol"/"Luna"/"Eclipse") — drives the watermark tint.
     pub(crate) ops: String,
-    /// Grid animal ("Octopus", …) — selects the watermark silhouette.
+    /// Ladder animal ("Octopus", …) — selects the watermark silhouette.
     pub(crate) animal: String,
+    /// Letter tier; `Rank::Unranked` draws no rank badge and no caption tag.
+    pub(crate) rank: crate::codename::Rank,
     pub(crate) period_days: u16,
     pub(crate) active_days: usize,
     pub(crate) tokens: String,
@@ -47,18 +49,8 @@ pub(crate) struct Grass {
 }
 
 impl ShareCard {
-    /// Build a card for `summary`. The codename uses `summary` as its own style
-    /// source — correct for the combined/Total summary, which is what the CLI
-    /// `--share` path passes.
-    pub fn from_summary(summary: &Summary) -> Self {
-        Self::from_summary_styled(summary, summary)
-    }
-
-    /// Like [`Self::from_summary`], but the codename's orchestration tier is
-    /// taken from `style_src` (the combined/Total summary) while the rest of the
-    /// card describes `summary`. The interactive share path uses this so a
-    /// provider tab's card shows the same codename as the tab's badge — the tier
-    /// is a whole-person trait (parallelism and tooling across all agents).
+    /// Build a card for `summary`. The codename ranks on the summary's own
+    /// 30-day throughput, so a provider tab's card matches the tab's badge.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -69,7 +61,7 @@ impl ShareCard {
         clippy::too_many_lines,
         reason = "Flat extraction of every card stat in one pass."
     )]
-    pub fn from_summary_styled(summary: &Summary, style_src: &Summary) -> Self {
+    pub fn from_summary(summary: &Summary) -> Self {
         let total = summary.total_usage.token_volume();
         let cost: f64 = summary
             .model_daily
@@ -153,11 +145,12 @@ impl ShareCard {
             )
         });
 
-        let codename = crate::codename::for_summary_styled(summary, style_src);
+        let codename = crate::codename::for_summary(summary);
         Self {
             codename: codename.title(),
             ops: codename.ops.to_owned(),
             animal: codename.animal.to_owned(),
+            rank: codename.rank,
             period_days: summary.period_days,
             active_days: summary.active_days,
             tokens: format_tokens(total),
@@ -190,8 +183,13 @@ impl ShareCard {
                 "{four_plus_pct}% with 4+ agents in parallel (peak {peak})"
             ));
         }
+        let rank_tag = self
+            .rank
+            .letters()
+            .map(|letters| format!(" — Rank {letters}"))
+            .unwrap_or_default();
         let mut caption = format!(
-            "Codename: {}\nMy last {} days with AI coding agents:\n{}.",
+            "Codename: {}{rank_tag}\nMy last {} days with AI coding agents:\n{}.",
             self.codename,
             self.period_days,
             stats.join(" · ")

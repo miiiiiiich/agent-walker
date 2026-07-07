@@ -74,8 +74,6 @@ pub fn svg(card: &ShareCard) -> String {
         H - 48
     );
 
-    // Watermark: the earned animal as a faint, OPS-tinted silhouette behind the
-    // header (painted before the content so text stays legible on top).
     draw_watermark(&mut s, card);
 
     draw_header(&mut s, card);
@@ -119,10 +117,7 @@ fn draw_watermark(s: &mut String, card: &ShareCard) {
 }
 
 fn draw_header(s: &mut String, card: &ShareCard) {
-    let _ = write!(
-        s,
-        r#"<text x="{LX}" y="76" fill="{C_DIM}" font-size="15" font-weight="700" letter-spacing="4">CODENAME</text>"#
-    );
+    draw_rank_badge(s, card);
     let color = ops_color(&card.ops);
     let _ = write!(
         s,
@@ -151,6 +146,30 @@ fn draw_header(s: &mut String, card: &ShareCard) {
     let _ = write!(
         s,
         r#"<line x1="{LX}" y1="140" x2="{RX}" y2="140" stroke="{C_HAIRLINE}" stroke-width="1"/>"#
+    );
+}
+
+/// The rank as a pill badge above the title, in the slot the "CODENAME" label
+/// used to occupy (the label said nothing the card doesn't already show).
+/// Coloured by the 冠位十二階 ladder via `Rank::display_rgb`; unranked leaves
+/// the slot empty.
+fn draw_rank_badge(s: &mut String, card: &ShareCard) {
+    let (Some(letters), Some((r, g, b))) = (card.rank.letters(), card.rank.display_rgb()) else {
+        return;
+    };
+    let color = format!("#{r:02x}{g:02x}{b:02x}");
+    let label = format!("RANK {letters}");
+    // Monospace label: ~10px per glyph at 14px + tracking, plus pill padding.
+    // (6–7 ASCII glyphs, so the conversion never hits the fallback.)
+    let width = 44 + 10 * u32::try_from(label.len()).unwrap_or(7);
+    let _ = write!(
+        s,
+        r#"<rect class="rank-badge" x="{LX}" y="48" width="{width}" height="28" rx="14" fill="{color}" fill-opacity="0.12" stroke="{color}" stroke-opacity="0.65" stroke-width="1.3"/>"#
+    );
+    let _ = write!(
+        s,
+        r#"<text x="{}" y="67" text-anchor="middle" font-size="14" font-weight="800" letter-spacing="2" fill="{color}">{label}</text>"#,
+        LX + width / 2
     );
 }
 

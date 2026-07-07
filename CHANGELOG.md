@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Codename reworked into a single-axis rank ladder. RANK (SS/S/A/B/C/D/E;
+  unranked below E, or when the 30-day sample is too thin to rank) comes from
+  30-day token throughput alone; each rank splits
+  into log-uniform STEPs and every step is one animal, so all 24 animals are
+  reachable milestones on one climb from Ant to Lion (the SS band extrapolates
+  its ratio upward, putting Lion near 5B tokens/day). The orchestration-tier
+  column (Scout/Tools/Parallel/Apex) and its parallel/tooling signals are gone
+  from the codename — parallelism stays on the card and dashboard as plain
+  stats.
+- The rank is now displayed: a pill badge above the share card's title, in the
+  slot the "CODENAME" label used to occupy (the label said nothing the card
+  doesn't already show, so it is retired), a `────  RANK A  ────` nameplate
+  under the TUI badge art, "— Rank A" in the share caption, and a `rank:`
+  field in the plain-text output. The step position inside a rank is
+  deliberately not surfaced — the animal itself is the step.
+- Rank colours follow the 冠位十二階 ladder (603 AD, the oldest colour-coded
+  rank system): SS 濃紫 / S 薄紫 / A 青 / B 赤 / C 黄 / D 白 / E 墨, hues
+  adjusted for the dark card (the ink-black E is lifted on both surfaces).
+  The card badge and the TUI nameplate both use them; the animal watermark
+  stays OPS-coloured.
+- Provider tabs rank on their own volume — the whole-person style inheritance
+  (`for_summary_styled`) is removed.
+- Sharing from the dashboard now always exports the Total card, whichever tab
+  is open — one canonical card per person, matching the CLI `--share` path
+  (per-tab cards had been the interactive behaviour since 0.2.0).
+
 ## [0.7.0] - 2026-06-26
 
 Security and robustness hardening from a design/security review of 0.6.0.
@@ -192,6 +222,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.6.0
 [0.5.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.5.0

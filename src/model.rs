@@ -292,8 +292,8 @@ pub struct DurationBucket {
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
     /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
-    /// in the PARALLEL AGENTS panel; the codename's parallel signal uses the
-    /// time-at-2+-concurrent share from `time_by_level`, not this mean.
+    /// in the PARALLEL AGENTS panel (display-only — the codename ranks on token
+    /// throughput alone).
     pub avg_concurrency: f64,
     /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,

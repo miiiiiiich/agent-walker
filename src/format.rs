@@ -306,10 +306,14 @@ pub fn snapshot(summary: &Summary) -> String {
             summary.longest_streak_days,
             summary.current_streak_days
         ),
-        format!(
-            "codename: {}",
-            crate::codename::for_summary(summary).title()
-        ),
+        {
+            let codename = crate::codename::for_summary(summary);
+            format!(
+                "codename: {} rank: {}",
+                codename.title(),
+                codename.rank.letters().unwrap_or("unranked")
+            )
+        },
     ];
 
     if let Some(model) = &summary.favorite_model {
@@ -379,6 +383,17 @@ fn indent_lines(value: &str, indent: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_carries_the_rank_line() {
+        // 250M/day over the 30-day window → A band; the fixture itself
+        // (≈700K/day) stays unranked.
+        let mut summary = crate::share::fixtures::sample_summary();
+        summary.recent_window_volume = 7_500_000_000;
+        summary.recent_window_active_days = 29;
+        assert!(snapshot(&summary).contains("rank: A"));
+        assert!(snapshot(&crate::share::fixtures::sample_summary()).contains("rank: unranked"));
+    }
 
     #[test]
     fn formats_tokens_with_compact_units() {

@@ -18,7 +18,7 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 /// The whole dashboard body as one flowing list of lines. Charts and the
 /// two-column section area are rendered into lines (not widgets) so the
 /// entire page scrolls as a unit.
-pub(super) fn page_lines(summary: &Summary, style_src: &Summary, width: u16) -> Vec<Line<'static>> {
+pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     const CHART_BODY: usize = 6;
 
     // Two-column split, shared by the codename badge, the charts, and the
@@ -41,7 +41,7 @@ pub(super) fn page_lines(summary: &Summary, style_src: &Summary, width: u16) -> 
     // gutter would collapse and the badge would collide with the grass. Skip the
     // ACTIVITY title/legend row (index 0) since the badge's first row is blank.
     let activity = activity::activity_lines(summary);
-    let badge = codename_badge_lines(&crate::codename::for_summary_styled(summary, style_src));
+    let badge = codename_badge_lines(&crate::codename::for_summary(summary));
     let grass_width = activity.iter().skip(1).map(Line::width).max().unwrap_or(0);
     if badge.is_empty() {
         lines.extend(activity);
@@ -201,8 +201,9 @@ fn centre_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Codename badge: title (OPS in its colour, animal in white) above the braille
-/// animal in the OPS colour.
+/// Codename badge: title (OPS in its colour, animal in white) above the
+/// braille animal in the OPS colour, with the rank as a nameplate under the
+/// art — `────  RANK S  ────` — like the plaque on a statue's pedestal.
 fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
     let color = ops_color(codename.ops);
     let icon: Vec<&str> = badge::braille_for(codename.animal)
@@ -230,6 +231,20 @@ fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'stati
             row.to_owned(),
             Style::default().fg(color),
         )));
+    }
+    if let (Some(letters), Some((red, green, blue))) =
+        (codename.rank.letters(), codename.rank.display_rgb())
+    {
+        lines.push(Line::from(vec![
+            Span::styled("────  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("RANK {letters}"),
+                Style::default()
+                    .fg(Color::Rgb(red, green, blue))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ────", Style::default().fg(theme::MUTED)),
+        ]));
     }
     lines
 }

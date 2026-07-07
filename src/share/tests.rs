@@ -1,36 +1,12 @@
 use super::fixtures::sample_summary;
 use super::svg::svg;
 use super::{REPO_URL, ShareCard, badge_art, render_png};
-use crate::model::ToolStat;
 
-/// The 24 codename animals — same set as `codename::GRID` (order independent;
-/// this only checks every animal has a badge). "Ant" is the floor and has one.
-const ANIMALS: [&str; 24] = [
-    "Hound",
-    "Fox",
-    "Doberman",
-    "Lion",
-    "Octopus",
-    "Wolf",
-    "Orca",
-    "Hawk",
-    "Raven",
-    "Puma",
-    "Whale",
-    "Swallow",
-    "Scorpion",
-    "Piranha",
-    "Bear",
-    "Gull",
-    "Cat",
-    "Kangaroo",
-    "Eel",
-    "Deer",
-    "Ant",
-    "Firefly",
-    "Butterfly",
-    "Bee",
-];
+/// The 24 codename animals, straight from the ladder — badge assets must cover
+/// exactly this set (Ant is the unranked floor and has one).
+fn animals() -> Vec<&'static str> {
+    crate::codename::all_animals().collect()
+}
 
 /// The watermark embeds bundled badge SVGs as raw XML, so they must stay
 /// path-only — no script/handler/external-ref vectors can sneak in via a
@@ -52,7 +28,7 @@ fn bundled_badges_are_path_only() {
         "onmouse",
         "onerror",
     ];
-    for animal in ANIMALS {
+    for animal in animals() {
         let art =
             badge_art::badge_inner(animal).unwrap_or_else(|| panic!("missing badge: {animal}"));
         let lower = art.to_ascii_lowercase();
@@ -73,7 +49,7 @@ fn bundled_badges_are_path_only() {
 #[test]
 fn every_badge_rasterizes() {
     use resvg::{tiny_skia, usvg};
-    for animal in ANIMALS {
+    for animal in animals() {
         let art =
             badge_art::badge_inner(animal).unwrap_or_else(|| panic!("missing badge: {animal}"));
         // The silhouette's native space is 1024×1024 (see the badge `<g>` transform).
@@ -110,46 +86,66 @@ fn caption_includes_headline_and_repo() {
 }
 
 #[test]
-fn card_codename_uses_style_source() {
-    // The shared card's codename must match the tab badge: a provider tab card
-    // takes its orchestration column from the Total summary, not the provider
-    // alone. The combined view is tooling-heavy + parallel (→ Apex); the tab on
-    // its own has no tooling (→ Parallel), so the two must differ.
+fn card_rank_badge_reflects_own_volume() {
+    // The card ranks on the summary's own 30-day throughput: 250M/day sits at
+    // the bottom of the A band → Octopus. The rank pill carries the 冠位
+    // colour for A (blue) and the caption carries the letters — never a step
+    // counter.
     let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
-    let mut combined = sample_summary();
-    combined.tools = vec![
-        ToolStat {
-            name: "Bash".to_owned(),
-            calls: 900,
-        },
-        ToolStat {
-            name: "Agent".to_owned(),
-            calls: 60,
-        },
-        ToolStat {
-            name: "Skill".to_owned(),
-            calls: 40,
-        },
-    ];
-    combined.recent_window_volume = 800_000_000 * window; // R1
-    combined.recent_window_active_days = 29;
+    let mut summary = sample_summary();
+    summary.recent_window_volume = 250_000_000 * window;
+    summary.recent_window_active_days = 29;
 
-    let mut tab = combined.clone();
-    tab.tools = vec![ToolStat {
-        name: "Bash".to_owned(),
-        calls: 500,
-    }]; // no tooling on its own → Parallel column
-    tab.recent_window_volume = 250_000_000 * window; // R3
-
-    let styled = ShareCard::from_summary_styled(&tab, &combined);
-    let alone = ShareCard::from_summary(&tab);
-    assert_ne!(styled.codename, alone.codename);
-    // R3 × Apex (inherited from the Total summary) = Doberman.
+    let card = ShareCard::from_summary(&summary);
     assert!(
-        styled.codename.contains("Doberman"),
-        "expected R3 Apex Doberman, got {}",
-        styled.codename
+        card.codename.contains("Octopus"),
+        "expected A-band Octopus, got {}",
+        card.codename
     );
+    assert_eq!(card.rank, crate::codename::Rank::A);
+    assert!(card.caption().contains("Rank A"));
+    let svg_text = svg(&card);
+    assert!(svg_text.contains("rank-badge"), "rank badge missing");
+    assert!(svg_text.contains(">RANK A</text>"), "badge label missing");
+    assert!(svg_text.contains("#6b9bd8"), "A-rank 冠位 blue missing");
+    assert!(
+        !svg_text.contains("CODENAME"),
+        "the CODENAME label is retired — the badge owns that slot"
+    );
+    render_png(&card).expect("ranked card must rasterize");
+
+    // The unranked fixture (≈700K tokens/day) leaves the badge slot empty.
+    let unranked = ShareCard::from_summary(&sample_summary());
+    assert_eq!(unranked.rank, crate::codename::Rank::Unranked);
+    assert!(!unranked.caption().contains("Rank"));
+    assert!(!svg(&unranked).contains("rank-badge"));
+}
+
+#[test]
+fn rank_badge_variants_cover_width_and_ink_lift() {
+    let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
+    let card_at = |tokens_per_day: u64| {
+        let mut summary = sample_summary();
+        summary.recent_window_volume = tokens_per_day * window;
+        summary.recent_window_active_days = 29;
+        ShareCard::from_summary(&summary)
+    };
+
+    // SS is one glyph longer → the pill widens.
+    let ss = svg(&card_at(800_000_000));
+    assert!(ss.contains(">RANK SS</text>"));
+    assert!(ss.contains("width=\"114\""), "SS pill width");
+    assert!(ss.contains("#a678f0"), "SS 濃紫 missing");
+
+    // E (墨) renders with the lifted display shade, never the raw ink.
+    let e = svg(&card_at(5_000_000));
+    assert!(e.contains(">RANK E</text>"));
+    assert!(e.contains("#7a8088"), "E ink lift missing");
+    let (r, g, b) = crate::codename::Rank::E
+        .color_rgb()
+        .expect("E has a canonical colour");
+    let raw_ink = format!("#{r:02x}{g:02x}{b:02x}");
+    assert!(!e.contains(&raw_ink), "raw ink must not reach the card");
 }
 
 #[test]
