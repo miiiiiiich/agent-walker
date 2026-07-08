@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-07-08
 
 Three new views of how you drive your agents, all cut on the fixed 30-day
 window and all TUI-only — the share card is untouched.
@@ -255,6 +255,7 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.9.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.9.0
 [0.8.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.8.0
 [0.7.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.7.0
 [0.6.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.6.0
