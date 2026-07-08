@@ -11,8 +11,8 @@ use time::{Duration, OffsetDateTime, Time, Weekday};
 use crate::analyzer::summarize;
 use crate::app::Config;
 use crate::model::{
-    AppSummary, Collection, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, Provider, RateLimitSample,
+    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 struct Rng(u64);
@@ -59,6 +59,33 @@ const CLAUDE_TOOLS: [(&str, u64); 8] = [
 ];
 
 const SUBAGENTS: [&str; 3] = ["Explore", "general-purpose", "code-reviewer"];
+
+/// Demo skill labels for the SKILLS section (Claude attribution).
+const SKILLS: [&str; 6] = [
+    "sk:review",
+    "sk:release",
+    "orc:inbox",
+    "deep-research",
+    "loop",
+    "ref:api",
+];
+
+fn pick_skill(rng: &mut Rng, progress: f64) -> Option<String> {
+    // Attribution fields only exist in recent logs; mirror that by tagging
+    // mostly late-period events, at a modest rate like real data.
+    if progress < 0.4 || !rng.chance(35) {
+        return None;
+    }
+    let index = match rng.range(0, 100) {
+        0..=29 => 0,
+        30..=54 => 1,
+        55..=74 => 2,
+        75..=86 => 3,
+        87..=94 => 4,
+        _ => 5,
+    };
+    Some(SKILLS[index].to_owned())
+}
 
 const CODEX_TOOLS: [(&str, u64); 4] = [
     ("shell", 55),
@@ -214,9 +241,15 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
                     model: Some(pick_claude_model(rng, progress).to_owned()),
                     source_kind: SourceKind::Main,
                     attribution_agent: None,
+                    attribution_skill: pick_skill(rng, progress),
                     project: Some(pick_project(rng)),
                     usage: usage_block(rng, session_volume / chunks),
                     reported_cost_usd: None,
+                });
+                collection.mode_events.push(ModeEvent {
+                    timestamp: Some(timestamp),
+                    has_thinking: rng.chance(52),
+                    fast: false,
                 });
 
                 for (tool, weight) in CLAUDE_TOOLS {
@@ -296,9 +329,25 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
             model: Some("gpt-5.5".to_owned()),
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: Some(pick_project(rng)),
             usage: usage_block(rng, volume),
             reported_cost_usd: None,
+        });
+        collection.effort_events.push(EffortEvent {
+            timestamp: Some(timestamp),
+            effort: if rng.chance(88) { "xhigh" } else { "low" }.to_owned(),
+        });
+        // Daily-peak 5h-window utilization; one mid-period day hits the limit
+        // so the red bar and the peak note render in the demo.
+        let used_percent = if day_index == total_days / 2 {
+            100.0
+        } else {
+            rng.range(2, 65) as f64
+        };
+        collection.rate_limit_samples.push(RateLimitSample {
+            timestamp,
+            used_percent,
         });
         collection.session_touches.push(SessionTouch {
             timestamp,

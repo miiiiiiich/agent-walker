@@ -132,6 +132,9 @@ mod tests {
             tool_events: Vec::new(),
             session_touches: touches,
             duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }

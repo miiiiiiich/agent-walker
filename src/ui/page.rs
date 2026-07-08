@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 
-use crate::model::Summary;
+use crate::model::{Provider, Summary};
 
 use super::activity;
 use super::badge;
@@ -18,6 +18,10 @@ const TWO_COLUMN_MIN_WIDTH: u16 = 80;
 /// The whole dashboard body as one flowing list of lines. Charts and the
 /// two-column section area are rendered into lines (not widgets) so the
 /// entire page scrolls as a unit.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Flat assembly of the page in decided section order; splitting adds indirection without logic."
+)]
 pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     const CHART_BODY: usize = 6;
 
@@ -75,6 +79,32 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::default());
     }
 
+    // LIMITS history lives in the chart band on the Codex tab only — the
+    // rate-limit data is Codex-specific and deliberately historical (no
+    // "current" meter; this dashboard looks back, it doesn't monitor).
+    if summary.provider == Provider::Codex {
+        let chart_width = if two_column { left_u16 } else { width };
+        let limits = charts::limits_chart_lines(summary, chart_width, CHART_BODY);
+        if !limits.is_empty() {
+            lines.extend(limits);
+            lines.push(Line::default());
+        }
+    }
+
+    // Per-tab v0.9 sections: SKILLS is Claude-only (attribution is a Claude
+    // log feature), MODES renders each provider's own dial. The Total tab
+    // shows neither — they are not cross-provider metrics.
+    let skills = if summary.provider == Provider::Claude {
+        sections::skill_lines(summary, if two_column { left_u16 } else { width }, 6)
+    } else {
+        Vec::new()
+    };
+    let modes = if matches!(summary.provider, Provider::Claude | Provider::Codex) {
+        sections::modes_lines(summary, if two_column { right_u16 } else { width })
+    } else {
+        Vec::new()
+    };
+
     // Decided chart priority: activity → token/day → by-hour → completion →
     // PARALLEL AGENTS → models → (cost/signal/projects/tools/agents).
     if width < TWO_COLUMN_MIN_WIDTH {
@@ -89,6 +119,10 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         }
         lines.extend(sections::model_lines(summary, width));
         lines.push(Line::default());
+        if !skills.is_empty() {
+            lines.extend(skills);
+            lines.push(Line::default());
+        }
         lines.extend(sections::cost_lines(summary, width));
         lines.push(Line::default());
         lines.extend(sections::signal_lines(summary, width));
@@ -99,6 +133,10 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         if !summary.agents.is_empty() {
             lines.push(Line::default());
             lines.extend(sections::agent_lines(summary, width, 4));
+        }
+        if !modes.is_empty() {
+            lines.push(Line::default());
+            lines.extend(modes);
         }
         return lines;
     }
@@ -118,18 +156,25 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     }
 
     // Pair sections column-wise so each row of sections starts on the same
-    // line in both columns: MODELS|COST, PROJECTS|SIGNAL, TOOLS|SUBAGENTS.
-    let left_blocks = [
-        sections::model_lines(summary, left_u16),
-        sections::project_lines(summary, left_u16),
-        sections::tool_lines(summary, left_u16, 10),
-    ];
+    // line in both columns: MODELS|COST, (SKILLS), PROJECTS|SIGNAL,
+    // TOOLS|SUBAGENTS, (·|MODES). SKILLS slots directly under MODELS on the
+    // Claude tab; MODES closes the right column as a deliberately small
+    // section.
+    let mut left_blocks = vec![sections::model_lines(summary, left_u16)];
+    if !skills.is_empty() {
+        left_blocks.push(skills);
+    }
+    left_blocks.push(sections::project_lines(summary, left_u16));
+    left_blocks.push(sections::tool_lines(summary, left_u16, 10));
     let mut right_blocks = vec![
         sections::cost_lines(summary, right_u16),
         sections::signal_lines(summary, right_u16),
     ];
     if !summary.agents.is_empty() {
         right_blocks.push(sections::agent_lines(summary, right_u16, 5));
+    }
+    if !modes.is_empty() {
+        right_blocks.push(modes);
     }
 
     lines.extend(join_section_columns(
@@ -256,5 +301,136 @@ fn ops_color(ops: &str) -> Color {
         "Luna" => theme::BLUE,
         "Eclipse" => theme::PURPLE,
         _ => theme::MUTED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::date;
+
+    use super::*;
+    use crate::model::{LimitDay, LimitsHistory, ModesSummary, SkillStat, TokenUsage};
+    use crate::share::fixtures::sample_summary;
+
+    fn rendered(summary: &Summary, width: u16) -> String {
+        page_lines(summary, width)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn v09_summary(provider: Provider) -> Summary {
+        let mut summary = sample_summary();
+        summary.provider = provider;
+        summary.skills = vec![SkillStat {
+            name: "sk:review".to_owned(),
+            usage: TokenUsage {
+                input_tokens: 1_000_000,
+                ..TokenUsage::default()
+            },
+        }];
+        summary.limits = Some(LimitsHistory {
+            days: vec![
+                (date!(2026 - 06 - 10), LimitDay::NoUse),
+                (date!(2026 - 06 - 11), LimitDay::Measured(100.0)),
+                (date!(2026 - 06 - 12), LimitDay::NoSample),
+            ],
+            peak: Some((date!(2026 - 06 - 11), 100.0)),
+        });
+        summary.modes = ModesSummary {
+            assistant_turns: 100,
+            thinking_turns: 49,
+            fast_turns: 0,
+            efforts: vec![("xhigh".to_owned(), 93), ("low".to_owned(), 6)],
+        };
+        summary
+    }
+
+    /// SKILLS renders on the Claude tab only; LIMITS on the Codex tab only;
+    /// MODES on each provider tab; the Total tab shows none of them even when
+    /// the combined summary carries the data.
+    #[test]
+    fn v09_sections_render_on_their_own_tabs_only() {
+        let claude = rendered(&v09_summary(Provider::Claude), 110);
+        assert!(claude.contains("SKILLS"));
+        assert!(claude.contains("attributed"));
+        assert!(claude.contains("MODES"));
+        assert!(claude.contains("thinking"));
+        assert!(!claude.contains("LIMITS"));
+
+        let codex = rendered(&v09_summary(Provider::Codex), 110);
+        assert!(codex.contains("LIMITS"));
+        assert!(codex.contains("peak 100%"));
+        assert!(codex.contains("MODES"));
+        assert!(codex.contains("xhigh"));
+        assert!(!codex.contains("SKILLS"));
+
+        let total = rendered(&v09_summary(Provider::Combined), 110);
+        assert!(!total.contains("SKILLS"));
+        assert!(!total.contains("LIMITS"));
+        assert!(!total.contains("MODES"));
+    }
+
+    /// Narrow terminals stack the sections; the per-tab rules still hold.
+    #[test]
+    fn v09_sections_render_in_narrow_layout() {
+        let claude = rendered(&v09_summary(Provider::Claude), 60);
+        assert!(claude.contains("SKILLS"));
+        assert!(claude.contains("MODES"));
+
+        let codex = rendered(&v09_summary(Provider::Codex), 60);
+        assert!(codex.contains("LIMITS"));
+        assert!(!codex.contains("SKILLS"));
+    }
+
+    /// The demo (`AGENT_WALKER_DEMO=1`) must actually exercise the new
+    /// sections end-to-end: synthetic collections through the real analyzer
+    /// through the real page renderer. Guards against demo fixtures that
+    /// compile but never fire (e.g. a skill pick rate that rounds to zero).
+    #[test]
+    fn demo_report_renders_v09_sections() {
+        let config = crate::app::Config {
+            demo: true,
+            claude_dir: std::path::PathBuf::new(),
+            codex_dir: std::path::PathBuf::new(),
+            agy_dir: None,
+            opencode_dir: None,
+            cursor: None,
+            days: 30,
+            use_cache: false,
+            local_offset: time::UtcOffset::UTC,
+        };
+        let report = crate::demo::demo_report(&config);
+
+        let claude = report
+            .providers
+            .iter()
+            .find(|summary| summary.provider == Provider::Claude)
+            .expect("demo should have a Claude provider");
+        let claude_page = rendered(claude, 110);
+        assert!(claude_page.contains("SKILLS"));
+        assert!(claude_page.contains("attributed"));
+        assert!(claude_page.contains("thinking"));
+
+        let codex = report
+            .providers
+            .iter()
+            .find(|summary| summary.provider == Provider::Codex)
+            .expect("demo should have a Codex provider");
+        let codex_page = rendered(codex, 110);
+        assert!(codex_page.contains("LIMITS"));
+        assert!(codex_page.contains("peak 100%"));
+        assert!(codex_page.contains("xhigh"));
+
+        let total_page = rendered(&report.combined, 110);
+        assert!(!total_page.contains("SKILLS"));
+        assert!(!total_page.contains("LIMITS"));
+        assert!(!total_page.contains("MODES"));
     }
 }

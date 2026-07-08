@@ -228,6 +228,7 @@ fn parse_messages(
                 .map(ToOwned::to_owned),
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: value
                 .pointer("/path/cwd")
                 .and_then(Value::as_str)

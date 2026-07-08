@@ -36,6 +36,9 @@ pub(crate) fn sample_summary() -> Summary {
             reported_cost_usd: None,
         }],
         agents: Vec::new(),
+        skills: Vec::new(),
+        limits: None,
+        modes: crate::model::ModesSummary::default(),
         tools: Vec::new(),
         projects: vec![
             crate::model::ProjectStat {

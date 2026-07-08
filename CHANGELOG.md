@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Three new views of how you drive your agents, all cut on the fixed 30-day
+window and all TUI-only — the share card is untouched.
+
+### Added
+
+- **SKILLS** (Claude tab): token volume per skill, read from the
+  `attributionSkill` field recent Claude Code versions write. Shares are of
+  attributed volume; the subtitle carries the honest denominator ("attributed
+  N% of volume") since most tokens flow outside skills.
+- **LIMITS** (Codex tab): daily peak of the plan's 5-hour window utilization,
+  rebuilt from the `rate_limits` snapshots Codex rollouts record. Fixed
+  0-100% axis, red bar on limit-hit days, faint dot for days without Codex
+  use. History only, by design — this dashboard looks back, it doesn't
+  monitor.
+- **MODES** (per provider tab): each provider's own thinking dial — Claude
+  shows how often extended thinking actually fired (block presence only; the
+  text is never read) plus fast mode once it has data, Codex shows the
+  reasoning-effort mix from `turn_context`.
+
+### Fixed
+
+- Duplicate Claude log lines for the same message now merge their metadata
+  (attribution, model, project) instead of keeping only the larger-volume
+  line's fields.
+- `codex-auto-review` sessions are priced as the Codex default model instead
+  of silently costing $0.
+- The `--agy-dir` help text no longer claims Antigravity is activity-only —
+  token usage has been decoded from its conversation store since v0.7.
+
 ## [0.8.0] - 2026-07-08
 
 The codename becomes a rank you climb.

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ratatui::prelude::*;
 
 use crate::format::format_tokens;
-use crate::model::Summary;
+use crate::model::{LimitDay, Summary};
 
 use super::theme;
 use super::utils;
@@ -304,6 +304,114 @@ pub(super) fn model_chart_lines(
                     utils::month_abbrev(day.date.month()),
                     day.date.day()
                 ),
+            ))
+        })
+        .collect();
+    out.push(axis_label_row(width, &points));
+    out
+}
+
+/// LIMITS history: daily peak of the plan's 5h window as BY HOUR-style bars.
+/// The y-axis is FIXED at 0-100% (unlike the auto-scaled charts) so a quiet
+/// month doesn't inflate a 3% day into a full column. A day that hit the
+/// limit renders red; a day with no provider use renders as a faint dot; a
+/// day with use but no recorded sample stays blank.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Chart geometry is display-only."
+)]
+pub(super) fn limits_chart_lines(
+    summary: &Summary,
+    width: u16,
+    body_height: usize,
+) -> Vec<Line<'static>> {
+    let Some(limits) = &summary.limits else {
+        return Vec::new();
+    };
+    if limits.days.is_empty() {
+        return Vec::new();
+    }
+    let height = body_height.max(1);
+    let half_cells = height * 2;
+    let day_count = limits.days.len();
+    let graph_available = usize::from(width).saturating_sub(7);
+    let chars_per_bar = if graph_available >= day_count * 2 {
+        2
+    } else {
+        1
+    };
+
+    let annotation = limits.peak.map_or_else(String::new, |(date, value)| {
+        format!(
+            "peak {value:.0}% · {} {}",
+            utils::month_abbrev(date.month()),
+            date.day()
+        )
+    });
+    let mut out = vec![utils::section_title("LIMITS", &annotation)];
+
+    let level_of = |day: &LimitDay| -> usize {
+        match day {
+            LimitDay::Measured(value) if *value > 0.0 => {
+                ((value / 100.0) * half_cells as f64).round().max(1.0) as usize
+            }
+            _ => 0,
+        }
+    };
+
+    for row in 0..height {
+        let label = match row {
+            0 => format!("{:>5}%", 100),
+            _ if row == height / 2 => format!("{:>5}%", 50),
+            _ if row == height - 1 => format!("{:>6}", 0),
+            _ => " ".repeat(6),
+        };
+        let mut spans = vec![
+            Span::styled(label, Style::default().fg(theme::MUTED)),
+            Span::styled("│", Style::default().fg(theme::DIM)),
+        ];
+        let half_bottom = 2 * (height - 1 - row);
+        let half_top = half_bottom + 1;
+        let baseline = row == height - 1;
+        for (_, day) in &limits.days {
+            let level = level_of(day);
+            let glyph = if level > half_top {
+                "█"
+            } else if level > half_bottom {
+                "▄"
+            } else if baseline {
+                match day {
+                    // Measured 0% is a real data point, not an absence.
+                    LimitDay::Measured(_) => "▁",
+                    LimitDay::NoUse => "·",
+                    LimitDay::NoSample => " ",
+                }
+            } else {
+                " "
+            };
+            let color = match day {
+                LimitDay::Measured(value) if *value >= 99.5 => theme::HOT,
+                LimitDay::Measured(_) => theme::GREEN,
+                _ => theme::DIM,
+            };
+            spans.push(Span::styled(
+                glyph.repeat(chars_per_bar),
+                Style::default().fg(color),
+            ));
+        }
+        out.push(Line::from(spans));
+    }
+
+    let points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
+        .iter()
+        .filter_map(|fraction| {
+            let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
+            let (date, _) = limits.days.get(index)?;
+            Some((
+                7 + index * chars_per_bar,
+                format!("{} {}", utils::month_abbrev(date.month()), date.day()),
             ))
         })
         .collect();

@@ -361,6 +361,7 @@ fn parse_csv(
             model,
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: None, // Cursor usage events carry no project identifier.
             usage,
             reported_cost_usd,

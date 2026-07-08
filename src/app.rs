@@ -32,9 +32,9 @@ pub struct Args {
     pub codex_dir: Option<PathBuf>,
 
     /// Override the Antigravity log directory. Antigravity is auto-detected:
-    /// its tab appears only when logs are present. Its logs expose no token
-    /// usage (an unlabeled protobuf store), so the tab is activity-only and
-    /// never feeds the token totals.
+    /// its tab appears only when logs are present. Text logs supply activity
+    /// only; token usage is decoded from the conversation store, so the tab
+    /// feeds the token totals like every other provider.
     #[arg(long, value_name = "DIR")]
     pub agy_dir: Option<PathBuf>,
 
@@ -301,8 +301,7 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
             // Antigravity and OpenCode are probed whenever their directory
             // resolved; the collector returns an empty collection for a missing
             // dir / DB, and an empty provider is filtered out before it ever
-            // becomes a tab. (Antigravity logs carry no token usage; OpenCode's
-            // SQLite store does.)
+            // becomes a tab.
             let agy_handle = scope.spawn(|| {
                 config.agy_dir.as_ref().map(|dir| {
                     agy::collect(dir, mtime_floor, config.use_cache, config.local_offset)
@@ -462,6 +461,9 @@ mod tests {
             }],
             models: Vec::new(),
             agents: Vec::new(),
+            skills: Vec::new(),
+            limits: None,
+            modes: crate::model::ModesSummary::default(),
             tools: Vec::new(),
             projects: Vec::new(),
             sessions: 0,
