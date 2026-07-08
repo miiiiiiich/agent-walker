@@ -29,6 +29,12 @@ reads the session logs on your disk and answers, in one screen:
   per-model daily bars, hour-of-day profile in your local timezone
 - **Can it run unattended?** — turn-duration histogram weighted toward the
   20-minute-plus autonomy range
+- **Which skills earn their tokens?** — per-skill 30-day breakdown on the
+  Claude tab, when your Claude Code version attributes messages to skills
+- **How hard did you push the plan?** — daily peak of the 5h-window
+  utilization over the last month on the Codex tab: history, not a live meter
+- **How do you let it think?** — how often extended thinking actually fired
+  (Claude) and the reasoning-effort mix (Codex)
 
 ## Privacy
 
