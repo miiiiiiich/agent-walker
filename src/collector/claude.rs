@@ -8,12 +8,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached,
-    project_from_cwd,
+    FileEvents, KeyedModeEvent, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
+    parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent,
-    UsageEvent,
+    Collection, DurationEvent, ModeEvent, Provider, SessionTouch, SourceKind, TokenUsage,
+    ToolEvent, UsageEvent,
 };
 
 /// Background/observer harnesses (e.g. the claude-mem observer) keep
@@ -255,10 +255,14 @@ fn parse_line(
                 None
             }
         });
+    let attribution_skill = string_field(value, "attributionSkill")
+        .or_else(|| string_field(value, "attribution_skill"));
 
     let Some(message) = value.get("message") else {
         return;
     };
+
+    collect_mode_event(value, message, timestamp, events);
 
     if let Some(usage) = parse_usage(message.get("usage").or_else(|| value.get("usage"))) {
         let model = string_field(message, "model").or_else(|| string_field(value, "model"));
@@ -270,6 +274,7 @@ fn parse_line(
                 model,
                 source_kind: event_source_kind,
                 attribution_agent: attribution_agent.clone(),
+                attribution_skill,
                 project: project.map(ToOwned::to_owned),
                 usage,
                 reported_cost_usd: None,
@@ -286,6 +291,45 @@ fn parse_line(
         line_index,
         events,
     );
+}
+
+/// One mode event per assistant message (keyed by message id): did extended
+/// thinking fire (a `thinking` content block exists — presence only, the text
+/// is never read), and did fast mode serve it (`usage.speed == "fast"`).
+/// Streaming duplicates of the same message merge with OR in `merge_into`.
+fn collect_mode_event(
+    value: &Value,
+    message: &Value,
+    timestamp: Option<OffsetDateTime>,
+    events: &mut FileEvents,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(message_id) = string_field(message, "id") else {
+        return;
+    };
+    let has_thinking = message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("thinking"))
+        });
+    let fast = message
+        .get("usage")
+        .and_then(|usage| usage.get("speed"))
+        .and_then(Value::as_str)
+        == Some("fast");
+    events.mode_events.push(KeyedModeEvent {
+        key: Some(format!("mode:{message_id}")),
+        event: ModeEvent {
+            timestamp,
+            has_thinking,
+            fast,
+        },
+    });
 }
 
 fn collect_tool_events(
@@ -447,6 +491,67 @@ mod tests {
             collection.tool_events[0].subagent_type.as_deref(),
             Some("Explore")
         );
+    }
+
+    #[test]
+    fn collects_skill_attribution_and_mode_events() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","attributionSkill":"sk:review","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":3,"speed":"fast"},"content":[{"type":"thinking","thinking":"…"},{"type":"text","text":"hi"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"m2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"plain"}]}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(
+            collection.usage_events[0].attribution_skill.as_deref(),
+            Some("sk:review")
+        );
+        assert_eq!(collection.usage_events[1].attribution_skill, None);
+        // One mode event per assistant message: thinking+fast, then neither.
+        assert_eq!(collection.mode_events.len(), 2);
+        assert!(collection.mode_events[0].has_thinking);
+        assert!(collection.mode_events[0].fast);
+        assert!(!collection.mode_events[1].has_thinking);
+        assert!(!collection.mode_events[1].fast);
+    }
+
+    /// Streaming duplicates of one message can disagree: the larger-volume
+    /// line may lack attribution while a smaller fragment carries it. The
+    /// winner keeps its tokens but absorbs the loser's metadata (fill), and
+    /// mode flags merge with OR.
+    #[test]
+    fn duplicate_lines_fill_metadata_instead_of_dropping_it() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"text","text":"big"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","sessionId":"s1","type":"assistant","attributionSkill":"sk:review","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"thinking","thinking":"…"}]}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // One deduped usage event: the big line's tokens, the small line's skill.
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.input_tokens, 100);
+        assert_eq!(
+            collection.usage_events[0].attribution_skill.as_deref(),
+            Some("sk:review")
+        );
+        // One deduped mode event with OR-merged thinking.
+        assert_eq!(collection.mode_events.len(), 1);
+        assert!(collection.mode_events[0].has_thinking);
     }
 
     #[test]

@@ -189,9 +189,10 @@ fn normalize(model_name: &str) -> String {
 /// ids misprice.
 pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     let mut name = normalize(model_name);
-    if name == "codex" || name == "openai" {
-        // Codex sessions occasionally log only the provider name; price them
-        // as the current Codex default model.
+    if name == "codex" || name == "openai" || name == "codex-auto-review" {
+        // Codex sessions occasionally log only the provider name, and the
+        // automated-review flow logs `codex-auto-review` — neither has a
+        // LiteLLM key. Price both as the current Codex default model.
         "gpt-5.5".clone_into(&mut name);
     }
 
@@ -275,6 +276,7 @@ mod tests {
                     "claude-opus-4-8".to_owned(),
                     per_mtok(5.0, 25.0, 6.25, 10.0),
                 ),
+                ("claude-fable-5".to_owned(), per_mtok(8.0, 40.0, 10.0, 16.0)),
                 (
                     "claude-sonnet-4-5".to_owned(),
                     per_mtok(3.0, 15.0, 3.75, 6.0),
@@ -395,6 +397,25 @@ mod tests {
         let cost = usage_cost_usd("gpt-5.5", &usage).expect("gpt should be priced");
         assert!((cost - 40.0).abs() < 1e-9);
         assert!(usage_cost_usd("totally-unknown-model", &usage).is_none());
+    }
+
+    #[test]
+    fn prices_current_model_ids() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // The live LiteLLM snapshot carries exact keys for claude-fable-5 /
+        // claude-opus-4-8 / gpt-5.5 (verified 2026-07-08); the resolver must
+        // hit them without suffix games.
+        let fable = usage_cost_usd("claude-fable-5", &usage).expect("fable should be priced");
+        assert!((fable - 8.0).abs() < 1e-9);
+        // `codex-auto-review` has no LiteLLM key upstream; it prices as the
+        // Codex default model via the provider-name alias.
+        let review =
+            usage_cost_usd("codex-auto-review", &usage).expect("auto-review should be priced");
+        assert!((review - 5.0).abs() < 1e-9);
     }
 
     #[test]

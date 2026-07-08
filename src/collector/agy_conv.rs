@@ -264,6 +264,7 @@ fn parse_gen(
         model,
         source_kind: SourceKind::Main,
         attribution_agent: None,
+        attribution_skill: None,
         project: project.map(project_from_cwd),
         usage,
         reported_cost_usd: None,

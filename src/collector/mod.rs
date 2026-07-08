@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::debug;
 
-use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent, UsageEvent};
+use crate::model::{
+    Collection, DurationEvent, EffortEvent, ModeEvent, RateLimitSample, ScanStats, SessionTouch,
+    ToolEvent, UsageEvent,
+};
 
 /// Bump whenever the serialized layout of a cached `FileEvents` changes —
 /// stale caches would otherwise deserialize into garbage.
@@ -24,9 +27,11 @@ use crate::model::{Collection, DurationEvent, ScanStats, SessionTouch, ToolEvent
 ///   version bump OR a changed `local_offset`, recorded in
 ///   `CacheFile::offset_seconds`, so a machine-TZ change rebuilds automatically).
 /// - 8: `UsageEvent` gained `reported_cost_usd`, changing its bincode layout.
+/// - 9: v0.9 events — `UsageEvent.attribution_skill`, plus rate-limit /
+///   effort / mode event lists on `FileEvents`.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 9;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo
@@ -113,6 +118,9 @@ pub struct FileEvents {
     pub tool_events: Vec<KeyedToolEvent>,
     pub session_touches: Vec<SessionTouch>,
     pub duration_events: Vec<DurationEvent>,
+    pub rate_limit_samples: Vec<KeyedRateLimitSample>,
+    pub effort_events: Vec<KeyedEffortEvent>,
+    pub mode_events: Vec<KeyedModeEvent>,
     pub lines_seen: usize,
     pub parse_errors: usize,
 }
@@ -129,6 +137,27 @@ pub struct KeyedUsageEvent {
 pub struct KeyedToolEvent {
     pub key: Option<String>,
     pub event: ToolEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedRateLimitSample {
+    pub key: Option<String>,
+    pub event: RateLimitSample,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedEffortEvent {
+    pub key: Option<String>,
+    pub event: EffortEvent,
+}
+
+/// Mode event keyed by message id. Duplicate lines for the same message can
+/// disagree (a streaming fragment without the thinking block yet), so
+/// duplicates merge with OR semantics instead of being dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedModeEvent {
+    pub key: Option<String>,
+    pub event: ModeEvent,
 }
 
 impl FileEvents {
@@ -392,12 +421,49 @@ pub fn parse_files_cached(
     results
 }
 
+/// Fill missing metadata on `target` from `source`. Duplicate keyed usage
+/// lines can carry different metadata (a streaming fragment has the tokens
+/// but not yet the attribution fields), so whichever variant wins on token
+/// volume must still absorb the other's metadata instead of discarding it.
+fn fill_usage_metadata(target: &mut UsageEvent, source: &UsageEvent) {
+    if target.timestamp.is_none() {
+        target.timestamp = source.timestamp;
+    }
+    if target.session_id.is_none() {
+        target.session_id.clone_from(&source.session_id);
+    }
+    if target.model.is_none() {
+        target.model.clone_from(&source.model);
+    }
+    if target.attribution_agent.is_none() {
+        target
+            .attribution_agent
+            .clone_from(&source.attribution_agent);
+    }
+    if target.attribution_skill.is_none() {
+        target
+            .attribution_skill
+            .clone_from(&source.attribution_skill);
+    }
+    if target.project.is_none() {
+        target.project.clone_from(&source.project);
+    }
+    if target.reported_cost_usd.is_none() {
+        target.reported_cost_usd = source.reported_cost_usd;
+    }
+}
+
 /// Merge ordered per-file events into the collection, applying cross-file
 /// deduplication. Keyed usage duplicates keep the variant with the larger
-/// token volume; keyed tool duplicates are dropped.
+/// token volume but fill missing metadata from the loser; keyed tool /
+/// rate-limit / effort duplicates are dropped; keyed mode duplicates merge
+/// their flags with OR.
 pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<FileEvents>)>) {
     let mut seen_usage: HashMap<String, usize> = HashMap::new();
     let mut seen_tools: HashSet<String> = HashSet::new();
+    let mut seen_limits: HashSet<String> = HashSet::new();
+    let mut seen_efforts: HashSet<String> = HashSet::new();
+    let mut seen_modes: HashMap<String, usize> = HashMap::new();
 
     for (path, events) in per_file {
         collection.stats.files_seen += 1;
@@ -415,10 +481,13 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
             match keyed.key {
                 Some(key) => {
                     if let Some(index) = seen_usage.get(&key).copied() {
-                        if keyed.event.usage.token_volume()
-                            > collection.usage_events[index].usage.token_volume()
-                        {
-                            collection.usage_events[index] = keyed.event;
+                        let existing = &mut collection.usage_events[index];
+                        if keyed.event.usage.token_volume() > existing.usage.token_volume() {
+                            let mut incoming = keyed.event;
+                            fill_usage_metadata(&mut incoming, existing);
+                            *existing = incoming;
+                        } else {
+                            fill_usage_metadata(existing, &keyed.event);
                         }
                     } else {
                         seen_usage.insert(key, collection.usage_events.len());
@@ -437,6 +506,47 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
                     }
                 }
                 None => collection.tool_events.push(keyed.event),
+            }
+        }
+
+        for keyed in events.rate_limit_samples {
+            match keyed.key {
+                Some(key) => {
+                    if seen_limits.insert(key) {
+                        collection.rate_limit_samples.push(keyed.event);
+                    }
+                }
+                None => collection.rate_limit_samples.push(keyed.event),
+            }
+        }
+
+        for keyed in events.effort_events {
+            match keyed.key {
+                Some(key) => {
+                    if seen_efforts.insert(key) {
+                        collection.effort_events.push(keyed.event);
+                    }
+                }
+                None => collection.effort_events.push(keyed.event),
+            }
+        }
+
+        for keyed in events.mode_events {
+            match keyed.key {
+                Some(key) => {
+                    if let Some(index) = seen_modes.get(&key).copied() {
+                        let existing = &mut collection.mode_events[index];
+                        existing.has_thinking |= keyed.event.has_thinking;
+                        existing.fast |= keyed.event.fast;
+                        if existing.timestamp.is_none() {
+                            existing.timestamp = keyed.event.timestamp;
+                        }
+                    } else {
+                        seen_modes.insert(key, collection.mode_events.len());
+                        collection.mode_events.push(keyed.event);
+                    }
+                }
+                None => collection.mode_events.push(keyed.event),
             }
         }
     }

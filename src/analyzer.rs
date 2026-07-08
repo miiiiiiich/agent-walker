@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
 use crate::model::{
-    Collection, DailySessions, DailyStat, ModelDailyStat, Summary, TokenUsage, ToolStat,
+    Collection, DailySessions, DailyStat, LimitDay, LimitsHistory, ModelDailyStat, ModesSummary,
+    SkillStat, Summary, TokenUsage, ToolStat,
 };
 
 use self::aggregates::Aggregates;
@@ -159,6 +160,10 @@ pub fn summarize(
         period_end - Duration::days(crate::codename::CODENAME_WINDOW_DAYS - 1);
     let mut recent_window_volume = 0_u64;
     let mut recent_active_days = std::collections::HashSet::new();
+    // The v0.9 sections (SKILLS / LIMITS / MODES) share this fixed 30-day
+    // window: attribution fields exist only in recent logs, and the mode /
+    // limit views are "how you've been using it lately" by design.
+    let mut skill_map: BTreeMap<String, TokenUsage> = BTreeMap::new();
     for event in &collection.usage_events {
         let Some(date) = event.timestamp.map(|ts| ts.to_offset(local_offset).date()) else {
             continue;
@@ -172,7 +177,32 @@ pub fn summarize(
         }
         recent_window_volume = recent_window_volume.saturating_add(volume);
         recent_active_days.insert(date);
+        if let Some(skill) = &event.attribution_skill {
+            skill_map
+                .entry(skill.clone())
+                .or_default()
+                .add_assign(&event.usage);
+        }
     }
+    let mut skills = skill_map
+        .into_iter()
+        .map(|(name, usage)| SkillStat { name, usage })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| {
+        right
+            .usage
+            .token_volume()
+            .cmp(&left.usage.token_volume())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let limits = limits_history(
+        collection,
+        codename_window_start,
+        period_end,
+        local_offset,
+        &recent_active_days,
+    );
+    let mode_usage = modes_summary(collection, codename_window_start, period_end, local_offset);
     let recent_window_active_days = recent_active_days.len();
 
     Summary {
@@ -190,6 +220,9 @@ pub fn summarize(
         model_daily,
         models,
         agents,
+        skills,
+        limits,
+        modes: mode_usage,
         tools,
         projects,
         sessions: aggregates.period_sessions.len(),
@@ -243,6 +276,95 @@ fn build_aggregates(
     aggregates
 }
 
+/// Daily-peak LIMITS history over the fixed 30-day window. Tri-state per day:
+/// a day with samples carries its peak `used_percent`; a day with provider
+/// activity but no sample (older CLI versions) is `NoSample`; a day without
+/// activity is `NoUse` — the chart renders the three differently, so a
+/// measured 0% is never confused with "didn't use Codex that day".
+fn limits_history(
+    collection: &Collection,
+    window_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+    active_days: &std::collections::HashSet<Date>,
+) -> Option<LimitsHistory> {
+    let mut daily_peak: BTreeMap<Date, f64> = BTreeMap::new();
+    for sample in &collection.rate_limit_samples {
+        let date = sample.timestamp.to_offset(local_offset).date();
+        if date < window_start || date > period_end {
+            continue;
+        }
+        let entry = daily_peak.entry(date).or_insert(0.0);
+        if sample.used_percent > *entry {
+            *entry = sample.used_percent;
+        }
+    }
+    if daily_peak.is_empty() {
+        return None;
+    }
+
+    let mut days = Vec::new();
+    let mut peak: Option<(Date, f64)> = None;
+    let mut date = window_start;
+    while date <= period_end {
+        let day = match daily_peak.get(&date) {
+            Some(&value) => {
+                if peak.is_none_or(|(_, best)| value > best) {
+                    peak = Some((date, value));
+                }
+                LimitDay::Measured(value)
+            }
+            None if active_days.contains(&date) => LimitDay::NoSample,
+            None => LimitDay::NoUse,
+        };
+        days.push((date, day));
+        date += Duration::days(1);
+    }
+    Some(LimitsHistory { days, peak })
+}
+
+/// Mode usage over the fixed 30-day window: Claude thinking / fast flags per
+/// assistant message, Codex reasoning-effort per turn.
+fn modes_summary(
+    collection: &Collection,
+    window_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> ModesSummary {
+    let in_window = |timestamp: Option<OffsetDateTime>| {
+        timestamp
+            .map(|ts| ts.to_offset(local_offset).date())
+            .is_some_and(|date| date >= window_start && date <= period_end)
+    };
+
+    let mut modes = ModesSummary::default();
+    for event in &collection.mode_events {
+        if !in_window(event.timestamp) {
+            continue;
+        }
+        modes.assistant_turns += 1;
+        if event.has_thinking {
+            modes.thinking_turns += 1;
+        }
+        if event.fast {
+            modes.fast_turns += 1;
+        }
+    }
+
+    let mut effort_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for event in &collection.effort_events {
+        if !in_window(event.timestamp) {
+            continue;
+        }
+        *effort_counts.entry(event.effort.clone()).or_default() += 1;
+    }
+    modes.efforts = effort_counts.into_iter().collect();
+    modes
+        .efforts
+        .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    modes
+}
+
 fn init_daily_usage(period_start: Date, period_days: u16) -> BTreeMap<Date, TokenUsage> {
     (0..period_days)
         .map(|offset| {
@@ -276,6 +398,7 @@ mod tests {
                     model: Some("claude-opus-4-8".to_owned()),
                     source_kind: SourceKind::Main,
                     attribution_agent: None,
+                    attribution_skill: None,
                     project: Some("orchestra".to_owned()),
                     usage: TokenUsage {
                         input_tokens: 10,
@@ -292,6 +415,7 @@ mod tests {
                     model: Some("claude-haiku-4-5".to_owned()),
                     source_kind: SourceKind::Subagent,
                     attribution_agent: Some("Explore".to_owned()),
+                    attribution_skill: None,
                     project: Some("orchestra".to_owned()),
                     usage: TokenUsage {
                         input_tokens: 5,
@@ -333,6 +457,9 @@ mod tests {
                 },
             ],
             duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -365,6 +492,7 @@ mod tests {
             model: Some("claude-opus-4-8".to_owned()),
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: None,
             usage: TokenUsage {
                 input_tokens: tokens,
@@ -385,6 +513,9 @@ mod tests {
             tool_events: Vec::new(),
             session_touches: Vec::new(),
             duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -416,6 +547,7 @@ mod tests {
             model: Some("shared-model".to_owned()),
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: None,
             usage: usage(input),
             reported_cost_usd: reported,
@@ -427,6 +559,9 @@ mod tests {
             tool_events: Vec::new(),
             session_touches: Vec::new(),
             duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -448,5 +583,145 @@ mod tests {
             .expect("model-day present");
         assert_eq!(day.reported_cost_usd, Some(0.5));
         assert_eq!(day.unreported_usage.input_tokens, 300);
+    }
+}
+
+#[cfg(test)]
+mod v09_tests {
+    use time::macros::{date, datetime};
+
+    use super::*;
+    use crate::model::{
+        Collection, EffortEvent, ModeEvent, Provider, RateLimitSample, ScanStats, SourceKind,
+        UsageEvent,
+    };
+
+    fn skill_event(at: OffsetDateTime, skill: Option<&str>, tokens: u64) -> UsageEvent {
+        UsageEvent {
+            timestamp: Some(at),
+            session_id: Some("s".to_owned()),
+            model: Some("claude-fable-5".to_owned()),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: skill.map(ToOwned::to_owned),
+            project: None,
+            usage: TokenUsage {
+                input_tokens: tokens,
+                ..TokenUsage::default()
+            },
+            reported_cost_usd: None,
+        }
+    }
+
+    /// SKILLS / LIMITS / MODES all cut on the fixed 30-day codename window
+    /// (display `--days` = 90 here), and LIMITS days are tri-state.
+    #[test]
+    fn v09_sections_use_fixed_window_and_tristate_days() {
+        let now = datetime!(2026-06-30 12:00 UTC);
+        let collection = Collection {
+            provider: Provider::Combined,
+            root: "/tmp".into(),
+            usage_events: vec![
+                // In the 30d window (06-01..06-30) with a skill.
+                skill_event(
+                    datetime!(2026-06-25 10:00 UTC),
+                    Some("sk:review"),
+                    1_000_000,
+                ),
+                // In the 90d display window but OUTSIDE the fixed 30d window:
+                // must not appear in SKILLS.
+                skill_event(
+                    datetime!(2026-05-20 10:00 UTC),
+                    Some("sk:review"),
+                    2_000_000,
+                ),
+                // Active day without any rate-limit sample -> NoSample.
+                skill_event(datetime!(2026-06-22 09:00 UTC), None, 500),
+            ],
+            tool_events: Vec::new(),
+            session_touches: Vec::new(),
+            duration_events: Vec::new(),
+            rate_limit_samples: vec![
+                RateLimitSample {
+                    timestamp: datetime!(2026-06-22 08:00 UTC),
+                    used_percent: 40.0,
+                },
+                // Same day, later, higher: the day keeps its PEAK.
+                RateLimitSample {
+                    timestamp: datetime!(2026-06-22 09:01 UTC),
+                    used_percent: 100.0,
+                },
+                // Outside the 30d window: ignored.
+                RateLimitSample {
+                    timestamp: datetime!(2026-05-20 09:00 UTC),
+                    used_percent: 90.0,
+                },
+            ],
+            effort_events: vec![
+                EffortEvent {
+                    timestamp: Some(datetime!(2026-06-25 10:00 UTC)),
+                    effort: "xhigh".to_owned(),
+                },
+                EffortEvent {
+                    timestamp: Some(datetime!(2026-06-25 11:00 UTC)),
+                    effort: "xhigh".to_owned(),
+                },
+                EffortEvent {
+                    timestamp: Some(datetime!(2026-06-25 12:00 UTC)),
+                    effort: "low".to_owned(),
+                },
+            ],
+            mode_events: vec![
+                ModeEvent {
+                    timestamp: Some(datetime!(2026-06-25 10:00 UTC)),
+                    has_thinking: true,
+                    fast: false,
+                },
+                ModeEvent {
+                    timestamp: Some(datetime!(2026-06-25 11:00 UTC)),
+                    has_thinking: false,
+                    fast: false,
+                },
+                // Outside the 30d window: ignored.
+                ModeEvent {
+                    timestamp: Some(datetime!(2026-05-20 10:00 UTC)),
+                    has_thinking: true,
+                    fast: true,
+                },
+            ],
+            stats: ScanStats::default(),
+        };
+
+        let summary = summarize(&collection, now, 90, UtcOffset::UTC);
+
+        // SKILLS: only the in-window 1M event counts.
+        assert_eq!(summary.skills.len(), 1);
+        assert_eq!(summary.skills[0].name, "sk:review");
+        assert_eq!(summary.skills[0].usage.token_volume(), 1_000_000);
+
+        // LIMITS: 30 tri-state days, daily PEAK, window-filtered.
+        let limits = summary.limits.expect("limits history should exist");
+        assert_eq!(limits.days.len(), 30);
+        assert_eq!(limits.peak, Some((date!(2026 - 06 - 22), 100.0)));
+        let day = |d: Date| {
+            limits
+                .days
+                .iter()
+                .find(|(date, _)| *date == d)
+                .map(|(_, day)| *day)
+                .expect("day should be in window")
+        };
+        assert_eq!(day(date!(2026 - 06 - 22)), LimitDay::Measured(100.0));
+        assert_eq!(day(date!(2026 - 06 - 25)), LimitDay::NoSample);
+        assert_eq!(day(date!(2026 - 06 - 03)), LimitDay::NoUse);
+
+        // MODES: window-filtered turns and effort distribution.
+        assert_eq!(summary.modes.assistant_turns, 2);
+        assert_eq!(summary.modes.thinking_turns, 1);
+        assert_eq!(summary.modes.fast_turns, 0);
+        assert_eq!(
+            summary.modes.efforts,
+            vec![("xhigh".to_owned(), 2), ("low".to_owned(), 1)]
+        );
     }
 }

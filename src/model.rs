@@ -94,6 +94,9 @@ pub struct UsageEvent {
     pub model: Option<String>,
     pub source_kind: SourceKind,
     pub attribution_agent: Option<String>,
+    /// Skill active when this message was produced (Claude `attributionSkill`).
+    /// Feeds the SKILLS section only — never the share card.
+    pub attribution_skill: Option<String>,
     /// Repository / working-directory label derived from the log location
     /// (Claude: project directory name; Codex: `session_meta` cwd).
     pub project: Option<String>,
@@ -126,6 +129,32 @@ pub struct DurationEvent {
     pub session_id: Option<String>,
     pub duration_ms: u64,
     pub status: Option<String>,
+}
+
+/// One `rate_limits` snapshot from a Codex rollout: the plan's primary
+/// (5-hour) window utilization at that moment. History-only material — the
+/// dashboard shows past utilization, never a "current" meter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitSample {
+    pub timestamp: OffsetDateTime,
+    pub used_percent: f64,
+}
+
+/// One Codex turn's reasoning-effort setting (`turn_context.payload.effort`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffortEvent {
+    pub timestamp: Option<OffsetDateTime>,
+    pub effort: String,
+}
+
+/// Per-assistant-message mode flags for Claude: whether extended thinking
+/// fired (a `thinking` content block exists — block presence only, text is
+/// never read) and whether fast mode served it (`usage.speed == "fast"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeEvent {
+    pub timestamp: Option<OffsetDateTime>,
+    pub has_thinking: bool,
+    pub fast: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -161,6 +190,9 @@ pub struct Collection {
     pub tool_events: Vec<ToolEvent>,
     pub session_touches: Vec<SessionTouch>,
     pub duration_events: Vec<DurationEvent>,
+    pub rate_limit_samples: Vec<RateLimitSample>,
+    pub effort_events: Vec<EffortEvent>,
+    pub mode_events: Vec<ModeEvent>,
     pub stats: ScanStats,
 }
 
@@ -173,6 +205,9 @@ impl Collection {
             tool_events: Vec::new(),
             session_touches: Vec::new(),
             duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }
@@ -192,6 +227,15 @@ impl Collection {
             combined
                 .duration_events
                 .extend(collection.duration_events.iter().cloned());
+            combined
+                .rate_limit_samples
+                .extend(collection.rate_limit_samples.iter().cloned());
+            combined
+                .effort_events
+                .extend(collection.effort_events.iter().cloned());
+            combined
+                .mode_events
+                .extend(collection.mode_events.iter().cloned());
             combined.stats.add_assign(&collection.stats);
         }
         combined.stats.usage_events = combined.usage_events.len();
@@ -247,6 +291,50 @@ pub struct AgentStat {
     pub name: String,
     pub usage: TokenUsage,
     pub calls: usize,
+}
+
+/// Per-skill token volume over the fixed 30-day window (Claude
+/// `attributionSkill`). TUI-only — must never reach the share card.
+#[derive(Debug, Clone)]
+pub struct SkillStat {
+    pub name: String,
+    pub usage: TokenUsage,
+}
+
+/// One day of the LIMITS history. `NoUse` = no provider activity that day;
+/// `NoSample` = activity but the CLI recorded no rate-limit snapshot (older
+/// versions); `Measured` = the day's peak `used_percent`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LimitDay {
+    NoUse,
+    NoSample,
+    Measured(f64),
+}
+
+/// Daily-peak history of the plan's 5h window over the fixed 30-day window,
+/// oldest day first.
+#[derive(Debug, Clone)]
+pub struct LimitsHistory {
+    pub days: Vec<(Date, LimitDay)>,
+    pub peak: Option<(Date, f64)>,
+}
+
+/// Mode usage over the fixed 30-day window: how the user lets the model
+/// think. Claude: thinking-block fire rate (+ fast mode when used);
+/// Codex: reasoning-effort distribution.
+#[derive(Debug, Clone, Default)]
+pub struct ModesSummary {
+    pub assistant_turns: usize,
+    pub thinking_turns: usize,
+    pub fast_turns: usize,
+    /// (effort label, turns), sorted by turns descending.
+    pub efforts: Vec<(String, usize)>,
+}
+
+impl ModesSummary {
+    pub fn is_empty(&self) -> bool {
+        self.assistant_turns == 0 && self.efforts.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +413,12 @@ pub struct Summary {
     pub model_daily: Vec<ModelDailyStat>,
     pub models: Vec<ModelStat>,
     pub agents: Vec<AgentStat>,
+    /// Fixed 30-day window (same as the codename window), NOT the display
+    /// `--days` — attribution fields exist only in recent logs, so an
+    /// all-time cut would silently under-count.
+    pub skills: Vec<SkillStat>,
+    pub limits: Option<LimitsHistory>,
+    pub modes: ModesSummary,
     pub tools: Vec<ToolStat>,
     pub projects: Vec<ProjectStat>,
     pub sessions: usize,

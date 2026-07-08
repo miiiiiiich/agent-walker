@@ -527,3 +527,141 @@ pub(super) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'static>
     }
     lines
 }
+
+/// SKILLS: token volume by Claude `attributionSkill` over the fixed 30-day
+/// window (the display `--days` does not apply — attribution fields exist
+/// only in recent logs). Claude-tab only, TUI-only: skill names are
+/// personal-environment labels that must never reach the share card, so this
+/// section reads `summary.skills`, never the `models` path the card renders.
+/// Share is of ATTRIBUTED volume; the subtitle carries the honest denominator.
+pub(super) fn skill_lines(summary: &Summary, width: u16, limit: usize) -> Vec<Line<'static>> {
+    if summary.skills.is_empty() {
+        return Vec::new();
+    }
+    let attributed = summary.skills.iter().fold(0_u64, |sum, skill| {
+        sum.saturating_add(skill.usage.token_volume())
+    });
+    let subtitle = if summary.recent_window_volume > 0 {
+        format!(
+            "30d · attributed {} of volume",
+            format_percent(attributed, summary.recent_window_volume)
+        )
+    } else {
+        "30d".to_owned()
+    };
+    let max_volume = summary
+        .skills
+        .first()
+        .map_or(0, |skill| skill.usage.token_volume());
+    let bar_width = usize::from(width).saturating_sub(31).clamp(8, 24);
+
+    let mut lines = vec![utils::section_title("SKILLS", &subtitle)];
+    for skill in summary.skills.iter().take(limit) {
+        let volume = skill.usage.token_volume();
+        let filled = utils::bar_fill(volume, max_volume, bar_width);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<14}", utils::compact_label(&skill.name, 13)),
+                Style::default().fg(theme::TEXT),
+            ),
+            Span::styled("▄".repeat(filled), Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "▄".repeat(bar_width - filled),
+                Style::default().fg(theme::FAINT),
+            ),
+            Span::styled(
+                format!(" {:>8}", format_tokens(volume)),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>7}", format_percent(volume, attributed)),
+                Style::default().fg(theme::MUTED),
+            ),
+        ]));
+    }
+    lines
+}
+
+/// MODES: how the model is allowed to think, per provider dial — Claude
+/// shows the thinking fire rate (plus fast mode once it has data), Codex the
+/// reasoning-effort mix. Deliberately small (a couple of rows): the dials are
+/// asymmetric across providers, so each tab renders only its own rows.
+pub(super) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
+    let modes = &summary.modes;
+    if modes.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![utils::section_title("MODES", "30d")];
+    let bar_width = usize::from(width).saturating_sub(30).clamp(6, 16);
+
+    if modes.assistant_turns > 0 {
+        let thinking = u64::try_from(modes.thinking_turns).unwrap_or(0);
+        let turns = u64::try_from(modes.assistant_turns).unwrap_or(1).max(1);
+        let filled = utils::bar_fill(thinking, turns, bar_width);
+        lines.push(Line::from(vec![
+            Span::styled("thinking  ", Style::default().fg(theme::TEXT)),
+            Span::styled("█".repeat(filled), Style::default().fg(theme::PURPLE)),
+            Span::styled(
+                "█".repeat(bar_width - filled),
+                Style::default().fg(theme::FAINT),
+            ),
+            Span::styled(
+                format!(" {:>6}", format_percent(thinking, turns)),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" of turns", Style::default().fg(theme::MUTED)),
+        ]));
+    }
+
+    if modes.fast_turns > 0 && modes.assistant_turns > 0 {
+        let fast = u64::try_from(modes.fast_turns).unwrap_or(0);
+        let turns = u64::try_from(modes.assistant_turns).unwrap_or(1).max(1);
+        let filled = utils::bar_fill(fast, turns, bar_width);
+        lines.push(Line::from(vec![
+            Span::styled("fast      ", Style::default().fg(theme::TEXT)),
+            Span::styled("█".repeat(filled), Style::default().fg(theme::GOLD)),
+            Span::styled(
+                "█".repeat(bar_width - filled),
+                Style::default().fg(theme::FAINT),
+            ),
+            Span::styled(
+                format!(" {:>6}", format_percent(fast, turns)),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" of turns", Style::default().fg(theme::MUTED)),
+        ]));
+    }
+
+    if !modes.efforts.is_empty() {
+        let total: usize = modes.efforts.iter().map(|(_, count)| count).sum();
+        let total = u64::try_from(total).unwrap_or(1).max(1);
+        let mut spans = vec![Span::styled("effort    ", Style::default().fg(theme::TEXT))];
+        for (index, (label, count)) in modes.efforts.iter().take(3).enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(theme::DIM)));
+            }
+            let style = if index == 0 {
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::MUTED)
+            };
+            spans.push(Span::styled(
+                format!(
+                    "{label} {}",
+                    format_percent(u64::try_from(*count).unwrap_or(0), total)
+                ),
+                style,
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}

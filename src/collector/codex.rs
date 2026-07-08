@@ -9,12 +9,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached,
-    project_from_cwd,
+    FileEvents, KeyedEffortEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent,
+    list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent,
-    UsageEvent,
+    Collection, DurationEvent, EffortEvent, Provider, RateLimitSample, SessionTouch, SourceKind,
+    TokenUsage, ToolEvent, UsageEvent,
 };
 
 pub fn collect(
@@ -104,6 +104,13 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
+            collect_effort_event(
+                &value,
+                timestamp,
+                current_session_id.as_ref(),
+                line_index,
+                &mut events,
+            );
         }
 
         if let (Some(timestamp), Some(session_id)) = (timestamp, current_session_id.as_ref()) {
@@ -156,6 +163,7 @@ fn collect_usage_event(
     if string_path(value, &["payload", "type"]).as_deref() != Some("token_count") {
         return;
     }
+    collect_rate_limit_sample(value, timestamp, session_id, line_index, events);
     let Some(last_usage) = value
         .get("payload")
         .and_then(|payload| payload.get("info"))
@@ -192,10 +200,74 @@ fn collect_usage_event(
             model: model.cloned().or_else(|| Some("codex".to_owned())),
             source_kind: SourceKind::Main,
             attribution_agent: None,
+            attribution_skill: None,
             project: project.map(ToOwned::to_owned),
             usage,
             reported_cost_usd: None,
         },
+    });
+}
+
+/// Rate-limit snapshot riding on a `token_count` event: the plan's primary
+/// (5h) window utilization at that moment. Only the primary window is kept —
+/// the weekly window was deliberately dropped from the LIMITS history (a
+/// 30-day view of a 7-day window nests confusingly). Keyed like usage events
+/// so a copied rollout file can't double-sample a day.
+fn collect_rate_limit_sample(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    line_index: usize,
+    events: &mut FileEvents,
+) {
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    let Some(used_percent) = value
+        .get("payload")
+        .and_then(|payload| payload.get("rate_limits"))
+        .and_then(|limits| limits.get("primary"))
+        .and_then(|primary| primary.get("used_percent"))
+        .and_then(Value::as_f64)
+    else {
+        return;
+    };
+    let key = session_id.map(|sid| {
+        format!(
+            "codex-limit:{sid}:{ts}:{line_index}",
+            ts = timestamp.unix_timestamp_nanos(),
+        )
+    });
+    events.rate_limit_samples.push(KeyedRateLimitSample {
+        key,
+        event: RateLimitSample {
+            timestamp,
+            used_percent: used_percent.clamp(0.0, 100.0),
+        },
+    });
+}
+
+/// Reasoning-effort setting for one turn (`turn_context.payload.effort`).
+fn collect_effort_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    line_index: usize,
+    events: &mut FileEvents,
+) {
+    let Some(effort) = string_path(value, &["payload", "effort"]) else {
+        return;
+    };
+    let key = match (session_id, timestamp) {
+        (Some(sid), Some(ts)) => Some(format!(
+            "codex-effort:{sid}:{ts}:{line_index}",
+            ts = ts.unix_timestamp_nanos(),
+        )),
+        _ => None,
+    };
+    events.effort_events.push(KeyedEffortEvent {
+        key,
+        event: EffortEvent { timestamp, effort },
     });
 }
 
@@ -504,6 +576,37 @@ mod tests {
         assert_eq!(collection.tool_events[0].tool_name, "exec_command");
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 12_345);
+    }
+
+    #[test]
+    fn collects_effort_and_rate_limit_samples() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300},"secondary":{"used_percent":12.0,"window_minutes":10080}}}}"#,
+                "\n",
+                // A turn_context without effort contributes no effort event.
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.effort_events.len(), 1);
+        assert_eq!(collection.effort_events[0].effort, "xhigh");
+        // Only the PRIMARY (5h) window is sampled; the weekly window is
+        // deliberately dropped from the LIMITS history.
+        assert_eq!(collection.rate_limit_samples.len(), 1);
+        assert!((collection.rate_limit_samples[0].used_percent - 37.5).abs() < f64::EPSILON);
     }
 
     /// Each `token_count` line carries a (session, timestamp, `line_index`)
