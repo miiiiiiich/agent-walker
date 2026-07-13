@@ -11,9 +11,10 @@
 //!
 //! Steps subdivide their rank's band on a log scale, so progress feels even
 //! within a rank. Higher ranks hold more steps (4 at the top, 1 at the floor),
-//! so the climb gets longer as the air gets thinner. SS has no upper band
-//! edge; its steps extend the band ratio upward, putting Lion near 5B
-//! tokens/day — reachable, but only by the heaviest operators on record.
+//! so the climb gets longer as the air gets thinner. SS has no hard upper
+//! edge; the band is anchored so its final step (Lion) begins at
+//! [`SS_LION_MIN`] — 1B tokens/day, 30B over the 30-day window — and anything
+//! past the extrapolated edge clamps to Lion.
 //!
 //! The exact thresholds live in the one block below, are easy to retune, and
 //! are never surfaced in the UI — only the rank and the title are — so the
@@ -134,6 +135,11 @@ const LADDER: [(Rank, f64, &[&str]); 7] = [
     (Rank::E, 3_000_000.0, &["Firefly", "Butterfly"]),
 ];
 
+/// Tokens/day where the top SS step (Lion) begins — 30B over the 30-day
+/// window. Retuned 2026-07-13: the old band-ratio extrapolation put Lion near
+/// 5B/day (148B monthly), which no real operator could reach.
+const SS_LION_MIN: f64 = 1_000_000_000.0;
+
 /// The floor below the ladder — the unranked animal.
 const FLOOR_ANIMAL: &str = "Ant";
 
@@ -193,12 +199,18 @@ fn unranked(ops: &'static str) -> Codename {
 }
 
 /// Upper edge of the band at `position`. The top band (SS) is open-ended, so
-/// it extends the ladder upward keeping the SS/S ratio per step — with 4 steps
-/// that puts the final boundary (Lion) near 5B tokens/day.
+/// it is anchored to [`SS_LION_MIN`]: the log-uniform step ratio is chosen so
+/// the last step (Lion) begins exactly there, and the ceiling sits one step
+/// above it.
 fn band_ceiling(position: usize) -> f64 {
     if position == 0 {
-        let per_step = LADDER[0].1 / LADDER[1].1;
-        LADDER[0].1 * per_step.powf(LADDER[0].2.len() as f64)
+        let (_, min, animals) = LADDER[0];
+        debug_assert!(
+            animals.len() >= 2,
+            "the SS band needs at least two animals to anchor its step ratio"
+        );
+        let per_step = (SS_LION_MIN / min).powf(1.0 / (animals.len() as f64 - 1.0));
+        SS_LION_MIN * per_step
     } else {
         LADDER[position - 1].1
     }
@@ -307,13 +319,14 @@ mod tests {
     }
 
     #[test]
-    fn ss_extends_the_band_ratio_up_to_lion() {
-        // SS steps extend the SS/S ratio (1.875×) upward:
-        // 750M / ~1.4B / ~2.6B / ~4.9B.
+    fn ss_band_is_anchored_so_lion_begins_at_1b_per_day() {
+        // SS is anchored to SS_LION_MIN (1B/day = 30B per 30-day window):
+        // 750M / ~825M / ~909M / 1B.
         assert_eq!(codename_at(800_000_000).animal, "Orca");
-        assert_eq!(codename_at(1_500_000_000).animal, "Hawk");
-        assert_eq!(codename_at(3_000_000_000).animal, "Puma");
-        let lion = codename_at(5_000_000_000);
+        assert_eq!(codename_at(850_000_000).animal, "Hawk");
+        assert_eq!(codename_at(950_000_000).animal, "Puma");
+        assert_eq!(codename_at(999_000_000).animal, "Puma");
+        let lion = codename_at(1_001_000_000);
         assert_eq!(lion.animal, "Lion");
         assert_eq!(lion.rank, Rank::SS);
         // Past the extrapolated edge the top step holds — Lion is the summit.
