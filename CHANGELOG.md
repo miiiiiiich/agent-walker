@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Codename: retuned the SS band so the top of the ladder is realistically
+  reachable. Ranks below SS are unchanged; nobody moves down.
+
 ## [0.9.0] - 2026-07-08
 
 Three new views of how you drive your agents, all cut on the fixed 30-day
