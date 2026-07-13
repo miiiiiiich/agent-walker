@@ -170,7 +170,7 @@ pub fn for_summary(summary: &Summary) -> Codename {
     // enforce it by direct comparison — the log-position math below can land a
     // value sitting exactly on the anchor one step short through float
     // rounding.
-    let step = if position == 0 && tokens_per_day >= SS_LION_MIN {
+    let step = if rank == Rank::SS && tokens_per_day >= SS_LION_MIN {
         animals.len() - 1
     } else {
         step_index(
