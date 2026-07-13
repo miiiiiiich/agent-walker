@@ -166,12 +166,20 @@ pub fn for_summary(summary: &Summary) -> Codename {
         return unranked(ops);
     };
     let (rank, band_min, animals) = LADDER[position];
-    let step = step_index(
-        tokens_per_day,
-        band_min,
-        band_ceiling(position),
-        animals.len(),
-    );
+    // The SS anchor is a contract ("the last step begins at SS_LION_MIN"), so
+    // enforce it by direct comparison — the log-position math below can land a
+    // value sitting exactly on the anchor one step short through float
+    // rounding.
+    let step = if position == 0 && tokens_per_day >= SS_LION_MIN {
+        animals.len() - 1
+    } else {
+        step_index(
+            tokens_per_day,
+            band_min,
+            band_ceiling(position),
+            animals.len(),
+        )
+    };
     Codename {
         ops,
         animal: animals[step],
@@ -325,8 +333,9 @@ mod tests {
         assert_eq!(codename_at(800_000_000).animal, "Orca");
         assert_eq!(codename_at(850_000_000).animal, "Hawk");
         assert_eq!(codename_at(950_000_000).animal, "Puma");
-        assert_eq!(codename_at(999_000_000).animal, "Puma");
-        let lion = codename_at(1_001_000_000);
+        // The anchor is inclusive: exactly on it is Lion, one below is not.
+        assert_eq!(codename_at(999_999_999).animal, "Puma");
+        let lion = codename_at(1_000_000_000);
         assert_eq!(lion.animal, "Lion");
         assert_eq!(lion.rank, Rank::SS);
         // Past the extrapolated edge the top step holds — Lion is the summit.
