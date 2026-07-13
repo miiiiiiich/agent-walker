@@ -205,6 +205,10 @@ fn unranked(ops: &'static str) -> Codename {
 fn band_ceiling(position: usize) -> f64 {
     if position == 0 {
         let (_, min, animals) = LADDER[0];
+        debug_assert!(
+            animals.len() >= 2,
+            "the SS band needs at least two animals to anchor its step ratio"
+        );
         let per_step = (SS_LION_MIN / min).powf(1.0 / (animals.len() as f64 - 1.0));
         SS_LION_MIN * per_step
     } else {
