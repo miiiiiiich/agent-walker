@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Codename: the SS band is now anchored so its top step (Lion) begins at
+  1B tokens/day — 30B over the 30-day window — instead of extrapolating the
+  SS/S band ratio (which put Lion near an unreachable 5B/day). Steps below
+  SS are unchanged; heavy SS operators may see their animal advance.
+
 ## [0.9.0] - 2026-07-08
 
 Three new views of how you drive your agents, all cut on the fixed 30-day
