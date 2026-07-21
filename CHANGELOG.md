@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Claude: a second model's API call inside one turn — `fallback_message`
-  when the selected model fails mid-turn, `advisor_message` in advisor
-  setups — is logged only inside `usage.iterations` and was silently
-  dropped, losing that call's tokens and attributing the whole turn to the
-  winning model. Iterations beyond the top-level mirror now surface as
-  their own usage events under their own model.
+- Claude: advisor calls (`advisor_message` inside `usage.iterations`) are
+  billed under their own model but absent from the top-level counters, and
+  were silently dropped. They now surface as their own usage events.
+  Failed fallback attempts stay excluded by design — the top level is the
+  turn's billed usage for the serving model, and a failed attempt is not
+  billed.
 
 ## [0.10.1] - 2026-07-21
 
