@@ -79,6 +79,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut current_session_id = fallback_session_id(path);
     let mut current_model = None;
     let mut current_project = None;
+    let mut session_meta_count = 0usize;
+    let mut replay_second: Option<i64> = None;
     let reader = BufReader::new(file);
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -97,20 +99,44 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
         let timestamp = parse_timestamp(value.get("timestamp"));
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            session_meta_count += 1;
+            if session_meta_count == 2 {
+                replay_second = timestamp.map(OffsetDateTime::unix_timestamp);
+            }
             current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
             current_model = session_model(&value).or(current_model);
             current_project =
                 string_path(&value, &["payload", "cwd"]).map(|cwd| project_from_cwd(&cwd));
         }
+        // A fork/spawn child rollout opens with its own session_meta, then the
+        // ancestors' copied session_metas, then the ancestor history replayed
+        // in one write burst — every replayed line stamped at the fork
+        // instant (GH-36). Skip event collection for that burst wholesale:
+        // this works even when the parent rollout itself is outside the scan
+        // (deleted, or past the mtime window), where cross-file dedup has no
+        // original to collapse into. Burst lines that leak past the fork
+        // second are still caught by the content-based keys when the parent
+        // is in the scan. State tracking (session id, model, project) stays
+        // live so post-burst lines parse with the right context.
+        let in_replay_burst = session_meta_count >= 2
+            && match (replay_second, timestamp) {
+                (Some(second), Some(ts)) => ts.unix_timestamp() == second,
+                _ => false,
+            };
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
-            collect_effort_event(
-                &value,
-                timestamp,
-                current_session_id.as_ref(),
-                line_index,
-                &mut events,
-            );
+            if !in_replay_burst {
+                collect_effort_event(
+                    &value,
+                    timestamp,
+                    current_session_id.as_ref(),
+                    line_index,
+                    &mut events,
+                );
+            }
+        }
+        if in_replay_burst {
+            continue;
         }
 
         if let (Some(timestamp), Some(session_id)) = (timestamp, current_session_id.as_ref()) {
@@ -178,18 +204,23 @@ fn collect_usage_event(
     // running `info.total_token_usage` cumulative. Summing one usage event per
     // token_count line therefore yields the session total — do not also add the
     // cumulative field, or every turn would be double-counted.
-    // Dedup key for accidental session-file duplicates (e.g. a copied rollout):
-    // (session, timestamp, line_index) is a stable per-event identifier. A
-    // copied file reproduces all three, so the duplicate is merged away; two
-    // distinct turns within one file differ in line_index (and usually
-    // timestamp), so both survive even if their usage numbers happen to match.
-    // Only keyed when both session_id and timestamp are present; otherwise None
-    // (count every event).
-    let key = match (session_id, timestamp) {
-        (Some(sid), Some(ts)) => Some(format!(
-            "codex:{sid}:{ts}:{line_index}",
-            ts = ts.unix_timestamp_nanos(),
+    // Dedup key: fork/spawn copies parent history into the child rollout with
+    // every copied line's timestamp rewritten to the fork instant and line
+    // positions shifted, so a positional (session, timestamp, line_index) key
+    // counts replayed history again (GH-36). The usage payload is copied
+    // verbatim and the cumulative `total_token_usage` is non-decreasing
+    // between compactions, so (session, last vector, cumulative vector)
+    // identifies one turn's consumption across every file it appears in;
+    // re-emissions of an unchanged state (no new consumption) collapse into
+    // it too. Logs without `total_token_usage` fall back to the positional
+    // key, which still dedupes whole-file copies.
+    let key = match (session_id, total_usage(value)) {
+        (Some(sid), Some(cum)) => Some(format!(
+            "codex-usage:v2:{sid}:{last}:{cum}",
+            last = usage_fingerprint(last_usage),
+            cum = usage_fingerprint(cum),
         )),
+        (Some(sid), None) => positional_key("codex", sid, timestamp, line_index),
         _ => None,
     };
     events.usage_events.push(KeyedUsageEvent {
@@ -211,8 +242,10 @@ fn collect_usage_event(
 /// Rate-limit snapshot riding on a `token_count` event: the plan's primary
 /// (5h) window utilization at that moment. Only the primary window is kept —
 /// the weekly window was deliberately dropped from the LIMITS history (a
-/// 30-day view of a 7-day window nests confusingly). Keyed like usage events
-/// so a copied rollout file can't double-sample a day.
+/// 30-day view of a 7-day window nests confusingly). Keyed on the co-riding
+/// usage state plus the snapshot's own fields, so a fork replay (a verbatim
+/// copy stamped at the fork instant, GH-36) collapses while a genuine
+/// re-notification of the same usage state with a moved window survives.
 fn collect_rate_limit_sample(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -223,21 +256,33 @@ fn collect_rate_limit_sample(
     let Some(timestamp) = timestamp else {
         return;
     };
-    let Some(used_percent) = value
+    let Some(primary) = value
         .get("payload")
         .and_then(|payload| payload.get("rate_limits"))
         .and_then(|limits| limits.get("primary"))
-        .and_then(|primary| primary.get("used_percent"))
-        .and_then(Value::as_f64)
     else {
         return;
     };
-    let key = session_id.map(|sid| {
-        format!(
-            "codex-limit:{sid}:{ts}:{line_index}",
-            ts = timestamp.unix_timestamp_nanos(),
-        )
-    });
+    let Some(used_percent) = primary.get("used_percent").and_then(Value::as_f64) else {
+        return;
+    };
+    let last = value
+        .get("payload")
+        .and_then(|payload| payload.get("info"))
+        .and_then(|info| info.get("last_token_usage"))
+        .and_then(fingerprintable);
+    let key = match (session_id, total_usage(value), last) {
+        (Some(sid), Some(cum), Some(last)) => Some(format!(
+            "codex-limit:v2:{sid}:{last_fp}:{cum_fp}:{percent}:{window}:{resets}",
+            last_fp = usage_fingerprint(last),
+            cum_fp = usage_fingerprint(cum),
+            percent = used_percent.clamp(0.0, 100.0).to_bits(),
+            window = u64_field(primary, "window_minutes"),
+            resets = u64_field(primary, "resets_at"),
+        )),
+        (Some(sid), _, _) => positional_key("codex-limit", sid, Some(timestamp), line_index),
+        _ => None,
+    };
     events.rate_limit_samples.push(KeyedRateLimitSample {
         key,
         event: RateLimitSample {
@@ -248,6 +293,9 @@ fn collect_rate_limit_sample(
 }
 
 /// Reasoning-effort setting for one turn (`turn_context.payload.effort`).
+/// Keyed by `turn_id`, which fork replays copy verbatim — the replayed
+/// `turn_context` collapses with its original despite the rewritten timestamp
+/// (GH-36). Logs predating `turn_id` fall back to the positional key.
 fn collect_effort_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -258,11 +306,9 @@ fn collect_effort_event(
     let Some(effort) = string_path(value, &["payload", "effort"]) else {
         return;
     };
-    let key = match (session_id, timestamp) {
-        (Some(sid), Some(ts)) => Some(format!(
-            "codex-effort:{sid}:{ts}:{line_index}",
-            ts = ts.unix_timestamp_nanos(),
-        )),
+    let key = match (session_id, string_path(value, &["payload", "turn_id"])) {
+        (Some(sid), Some(turn_id)) => Some(format!("codex-effort:v2:{sid}:{turn_id}")),
+        (Some(sid), None) => positional_key("codex-effort", sid, timestamp, line_index),
         _ => None,
     };
     events.effort_events.push(KeyedEffortEvent {
@@ -459,6 +505,63 @@ fn basename(command: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_owned())
 }
 
+/// The running cumulative usage object riding on a `token_count` event,
+/// gated on being fingerprintable.
+fn total_usage(value: &Value) -> Option<&Value> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("info"))
+        .and_then(|info| info.get("total_token_usage"))
+        .and_then(fingerprintable)
+}
+
+/// A usage object valid enough to key on: `total_tokens` parses as an
+/// integer. Malformed payloads (`null`, `{}`, a string) would fingerprint as
+/// all-zero and falsely collide distinct events — they must take the
+/// positional fallback instead.
+fn fingerprintable(usage: &Value) -> Option<&Value> {
+    usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .is_some()
+        .then_some(usage)
+}
+
+/// Order-fixed fingerprint of a usage object's raw counters. Fields missing
+/// from a log read as 0, keeping the fingerprint stable across schema growth
+/// (`cache_write_input_tokens` is absent from current logs but present in the
+/// upstream schema).
+fn usage_fingerprint(value: &Value) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        u64_field(value, "input_tokens"),
+        u64_field(value, "cached_input_tokens"),
+        u64_field(value, "cache_write_input_tokens"),
+        u64_field(value, "output_tokens"),
+        u64_field(value, "reasoning_output_tokens"),
+        u64_field(value, "total_tokens"),
+    )
+}
+
+/// Positional fallback key for events that predate semantic identifiers.
+/// Stable for whole-file copies, but NOT for fork replays — those rewrite
+/// timestamps and shift line positions, which is why keyed paths prefer
+/// content-based keys and reach for this only when the content key can't be
+/// built.
+fn positional_key(
+    prefix: &str,
+    session_id: &str,
+    timestamp: Option<OffsetDateTime>,
+    line_index: usize,
+) -> Option<String> {
+    timestamp.map(|ts| {
+        format!(
+            "{prefix}:{session_id}:{ts}:{line_index}",
+            ts = ts.unix_timestamp_nanos(),
+        )
+    })
+}
+
 fn parse_token_usage(value: &Value) -> Option<TokenUsage> {
     let input_tokens = u64_field(value, "input_tokens");
     let cached_input_tokens = u64_field(value, "cached_input_tokens");
@@ -609,12 +712,12 @@ mod tests {
         assert!((collection.rate_limit_samples[0].used_percent - 37.5).abs() < f64::EPSILON);
     }
 
-    /// Each `token_count` line carries a (session, timestamp, `line_index`)
-    /// dedup key. A copied session file reproduces all three, so the duplicate
-    /// file is merged away — but two distinct turns inside one file differ in
-    /// `line_index` and both survive, even though their usage numbers are
-    /// identical here. So the two-turn file copied twice yields 2 events (not 4,
-    /// and not 1).
+    /// Positional-fallback path (fixtures lack `total_token_usage`): the key
+    /// is (session, timestamp, `line_index`). A copied session file reproduces
+    /// all three, so the duplicate file is merged away — but two distinct
+    /// turns inside one file differ in `line_index` and both survive, even
+    /// though their usage numbers are identical here. So the two-turn file
+    /// copied twice yields 2 events (not 4, and not 1).
     #[test]
     fn deduplicates_copies_but_keeps_distinct_turns() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -643,6 +746,374 @@ mod tests {
             .map(|event| event.usage.token_volume())
             .sum();
         assert_eq!(total, 220);
+    }
+
+    /// Parent rollout: two turns with cumulative totals, rate limits, and a
+    /// `turn_id`-carrying `turn_context` — the semantic-key path (GH-36).
+    fn fork_parent_lines() -> &'static str {
+        concat!(
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"p1","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1750000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:10Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
+            "\n"
+        )
+    }
+
+    /// Forked child rollout, mirroring the real fork shape: the child's own
+    /// `session_meta`, the parent's copied `session_meta`, the parent history
+    /// replayed verbatim with every timestamp rewritten to the fork instant,
+    /// then the child's own new turn.
+    fn fork_child_lines() -> &'static str {
+        concat!(
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"session_meta","payload":{"id":"c1","forked_from_id":"p1","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"session_meta","payload":{"id":"p1","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1750000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:05Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","turn_id":"t9"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":90,"cached_input_tokens":10,"output_tokens":40,"total_tokens":130},"total_token_usage":{"input_tokens":310,"cached_input_tokens":50,"output_tokens":70,"total_tokens":380}},"rate_limits":{"primary":{"used_percent":15.0,"window_minutes":300,"resets_at":1750018000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:08Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":222}}"#,
+            "\n"
+        )
+    }
+
+    fn assert_fork_replay_counted_once(collection: &Collection) {
+        // 2 parent turns + 1 child turn; the replayed copies collapse.
+        assert_eq!(collection.usage_events.len(), 3);
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 380); // 110 + 140 + 130
+        assert_eq!(collection.rate_limit_samples.len(), 3);
+        assert_eq!(collection.effort_events.len(), 2);
+        // Replayed task_complete lines are skipped with the burst, so the
+        // (unkeyed) duration events cannot double-count.
+        assert_eq!(collection.duration_events.len(), 2);
+
+        // Replayed events keep the parent's ORIGINAL timestamps — day/hour
+        // attribution must not shift to the fork instant, whatever the file
+        // scan order.
+        let original = OffsetDateTime::parse("2026-06-01T00:00:03Z", &Rfc3339)
+            .expect("test timestamp should parse");
+        let first_turn = collection
+            .usage_events
+            .iter()
+            .find(|event| event.usage.token_volume() == 110)
+            .expect("first parent turn should survive");
+        assert_eq!(first_turn.timestamp, Some(original));
+        let first_sample = collection
+            .rate_limit_samples
+            .iter()
+            .find(|sample| (sample.used_percent - 10.0).abs() < f64::EPSILON)
+            .expect("first rate-limit sample should survive");
+        assert_eq!(first_sample.timestamp, original);
+        let original_turn_context = OffsetDateTime::parse("2026-06-01T00:00:01Z", &Rfc3339)
+            .expect("test timestamp should parse");
+        let first_effort = collection
+            .effort_events
+            .iter()
+            .find(|event| event.effort == "high")
+            .expect("parent turn's effort should survive");
+        assert_eq!(first_effort.timestamp, Some(original_turn_context));
+    }
+
+    /// Fork/spawn copies parent history into the child rollout with rewritten
+    /// timestamps (GH-36). Content-based keys must count the replayed turns
+    /// once while keeping the child's own new turn.
+    #[test]
+    fn fork_replay_of_parent_history_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-a-parent.jsonl"), fork_parent_lines())
+            .expect("fixture should be written");
+        fs::write(day.join("rollout-b-child.jsonl"), fork_child_lines())
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_fork_replay_counted_once(&collection);
+    }
+
+    /// Same fixture with the CHILD sorting first: path order must not decide
+    /// which timestamp survives (`archived_sessions` sorts before `sessions`
+    /// wholesale, so originals are not guaranteed to be scanned first).
+    #[test]
+    fn fork_replay_keeps_original_timestamps_when_child_scans_first() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-a-child.jsonl"), fork_child_lines())
+            .expect("fixture should be written");
+        fs::write(day.join("rollout-b-parent.jsonl"), fork_parent_lines())
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_fork_replay_counted_once(&collection);
+    }
+
+    /// The replay burst is skipped structurally, so it contributes nothing
+    /// even when the parent rollout is NOT in the scan (deleted, or outside
+    /// the mtime window) — the case cross-file dedup alone cannot cover.
+    #[test]
+    fn fork_replay_skipped_without_parent_in_scan() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-child.jsonl"), fork_child_lines())
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // Only the child's own turn survives; the replayed parent history is
+        // dropped instead of being counted at the fork instant.
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 130);
+        assert_eq!(collection.rate_limit_samples.len(), 1);
+        assert_eq!(collection.effort_events.len(), 1);
+        assert_eq!(collection.effort_events[0].effort, "xhigh");
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 222);
+    }
+
+    /// A re-emitted `token_count` whose cumulative did not advance reports no
+    /// new consumption — summing it again would overcount, so it collapses.
+    #[test]
+    fn re_emitted_token_count_with_unchanged_cumulative_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
+    }
+
+    /// Two genuine turns with identical per-turn usage still differ in the
+    /// cumulative, so both survive the semantic key.
+    #[test]
+    fn same_last_usage_with_advanced_cumulative_both_survive() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":20,"total_tokens":220}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 220);
+    }
+
+    /// Effort events are keyed by `turn_id`: distinct turns with the same
+    /// effort both survive, while a replayed `turn_context` (same `turn_id`,
+    /// rewritten timestamp) collapses with its original.
+    #[test]
+    fn effort_dedup_by_turn_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:02Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:59Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// A malformed cumulative (`{}` / `null`) must not enter the semantic-key
+    /// path — it would fingerprint as all-zero and falsely collide distinct
+    /// turns. Both events fall back to the positional key and survive.
+    #[test]
+    fn malformed_cumulative_falls_back_to_positional_key() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":null}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // Identical last vectors, but the broken cumulatives must not collide
+        // them into one all-zero fingerprint.
+        assert_eq!(collection.usage_events.len(), 2);
+    }
+
+    /// Same usage state re-emitted with a moved rate-limit window: the
+    /// snapshot's own fields are part of the key, so both samples survive
+    /// while the usage event itself collapses.
+    #[test]
+    fn rate_limit_renotification_with_moved_window_survives() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300,"resets_at":1750018000}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.rate_limit_samples.len(), 2);
+    }
+
+    /// Re-emission across a turn boundary (`turn_context` advances between the
+    /// copies) still collapses — the reason `turn_id` is deliberately NOT part
+    /// of the usage key.
+    #[test]
+    fn re_emission_across_turn_boundary_still_collapses() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// Two `turn_context`s sharing one timestamp but carrying distinct
+    /// `turn_id`s are distinct turns — the key must separate them where the
+    /// old positional key relied on the timestamp differing.
+    #[test]
+    fn effort_same_timestamp_distinct_turn_ids_both_survive() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// Every counter in the fingerprint is discriminating — two events
+    /// differing only in `cache_write_input_tokens` stay distinct.
+    #[test]
+    fn cache_write_difference_yields_distinct_keys() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":5,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
     }
 
     /// The Codex desktop app *moves* a session's JSONL from `sessions/` to the

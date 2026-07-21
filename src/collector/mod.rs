@@ -5,7 +5,7 @@ pub mod codex;
 pub mod cursor;
 pub mod opencode;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -20,8 +20,10 @@ use crate::model::{
     ToolEvent, UsageEvent,
 };
 
-/// Bump whenever the serialized layout of a cached `FileEvents` changes —
-/// stale caches would otherwise deserialize into garbage.
+/// Bump whenever the serialized layout OR the parsing semantics (event
+/// extraction, dedup keys) of a cached `FileEvents` change — stale caches
+/// would otherwise deserialize into garbage, or replay outdated keys that
+/// defeat a dedup fix.
 /// - 7: session-touch compression moved from UTC to local-day bucketing (cached
 ///   touches depend on the local offset; a cache is invalidated by EITHER a
 ///   version bump OR a changed `local_offset`, recorded in
@@ -29,9 +31,11 @@ use crate::model::{
 /// - 8: `UsageEvent` gained `reported_cost_usd`, changing its bincode layout.
 /// - 9: v0.9 events — `UsageEvent.attribution_skill`, plus rate-limit /
 ///   effort / mode event lists on `FileEvents`.
+/// - 10: Codex dedup keys became content-based (fork-replay dedup, GH-36) —
+///   same layout, but cached events carry the old positional keys.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 9;
+const CACHE_VERSION: u32 = 10;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo
@@ -453,16 +457,54 @@ fn fill_usage_metadata(target: &mut UsageEvent, source: &UsageEvent) {
     }
 }
 
+/// Earlier of two optional timestamps; a lone `Some` beats `None`. Used on
+/// keyed duplicates so the original observation's time wins over a replayed
+/// copy stamped at the fork instant, whatever the file scan order.
+fn older_timestamp(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Option<OffsetDateTime> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// Insert one keyed event into `sink`: unkeyed events pass through, the first
+/// occurrence of a key is kept, and later duplicates fold into it via `merge`
+/// (metadata fill, OR flags, earliest timestamp).
+fn dedupe_into<E>(
+    sink: &mut Vec<E>,
+    seen: &mut HashMap<String, usize>,
+    key: Option<String>,
+    event: E,
+    merge: impl FnOnce(&mut E, E),
+) {
+    match key {
+        Some(key) => {
+            if let Some(index) = seen.get(&key).copied() {
+                merge(&mut sink[index], event);
+            } else {
+                seen.insert(key, sink.len());
+                sink.push(event);
+            }
+        }
+        None => sink.push(event),
+    }
+}
+
 /// Merge ordered per-file events into the collection, applying cross-file
 /// deduplication. Keyed usage duplicates keep the variant with the larger
 /// token volume but fill missing metadata from the loser; keyed tool /
 /// rate-limit / effort duplicates are dropped; keyed mode duplicates merge
-/// their flags with OR.
+/// their flags with OR. Every keyed duplicate keeps the EARLIEST observed
+/// timestamp: a fork replay is stamped at the fork instant, and file scan
+/// order doesn't put originals first (`archived_sessions` sorts before
+/// `sessions` wholesale), so first-seen-wins would let a replay shift an
+/// event's day attribution.
 pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<FileEvents>)>) {
     let mut seen_usage: HashMap<String, usize> = HashMap::new();
-    let mut seen_tools: HashSet<String> = HashSet::new();
-    let mut seen_limits: HashSet<String> = HashSet::new();
-    let mut seen_efforts: HashSet<String> = HashSet::new();
+    let mut seen_tools: HashMap<String, usize> = HashMap::new();
+    let mut seen_limits: HashMap<String, usize> = HashMap::new();
+    let mut seen_efforts: HashMap<String, usize> = HashMap::new();
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
 
     for (path, events) in per_file {
@@ -478,76 +520,73 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
         collection.duration_events.extend(events.duration_events);
 
         for keyed in events.usage_events {
-            match keyed.key {
-                Some(key) => {
-                    if let Some(index) = seen_usage.get(&key).copied() {
-                        let existing = &mut collection.usage_events[index];
-                        if keyed.event.usage.token_volume() > existing.usage.token_volume() {
-                            let mut incoming = keyed.event;
-                            fill_usage_metadata(&mut incoming, existing);
-                            *existing = incoming;
-                        } else {
-                            fill_usage_metadata(existing, &keyed.event);
-                        }
+            dedupe_into(
+                &mut collection.usage_events,
+                &mut seen_usage,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    let timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                    if incoming.usage.token_volume() > existing.usage.token_volume() {
+                        let mut incoming = incoming;
+                        fill_usage_metadata(&mut incoming, existing);
+                        *existing = incoming;
                     } else {
-                        seen_usage.insert(key, collection.usage_events.len());
-                        collection.usage_events.push(keyed.event);
+                        fill_usage_metadata(existing, &incoming);
                     }
-                }
-                None => collection.usage_events.push(keyed.event),
-            }
+                    existing.timestamp = timestamp;
+                },
+            );
         }
 
         for keyed in events.tool_events {
-            match keyed.key {
-                Some(key) => {
-                    if seen_tools.insert(key) {
-                        collection.tool_events.push(keyed.event);
-                    }
-                }
-                None => collection.tool_events.push(keyed.event),
-            }
+            dedupe_into(
+                &mut collection.tool_events,
+                &mut seen_tools,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                },
+            );
         }
 
         for keyed in events.rate_limit_samples {
-            match keyed.key {
-                Some(key) => {
-                    if seen_limits.insert(key) {
-                        collection.rate_limit_samples.push(keyed.event);
-                    }
-                }
-                None => collection.rate_limit_samples.push(keyed.event),
-            }
+            dedupe_into(
+                &mut collection.rate_limit_samples,
+                &mut seen_limits,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = existing.timestamp.min(incoming.timestamp);
+                },
+            );
         }
 
         for keyed in events.effort_events {
-            match keyed.key {
-                Some(key) => {
-                    if seen_efforts.insert(key) {
-                        collection.effort_events.push(keyed.event);
-                    }
-                }
-                None => collection.effort_events.push(keyed.event),
-            }
+            dedupe_into(
+                &mut collection.effort_events,
+                &mut seen_efforts,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                },
+            );
         }
 
         for keyed in events.mode_events {
-            match keyed.key {
-                Some(key) => {
-                    if let Some(index) = seen_modes.get(&key).copied() {
-                        let existing = &mut collection.mode_events[index];
-                        existing.has_thinking |= keyed.event.has_thinking;
-                        existing.fast |= keyed.event.fast;
-                        if existing.timestamp.is_none() {
-                            existing.timestamp = keyed.event.timestamp;
-                        }
-                    } else {
-                        seen_modes.insert(key, collection.mode_events.len());
-                        collection.mode_events.push(keyed.event);
-                    }
-                }
-                None => collection.mode_events.push(keyed.event),
-            }
+            dedupe_into(
+                &mut collection.mode_events,
+                &mut seen_modes,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.has_thinking |= incoming.has_thinking;
+                    existing.fast |= incoming.fast;
+                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                },
+            );
         }
     }
 
@@ -641,6 +680,66 @@ mod tests {
                 Some("code/app".to_owned()),
             );
         }
+    }
+
+    /// A keyed usage duplicate (Claude streaming fragments of one message,
+    /// or a Codex fork replay) keeps the larger token volume, the EARLIEST
+    /// timestamp, and metadata from both sides — whichever file order they
+    /// arrive in.
+    #[test]
+    fn keyed_usage_merge_keeps_larger_volume_and_earliest_timestamp() {
+        use crate::model::{Provider, TokenUsage};
+
+        let early = OffsetDateTime::from_unix_timestamp(1_000).expect("valid timestamp");
+        let late = OffsetDateTime::from_unix_timestamp(2_000).expect("valid timestamp");
+        let event =
+            |timestamp, input_tokens, model: Option<&str>, project: Option<&str>| KeyedUsageEvent {
+                key: Some("message:m1".to_owned()),
+                event: UsageEvent {
+                    timestamp: Some(timestamp),
+                    session_id: Some("s1".to_owned()),
+                    model: model.map(ToOwned::to_owned),
+                    source_kind: crate::model::SourceKind::Main,
+                    attribution_agent: None,
+                    attribution_skill: None,
+                    project: project.map(ToOwned::to_owned),
+                    usage: TokenUsage {
+                        input_tokens,
+                        ..TokenUsage::default()
+                    },
+                    reported_cost_usd: None,
+                },
+            };
+        // Small fragment first with the early timestamp and a project; the
+        // larger fragment arrives later with the model but no project.
+        let small_early = event(early, 10, None, Some("proj"));
+        let large_late = event(late, 20, Some("claude"), None);
+
+        let mut collection = Collection::new(Provider::Claude, PathBuf::new());
+        let per_file = vec![
+            (
+                PathBuf::from("a.jsonl"),
+                Some(FileEvents {
+                    usage_events: vec![small_early],
+                    ..FileEvents::default()
+                }),
+            ),
+            (
+                PathBuf::from("b.jsonl"),
+                Some(FileEvents {
+                    usage_events: vec![large_late],
+                    ..FileEvents::default()
+                }),
+            ),
+        ];
+        merge_into(&mut collection, per_file);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        let merged = &collection.usage_events[0];
+        assert_eq!(merged.usage.input_tokens, 20); // larger volume wins
+        assert_eq!(merged.timestamp, Some(early)); // earliest timestamp wins
+        assert_eq!(merged.model.as_deref(), Some("claude")); // metadata from both
+        assert_eq!(merged.project.as_deref(), Some("proj"));
     }
 
     #[test]
