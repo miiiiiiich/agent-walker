@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Codex fork/spawn child rollouts replay the parent session's history with
+  timestamps rewritten to the fork instant, and the positional dedup key
+  (session, timestamp, line index) counted the replayed events again —
+  inflating token totals, LIMITS samples, and MODES effort mix ([#36]).
+  Usage, rate-limit, and effort events are now deduplicated by content
+  (usage vectors + running cumulative; `turn_id` for effort), re-emitted
+  `token_count` events whose cumulative did not advance collapse too, and
+  keyed duplicates keep the earliest observed timestamp so a replay can't
+  shift an event's day attribution regardless of file scan order. Known
+  remainder, scoped as follow-up: session touches and task durations from
+  replayed lines are still counted.
+
 ## [0.10.0] - 2026-07-13
 
 ### Changed
@@ -262,6 +278,8 @@ First public release with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.0...HEAD
 [0.10.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.0
 [0.9.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.9.0
 [0.8.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.8.0
