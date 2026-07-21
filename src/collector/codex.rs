@@ -79,6 +79,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut current_session_id = fallback_session_id(path);
     let mut current_model = None;
     let mut current_project = None;
+    let mut session_meta_count = 0usize;
+    let mut replay_second: Option<i64> = None;
     let reader = BufReader::new(file);
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -97,20 +99,44 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
         let timestamp = parse_timestamp(value.get("timestamp"));
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            session_meta_count += 1;
+            if session_meta_count == 2 {
+                replay_second = timestamp.map(OffsetDateTime::unix_timestamp);
+            }
             current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
             current_model = session_model(&value).or(current_model);
             current_project =
                 string_path(&value, &["payload", "cwd"]).map(|cwd| project_from_cwd(&cwd));
         }
+        // A fork/spawn child rollout opens with its own session_meta, then the
+        // ancestors' copied session_metas, then the ancestor history replayed
+        // in one write burst — every replayed line stamped at the fork
+        // instant (GH-36). Skip event collection for that burst wholesale:
+        // this works even when the parent rollout itself is outside the scan
+        // (deleted, or past the mtime window), where cross-file dedup has no
+        // original to collapse into. Burst lines that leak past the fork
+        // second are still caught by the content-based keys when the parent
+        // is in the scan. State tracking (session id, model, project) stays
+        // live so post-burst lines parse with the right context.
+        let in_replay_burst = session_meta_count >= 2
+            && match (replay_second, timestamp) {
+                (Some(second), Some(ts)) => ts.unix_timestamp() == second,
+                _ => false,
+            };
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
-            collect_effort_event(
-                &value,
-                timestamp,
-                current_session_id.as_ref(),
-                line_index,
-                &mut events,
-            );
+            if !in_replay_burst {
+                collect_effort_event(
+                    &value,
+                    timestamp,
+                    current_session_id.as_ref(),
+                    line_index,
+                    &mut events,
+                );
+            }
+        }
+        if in_replay_burst {
+            continue;
         }
 
         if let (Some(timestamp), Some(session_id)) = (timestamp, current_session_id.as_ref()) {
@@ -733,6 +759,8 @@ mod tests {
             r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:10Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
             "\n"
         )
     }
@@ -753,9 +781,13 @@ mod tests {
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
+            "\n",
             r#"{"timestamp":"2026-06-01T01:00:05Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","turn_id":"t9"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":90,"cached_input_tokens":10,"output_tokens":40,"total_tokens":130},"total_token_usage":{"input_tokens":310,"cached_input_tokens":50,"output_tokens":70,"total_tokens":380}},"rate_limits":{"primary":{"used_percent":15.0,"window_minutes":300,"resets_at":1750018000}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:08Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":222}}"#,
             "\n"
         )
     }
@@ -771,6 +803,9 @@ mod tests {
         assert_eq!(total, 380); // 110 + 140 + 130
         assert_eq!(collection.rate_limit_samples.len(), 3);
         assert_eq!(collection.effort_events.len(), 2);
+        // Replayed task_complete lines are skipped with the burst, so the
+        // (unkeyed) duration events cannot double-count.
+        assert_eq!(collection.duration_events.len(), 2);
 
         // Replayed events keep the parent's ORIGINAL timestamps — day/hour
         // attribution must not shift to the fork instant, whatever the file
@@ -833,6 +868,30 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_fork_replay_counted_once(&collection);
+    }
+
+    /// The replay burst is skipped structurally, so it contributes nothing
+    /// even when the parent rollout is NOT in the scan (deleted, or outside
+    /// the mtime window) — the case cross-file dedup alone cannot cover.
+    #[test]
+    fn fork_replay_skipped_without_parent_in_scan() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-child.jsonl"), fork_child_lines())
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // Only the child's own turn survives; the replayed parent history is
+        // dropped instead of being counted at the fork instant.
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 130);
+        assert_eq!(collection.rate_limit_samples.len(), 1);
+        assert_eq!(collection.effort_events.len(), 1);
+        assert_eq!(collection.effort_events[0].effort, "xhigh");
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 222);
     }
 
     /// A re-emitted `token_count` whose cumulative did not advance reports no

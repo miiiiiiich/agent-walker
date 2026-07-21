@@ -17,10 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (usage vectors + running cumulative; `turn_id` for effort), re-emitted
   `token_count` events whose cumulative did not advance collapse too, and
   keyed duplicates keep the earliest observed timestamp, so scan order
-  can't decide attribution when both the original and the replay are
-  scanned. Known remainder, scoped as follow-up: session touches and task
-  durations from replayed lines are still counted, and a replay whose
-  original falls outside the scan window keeps the fork-instant timestamp.
+  can't decide attribution. Fork-shaped rollouts (second `session_meta`)
+  additionally skip the replay burst at the fork instant wholesale — so
+  replayed history contributes nothing (tokens, rate-limit samples,
+  efforts, durations, session touches) even when the parent rollout is
+  outside the scan window, and Desktop thread branches without a
+  `thread_spawn` marker are covered too.
 
 ## [0.10.0] - 2026-07-13
 
