@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Claude: a second model's API call inside one turn — `fallback_message`
+  when the selected model fails mid-turn, `advisor_message` in advisor
+  setups — is logged only inside `usage.iterations` and was silently
+  dropped, losing that call's tokens and attributing the whole turn to the
+  winning model. Iterations beyond the top-level mirror now surface as
+  their own usage events under their own model.
+
 ## [0.10.1] - 2026-07-21
 
 ### Fixed
@@ -282,6 +293,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...HEAD
 [0.10.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.0
 [0.9.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.9.0

@@ -264,22 +264,72 @@ fn parse_line(
 
     collect_mode_event(value, message, timestamp, events);
 
-    if let Some(usage) = parse_usage(message.get("usage").or_else(|| value.get("usage"))) {
-        let model = string_field(message, "model").or_else(|| string_field(value, "model"));
+    let usage_value = message.get("usage").or_else(|| value.get("usage"));
+    let message_id = string_field(message, "id");
+    let top_model = string_field(message, "model").or_else(|| string_field(value, "model"));
+    let top_usage = parse_usage(usage_value);
+    if let Some(usage) = top_usage.clone() {
         events.usage_events.push(KeyedUsageEvent {
-            key: string_field(message, "id").map(|message_id| format!("message:{message_id}")),
+            key: message_id.as_ref().map(|id| format!("message:{id}")),
             event: UsageEvent {
                 timestamp,
                 session_id: session_id.clone(),
-                model,
+                model: top_model.clone(),
                 source_kind: event_source_kind,
                 attribution_agent: attribution_agent.clone(),
-                attribution_skill,
+                attribution_skill: attribution_skill.clone(),
                 project: project.map(ToOwned::to_owned),
                 usage,
                 reported_cost_usd: None,
             },
         });
+    }
+
+    // A second model's API call — `fallback_message` when the selected model
+    // fails mid-turn, `advisor_message` in advisor setups — is logged ONLY
+    // inside `usage.iterations` (added to the log schema 2026-04); the top
+    // level carries the winning call alone. Skipping the array silently drops
+    // the other model's real consumption and attributes the whole turn to the
+    // winner. Exactly one iteration mirrors the top-level numbers (the winning
+    // call itself, its `model` sometimes omitted): skip that single mirror and
+    // emit the rest as their own events, keyed per iteration index so
+    // streaming duplicates of the message still dedupe.
+    if let Some(iterations) = usage_value
+        .and_then(|usage| usage.get("iterations"))
+        .and_then(Value::as_array)
+    {
+        let mut mirror_skipped = false;
+        for (index, iteration) in iterations.iter().enumerate() {
+            let Some(usage) = parse_usage(Some(iteration)) else {
+                continue;
+            };
+            let model = string_field(iteration, "model");
+            let is_mirror = !mirror_skipped
+                && top_usage
+                    .as_ref()
+                    .is_some_and(|top| same_call_counters(top, &usage))
+                && (model.is_none() || model == top_model);
+            if is_mirror {
+                mirror_skipped = true;
+                continue;
+            }
+            events.usage_events.push(KeyedUsageEvent {
+                key: message_id
+                    .as_ref()
+                    .map(|id| format!("message:{id}:iter:{index}")),
+                event: UsageEvent {
+                    timestamp,
+                    session_id: session_id.clone(),
+                    model: model.or_else(|| top_model.clone()),
+                    source_kind: event_source_kind,
+                    attribution_agent: attribution_agent.clone(),
+                    attribution_skill: attribution_skill.clone(),
+                    project: project.map(ToOwned::to_owned),
+                    usage,
+                    reported_cost_usd: None,
+                },
+            });
+        }
     }
 
     collect_tool_events(
@@ -370,6 +420,17 @@ fn collect_tool_events(
             },
         });
     }
+}
+
+/// Same API call? Compared on the four externally-billed counters only — the
+/// top-level usage additionally carries `server_tool_use` (and may differ in
+/// the ephemeral split), which its mirror iteration omits, so full-struct
+/// equality would miss the mirror and double-count every message.
+fn same_call_counters(a: &TokenUsage, b: &TokenUsage) -> bool {
+    a.input_tokens == b.input_tokens
+        && a.output_tokens == b.output_tokens
+        && a.cache_creation_input_tokens == b.cache_creation_input_tokens
+        && a.cache_read_input_tokens == b.cache_read_input_tokens
 }
 
 fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
@@ -491,6 +552,59 @@ mod tests {
             collection.tool_events[0].subagent_type.as_deref(),
             Some("Explore")
         );
+    }
+
+    /// A model-fallback turn logs the failed call ONLY inside
+    /// `usage.iterations` (the top level carries the winning call): the extra
+    /// iteration must surface as its own usage event under its own model,
+    /// while the mirror of the top-level call must not double-count. A
+    /// streamed duplicate of the message dedupes per iteration index.
+    #[test]
+    fn fallback_iteration_usage_is_counted_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let line = r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":2156,"cache_creation_input_tokens":0,"cache_read_input_tokens":313782,"iterations":[{"type":"message","model":"claude-fable-5","input_tokens":2,"output_tokens":601,"cache_creation_input_tokens":991,"cache_read_input_tokens":495675,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":991}},{"type":"fallback_message","model":"claude-opus-4-8","input_tokens":2,"output_tokens":2156,"cache_creation_input_tokens":0,"cache_read_input_tokens":313782}]},"content":[{"type":"text","text":"hi"}]}}"#;
+        // The same message streamed twice — keyed dedup must hold per event.
+        fs::write(
+            temp.path().join("session.jsonl"),
+            format!("{line}\n{line}\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // Top-level (winning) call + the failed fable-5 attempt; the
+        // fallback_message iteration mirrors the top level and is skipped.
+        assert_eq!(collection.usage_events.len(), 2);
+        let top = collection
+            .usage_events
+            .iter()
+            .find(|event| event.model.as_deref() == Some("claude-opus-4-8"))
+            .expect("winning call should be counted");
+        assert_eq!(top.usage.token_volume(), 2 + 2156 + 313_782);
+        let attempt = collection
+            .usage_events
+            .iter()
+            .find(|event| event.model.as_deref() == Some("claude-fable-5"))
+            .expect("failed attempt should be counted");
+        assert_eq!(attempt.usage.token_volume(), 2 + 601 + 991 + 495_675);
+        assert_eq!(attempt.usage.cache_creation_ephemeral_1h_input_tokens, 991);
+    }
+
+    /// The ordinary shape — one iteration mirroring the top-level numbers
+    /// with its `model` omitted — must not create a second event.
+    #[test]
+    fn single_mirror_iteration_adds_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"iterations":[{"type":"message","input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}]},"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 63);
     }
 
     #[test]

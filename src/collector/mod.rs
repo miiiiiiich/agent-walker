@@ -33,9 +33,11 @@ use crate::model::{
 ///   effort / mode event lists on `FileEvents`.
 /// - 10: Codex dedup keys became content-based (fork-replay dedup, GH-36) —
 ///   same layout, but cached events carry the old positional keys.
+/// - 11: Claude `usage.iterations` parsing (fallback/advisor calls) — cached
+///   `FileEvents` lack the iteration events.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 10;
+const CACHE_VERSION: u32 = 11;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo
