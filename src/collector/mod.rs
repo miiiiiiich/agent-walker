@@ -682,6 +682,66 @@ mod tests {
         }
     }
 
+    /// A keyed usage duplicate (Claude streaming fragments of one message,
+    /// or a Codex fork replay) keeps the larger token volume, the EARLIEST
+    /// timestamp, and metadata from both sides — whichever file order they
+    /// arrive in.
+    #[test]
+    fn keyed_usage_merge_keeps_larger_volume_and_earliest_timestamp() {
+        use crate::model::{Provider, TokenUsage};
+
+        let early = OffsetDateTime::from_unix_timestamp(1_000).expect("valid timestamp");
+        let late = OffsetDateTime::from_unix_timestamp(2_000).expect("valid timestamp");
+        let event =
+            |timestamp, input_tokens, model: Option<&str>, project: Option<&str>| KeyedUsageEvent {
+                key: Some("message:m1".to_owned()),
+                event: UsageEvent {
+                    timestamp: Some(timestamp),
+                    session_id: Some("s1".to_owned()),
+                    model: model.map(ToOwned::to_owned),
+                    source_kind: crate::model::SourceKind::Main,
+                    attribution_agent: None,
+                    attribution_skill: None,
+                    project: project.map(ToOwned::to_owned),
+                    usage: TokenUsage {
+                        input_tokens,
+                        ..TokenUsage::default()
+                    },
+                    reported_cost_usd: None,
+                },
+            };
+        // Small fragment first with the early timestamp and a project; the
+        // larger fragment arrives later with the model but no project.
+        let small_early = event(early, 10, None, Some("proj"));
+        let large_late = event(late, 20, Some("claude"), None);
+
+        let mut collection = Collection::new(Provider::Claude, PathBuf::new());
+        let per_file = vec![
+            (
+                PathBuf::from("a.jsonl"),
+                Some(FileEvents {
+                    usage_events: vec![small_early],
+                    ..FileEvents::default()
+                }),
+            ),
+            (
+                PathBuf::from("b.jsonl"),
+                Some(FileEvents {
+                    usage_events: vec![large_late],
+                    ..FileEvents::default()
+                }),
+            ),
+        ];
+        merge_into(&mut collection, per_file);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        let merged = &collection.usage_events[0];
+        assert_eq!(merged.usage.input_tokens, 20); // larger volume wins
+        assert_eq!(merged.timestamp, Some(early)); // earliest timestamp wins
+        assert_eq!(merged.model.as_deref(), Some("claude")); // metadata from both
+        assert_eq!(merged.project.as_deref(), Some("proj"));
+    }
+
     #[test]
     fn cache_invalidated_on_offset_or_version_change() {
         let jst = 9 * 3600; // +09:00 in seconds

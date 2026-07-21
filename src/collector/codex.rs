@@ -243,13 +243,14 @@ fn collect_rate_limit_sample(
     let last = value
         .get("payload")
         .and_then(|payload| payload.get("info"))
-        .and_then(|info| info.get("last_token_usage"));
+        .and_then(|info| info.get("last_token_usage"))
+        .and_then(fingerprintable);
     let key = match (session_id, total_usage(value), last) {
         (Some(sid), Some(cum), Some(last)) => Some(format!(
             "codex-limit:v2:{sid}:{last_fp}:{cum_fp}:{percent}:{window}:{resets}",
             last_fp = usage_fingerprint(last),
             cum_fp = usage_fingerprint(cum),
-            percent = used_percent.to_bits(),
+            percent = used_percent.clamp(0.0, 100.0).to_bits(),
             window = u64_field(primary, "window_minutes"),
             resets = u64_field(primary, "resets_at"),
         )),
@@ -478,12 +479,26 @@ fn basename(command: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_owned())
 }
 
-/// The running cumulative usage object riding on a `token_count` event.
+/// The running cumulative usage object riding on a `token_count` event,
+/// gated on being fingerprintable.
 fn total_usage(value: &Value) -> Option<&Value> {
     value
         .get("payload")
         .and_then(|payload| payload.get("info"))
         .and_then(|info| info.get("total_token_usage"))
+        .and_then(fingerprintable)
+}
+
+/// A usage object valid enough to key on: `total_tokens` parses as an
+/// integer. Malformed payloads (`null`, `{}`, a string) would fingerprint as
+/// all-zero and falsely collide distinct events — they must take the
+/// positional fallback instead.
+fn fingerprintable(usage: &Value) -> Option<&Value> {
+    usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .is_some()
+        .then_some(usage)
 }
 
 /// Order-fixed fingerprint of a usage object's raw counters. Fields missing
@@ -903,6 +918,143 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// A malformed cumulative (`{}` / `null`) must not enter the semantic-key
+    /// path — it would fingerprint as all-zero and falsely collide distinct
+    /// turns. Both events fall back to the positional key and survive.
+    #[test]
+    fn malformed_cumulative_falls_back_to_positional_key() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":null}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // Identical last vectors, but the broken cumulatives must not collide
+        // them into one all-zero fingerprint.
+        assert_eq!(collection.usage_events.len(), 2);
+    }
+
+    /// Same usage state re-emitted with a moved rate-limit window: the
+    /// snapshot's own fields are part of the key, so both samples survive
+    /// while the usage event itself collapses.
+    #[test]
+    fn rate_limit_renotification_with_moved_window_survives() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300,"resets_at":1750018000}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.rate_limit_samples.len(), 2);
+    }
+
+    /// Re-emission across a turn boundary (`turn_context` advances between the
+    /// copies) still collapses — the reason `turn_id` is deliberately NOT part
+    /// of the usage key.
+    #[test]
+    fn re_emission_across_turn_boundary_still_collapses() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// Two `turn_context`s sharing one timestamp but carrying distinct
+    /// `turn_id`s are distinct turns — the key must separate them where the
+    /// old positional key relied on the timestamp differing.
+    #[test]
+    fn effort_same_timestamp_distinct_turn_ids_both_survive() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.effort_events.len(), 2);
+    }
+
+    /// Every counter in the fingerprint is discriminating — two events
+    /// differing only in `cache_write_input_tokens` stay distinct.
+    #[test]
+    fn cache_write_difference_yields_distinct_keys() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(
+            day.join("rollout-session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":5,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
     }
 
     /// The Codex desktop app *moves* a session's JSONL from `sessions/` to the
