@@ -264,22 +264,64 @@ fn parse_line(
 
     collect_mode_event(value, message, timestamp, events);
 
-    if let Some(usage) = parse_usage(message.get("usage").or_else(|| value.get("usage"))) {
-        let model = string_field(message, "model").or_else(|| string_field(value, "model"));
+    let usage_value = message.get("usage").or_else(|| value.get("usage"));
+    let message_id = string_field(message, "id");
+    let top_model = string_field(message, "model").or_else(|| string_field(value, "model"));
+    if let Some(usage) = parse_usage(usage_value) {
         events.usage_events.push(KeyedUsageEvent {
-            key: string_field(message, "id").map(|message_id| format!("message:{message_id}")),
+            key: message_id.as_ref().map(|id| format!("message:{id}")),
             event: UsageEvent {
                 timestamp,
                 session_id: session_id.clone(),
-                model,
+                model: top_model.clone(),
                 source_kind: event_source_kind,
                 attribution_agent: attribution_agent.clone(),
-                attribution_skill,
+                attribution_skill: attribution_skill.clone(),
                 project: project.map(ToOwned::to_owned),
                 usage,
                 reported_cost_usd: None,
             },
         });
+    }
+
+    // `usage.iterations` (log-schema addition, 2026-04) breaks one turn into
+    // its underlying API calls. The top level is the turn's BILLED usage for
+    // the serving model: a failed fallback attempt is not billed (fallback
+    // credit refunds the switch) and the turn is billed as the serving model
+    // alone, and on advisor turns the top level already sums the main-model
+    // iterations. So main-model `message` and `fallback_message` entries must
+    // never be re-emitted — only `advisor_message` entries are additional
+    // billed calls, made under their own model and absent from the top-level
+    // counters (ccusage#1115 lost them entirely). Keyed per iteration index
+    // so streamed duplicates of the message still dedupe.
+    if let Some(iterations) = usage_value
+        .and_then(|usage| usage.get("iterations"))
+        .and_then(Value::as_array)
+    {
+        for (index, iteration) in iterations.iter().enumerate() {
+            if string_field(iteration, "type").as_deref() != Some("advisor_message") {
+                continue;
+            }
+            let Some(usage) = parse_usage(Some(iteration)) else {
+                continue;
+            };
+            events.usage_events.push(KeyedUsageEvent {
+                key: message_id
+                    .as_ref()
+                    .map(|id| format!("message:{id}:iter:{index}")),
+                event: UsageEvent {
+                    timestamp,
+                    session_id: session_id.clone(),
+                    model: string_field(iteration, "model").or_else(|| top_model.clone()),
+                    source_kind: event_source_kind,
+                    attribution_agent: attribution_agent.clone(),
+                    attribution_skill: attribution_skill.clone(),
+                    project: project.map(ToOwned::to_owned),
+                    usage,
+                    reported_cost_usd: None,
+                },
+            });
+        }
     }
 
     collect_tool_events(
@@ -491,6 +533,81 @@ mod tests {
             collection.tool_events[0].subagent_type.as_deref(),
             Some("Explore")
         );
+    }
+
+    /// A mid-turn model fallback: the failed attempt in `usage.iterations`
+    /// is NOT billed (the turn is billed as the serving model, mirrored at
+    /// the top level), so exactly one event must come out — the top-level
+    /// serving call. A streamed duplicate still dedupes.
+    #[test]
+    fn fallback_attempt_is_not_counted() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let line = r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":2156,"cache_creation_input_tokens":0,"cache_read_input_tokens":313782,"iterations":[{"type":"message","model":"claude-fable-5","input_tokens":2,"output_tokens":601,"cache_creation_input_tokens":991,"cache_read_input_tokens":495675},{"type":"fallback_message","model":"claude-opus-4-8","input_tokens":2,"output_tokens":2156,"cache_creation_input_tokens":0,"cache_read_input_tokens":313782}]},"content":[{"type":"text","text":"hi"}]}}"#;
+        fs::write(
+            temp.path().join("session.jsonl"),
+            format!("{line}\n{line}\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(
+            collection.usage_events[0].model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+        assert_eq!(
+            collection.usage_events[0].usage.token_volume(),
+            2 + 2156 + 313_782
+        );
+    }
+
+    /// An advisor turn (ccusage#1115 shape): the top level sums the
+    /// main-model iterations, while the `advisor_message` in between is an
+    /// additional billed call under its own model, absent from the top-level
+    /// counters — it must surface as its own event, and the main-model
+    /// iterations must not be re-emitted.
+    #[test]
+    fn advisor_iteration_is_counted_under_its_own_model() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-sonnet-5","usage":{"input_tokens":22,"output_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":220,"iterations":[{"type":"message","model":"claude-sonnet-5","input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":100},{"type":"advisor_message","model":"claude-opus-4-8","input_tokens":3,"output_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":50},{"type":"message","model":"claude-sonnet-5","input_tokens":12,"output_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":120}]},"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        let advisor = collection
+            .usage_events
+            .iter()
+            .find(|event| event.model.as_deref() == Some("claude-opus-4-8"))
+            .expect("advisor call should be counted");
+        assert_eq!(advisor.usage.token_volume(), 3 + 9 + 50);
+        let main = collection
+            .usage_events
+            .iter()
+            .find(|event| event.model.as_deref() == Some("claude-sonnet-5"))
+            .expect("main turn should be counted once");
+        assert_eq!(main.usage.token_volume(), 22 + 12 + 220);
+    }
+
+    /// The ordinary shape — one main-model `message` iteration mirroring the
+    /// top-level numbers — must not create a second event.
+    #[test]
+    fn single_mirror_iteration_adds_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"iterations":[{"type":"message","input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}]},"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 63);
     }
 
     #[test]
