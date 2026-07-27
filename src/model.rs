@@ -11,6 +11,7 @@ pub enum Provider {
     Codex,
     Agy,
     OpenCode,
+    Copilot,
     Cursor,
 }
 
@@ -22,6 +23,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Agy => "Agy",
             Self::OpenCode => "OpenCode",
+            Self::Copilot => "Copilot",
             Self::Cursor => "Cursor",
         }
     }

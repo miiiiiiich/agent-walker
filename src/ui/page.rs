@@ -400,6 +400,7 @@ mod tests {
             claude_dir: std::path::PathBuf::new(),
             codex_dir: std::path::PathBuf::new(),
             agy_dir: None,
+            copilot_dir: None,
             opencode_dir: None,
             cursor: None,
             days: 30,
