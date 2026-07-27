@@ -247,14 +247,18 @@ pub fn load_report(config: &Config) -> Result<AppSummary> {
 }
 
 /// A provider earns a tab only if it has real activity. Token volume catches
-/// most agents; sessions, tools, and completions are the fallback for a session
-/// that logged activity but no usage tokens. Everything false ⇒ the directory
-/// was missing or empty, so the tab is dropped instead of showing a blank tab.
+/// most agents; sessions, tools, completions, and the fixed-window credit
+/// ledger are the fallback for a session that logged activity but no usage
+/// tokens (Copilot credits cut on the fixed 30-day window, so they can exist
+/// even when a short `--days` display window is empty). Everything false ⇒
+/// the directory was missing or empty, so the tab is dropped instead of
+/// showing a blank tab.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
         || !summary.tools.is_empty()
         || summary.completion_duration.is_some()
+        || summary.credits.is_some()
 }
 
 /// Order the provider tabs by how much each is used — token volume, descending —

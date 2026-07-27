@@ -52,26 +52,36 @@ pub fn collect(
     // for the extension: the session directory also holds `files/` snapshots
     // of workspace content, which may themselves be .jsonl.
     let mut files: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&sessions) {
-        for entry in entries.flatten() {
-            let path = entry.path().join("events.jsonl");
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
-                // Absent is the normal case (not every session dir has an
-                // event stream); anything else is a real read failure worth
-                // surfacing in the stats line.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => {
+    match std::fs::read_dir(&sessions) {
+        Err(_) => {
+            // An unopenable session-state must not read as "no Copilot data".
+            collection.stats.unreadable_dirs += 1;
+        }
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
                     collection.stats.unreadable_files += 1;
                     continue;
+                };
+                let path = entry.path().join("events.jsonl");
+                let meta = match std::fs::metadata(&path) {
+                    Ok(meta) => meta,
+                    // Absent is the normal case (not every session dir has an
+                    // event stream); anything else is a real read failure
+                    // worth surfacing in the stats line.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => {
+                        collection.stats.unreadable_files += 1;
+                        continue;
+                    }
+                };
+                if let (Some(floor), Ok(mtime)) = (mtime_floor, meta.modified())
+                    && mtime < floor
+                {
+                    continue;
                 }
-            };
-            if let (Some(floor), Ok(mtime)) = (mtime_floor, meta.modified())
-                && mtime < floor
-            {
-                continue;
+                files.push(path);
             }
-            files.push(path);
         }
     }
     if files.is_empty() {
@@ -256,6 +266,13 @@ fn collect_shutdown_usage(
     shutdown_index: usize,
     events: &mut FileEvents,
 ) {
+    // A shutdown the analyzer cannot place in time must not advance the
+    // baseline either — otherwise the usage up to it would be subtracted by
+    // the NEXT valid shutdown and lost forever, instead of being recovered
+    // there in full.
+    if timestamp.is_none() {
+        return;
+    }
     let Some(metrics) = value
         .get("data")
         .and_then(|data| data.get("modelMetrics"))
@@ -267,6 +284,16 @@ fn collect_shutdown_usage(
         let Some(usage) = entry.get("usage") else {
             continue;
         };
+        // A syntactically valid but incomplete usage object would read as
+        // all-zero counters, masquerade as an epoch reset, and poison the
+        // baseline (1000 → missing → 1100 would count 1000 + 1100). Require
+        // the two core counters to be present before trusting the snapshot;
+        // a genuine zero (cache-write-only) still carries the fields.
+        if usage.get("inputTokens").and_then(Value::as_u64).is_none()
+            || usage.get("outputTokens").and_then(Value::as_u64).is_none()
+        {
+            continue;
+        }
         let current = RawCounters {
             input: u64_field(usage, "inputTokens"),
             output: u64_field(usage, "outputTokens"),
@@ -671,6 +698,59 @@ mod tests {
             .map(|sample| sample.nano_aiu)
             .collect();
         assert_eq!(deltas, vec![1_000_000_000, 2_500_000_000, 500_000_000]);
+    }
+
+    /// A shutdown without a timestamp cannot be placed in a period — it must
+    /// not advance the cumulative baseline, so the next valid exit recovers
+    /// the full amount instead of losing everything before the bad record.
+    #[test]
+    fn shutdown_without_timestamp_does_not_advance_baseline() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.shutdown","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T13:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 1_100);
+        assert!(collection.usage_events[0].timestamp.is_some());
+    }
+
+    /// An incomplete usage object (missing counters) must not masquerade as
+    /// an epoch reset and poison the baseline: 1000 → missing → 1100 counts
+    /// 1000 + 100, never 1000 + 1100.
+    #[test]
+    fn incomplete_snapshot_does_not_poison_the_baseline() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:30:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{}}}}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T13:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1100,"outputTokens":110,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 1_100 + 110);
     }
 
     /// The nano-AIU ledger resetting (decrease) starts a new epoch counted
