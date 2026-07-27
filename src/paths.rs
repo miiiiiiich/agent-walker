@@ -66,6 +66,15 @@ pub fn agy_home() -> Result<PathBuf> {
     Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
+/// Root directory Grok Build (xAI's agentic CLI) writes. `GROK_HOME`
+/// overrides it; the default is `~/.grok`, with per-cwd session logs under
+/// `<root>/sessions/<encoded-cwd>/<session-id>/updates.jsonl`.
+pub fn grok_home() -> Result<PathBuf> {
+    resolve_root(std::env::var_os("GROK_HOME"), || {
+        Ok(home_dir()?.join(".grok"))
+    })
+}
+
 /// Root directory GitHub Copilot CLI writes. `COPILOT_HOME` overrides it;
 /// the default is `~/.copilot`, with session logs under
 /// `<root>/session-state/<uuid>/events.jsonl`.

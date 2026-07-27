@@ -69,6 +69,11 @@ fn fetch_snapshot_json() -> Option<String> {
 
     let mut models = HashMap::new();
     for (key, entry) in &upstream {
+        // Provider/region variants are dropped in favor of bare model ids —
+        // EXCEPT `xai/`: LiteLLM registers Grok models only under the
+        // provider prefix (`xai/grok-4.5`, no bare key), so the prefix is
+        // stripped instead, or Grok Build usage would price at $0.
+        let key = key.strip_prefix("xai/").unwrap_or(key);
         if key.contains('/')
             || key.starts_with("anthropic.")
             || key.starts_with("global.")
@@ -100,7 +105,7 @@ fn fetch_snapshot_json() -> Option<String> {
             continue;
         };
         models.insert(
-            key.clone(),
+            key.to_owned(),
             Pricing {
                 input,
                 output: cost("output_cost_per_token").unwrap_or(0.0),
@@ -270,6 +275,15 @@ mod tests {
 
     use super::*;
 
+    /// Grok Build logs bare model ids (`grok-4.5`); the snapshot reducer
+    /// strips LiteLLM's `xai/` provider prefix so they resolve.
+    #[test]
+    fn grok_models_resolve_from_bare_keys() {
+        install_test_pricing();
+        let pricing = pricing_for("grok-4.5").expect("grok model should resolve");
+        assert!((pricing.input - 0.2 / 1e6).abs() < f64::EPSILON);
+    }
+
     /// Copilot logs Claude models with dotted version segments; the dashed
     /// retry resolves them, while ids whose pricing keys genuinely contain
     /// dots keep matching exactly first.
@@ -307,6 +321,7 @@ mod tests {
                     per_mtok(3.0, 15.0, 3.75, 6.0),
                 ),
                 ("gpt-3.5-turbo".to_owned(), per_mtok(0.5, 1.5, 0.0, 0.0)),
+                ("grok-4.5".to_owned(), per_mtok(0.2, 1.5, 0.0, 0.0)),
                 (
                     "gpt-5.5".to_owned(),
                     Pricing {

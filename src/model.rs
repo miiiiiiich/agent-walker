@@ -12,6 +12,7 @@ pub enum Provider {
     Agy,
     OpenCode,
     Copilot,
+    Grok,
     Cursor,
 }
 
@@ -24,6 +25,7 @@ impl Provider {
             Self::Agy => "Agy",
             Self::OpenCode => "OpenCode",
             Self::Copilot => "Copilot",
+            Self::Grok => "Grok",
             Self::Cursor => "Cursor",
         }
     }
