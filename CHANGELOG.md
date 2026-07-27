@@ -16,16 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's billed usage for the serving model, and a failed attempt is not
   billed.
 
-## [Unreleased]
-
 ### Added
 
 - GitHub Copilot CLI support: a new auto-detected provider tab reading
   `~/.copilot/session-state/*/events.jsonl` (override with `--copilot-dir` /
-  `COPILOT_HOME`). Tokens come from the per-model cumulative totals the CLI
-  writes on clean exit; resumed sessions never double-count. Sessions that
-  never exit cleanly contribute activity but no tokens until they close —
-  see docs/copilot.md for the full contract.
+  `COPILOT_HOME`). Tokens come from the per-model totals the CLI writes on
+  clean exit, counted as deltas between exits so resumed sessions neither
+  double-count nor fall out of the analysis window. Sessions that never exit
+  cleanly contribute activity but no tokens until they close — see
+  docs/copilot.md for the full contract. Dotted model spellings
+  (`claude-sonnet-4.6`) now resolve against dashed pricing keys.
 
 ## [0.10.1] - 2026-07-21
 
@@ -304,7 +304,6 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
-[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...HEAD
 [Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...HEAD
 [0.10.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.0

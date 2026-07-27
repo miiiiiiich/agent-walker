@@ -186,7 +186,10 @@ fn normalize(model_name: &str) -> String {
 /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
 /// plain word suffix (`gemini-pro-default`) must not collide with a shorter base
 /// key — without that guard, dropping the provider allowlist would let unrelated
-/// ids misprice.
+/// ids misprice. When the literal name misses entirely, dotted version
+/// segments are retried dashed (`claude-sonnet-4.6` -> `claude-sonnet-4-6`,
+/// the Copilot CLI's spelling) — only as a fallback, so ids whose pricing
+/// keys genuinely contain dots (`gpt-3.5-turbo`) resolve exactly first.
 pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     let mut name = normalize(model_name);
     if name == "codex" || name == "openai" || name == "codex-auto-review" {
@@ -198,10 +201,21 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
 
     let loaded = loaded().read().ok()?;
     let snapshot = loaded.as_ref()?;
-    if let Some(pricing) = snapshot.models.get(&name) {
+    if let Some(pricing) = lookup(snapshot, &name) {
+        return Some(pricing);
+    }
+    let dashed = name.replace('.', "-");
+    if dashed != name {
+        return lookup(snapshot, &dashed);
+    }
+    None
+}
+
+fn lookup(snapshot: &Snapshot, name: &str) -> Option<Pricing> {
+    if let Some(pricing) = snapshot.models.get(name) {
         return Some(*pricing);
     }
-    if let Some(pricing) = snapshot
+    snapshot
         .models
         .iter()
         .filter(|(key, _)| {
@@ -215,10 +229,6 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
         })
         .max_by_key(|(key, _)| key.len())
         .map(|(_, pricing)| *pricing)
-    {
-        return Some(pricing);
-    }
-    None
 }
 
 /// API-equivalent USD cost of an aggregated usage block for a model.
@@ -260,6 +270,21 @@ mod tests {
 
     use super::*;
 
+    /// Copilot logs Claude models with dotted version segments; the dashed
+    /// retry resolves them, while ids whose pricing keys genuinely contain
+    /// dots keep matching exactly first.
+    #[test]
+    fn dotted_model_names_resolve_to_dashed_pricing_keys() {
+        install_test_pricing();
+        let dotted = pricing_for("claude-sonnet-4.5").expect("dotted name should resolve");
+        let dashed = pricing_for("claude-sonnet-4-5").expect("dashed name should resolve");
+        assert!((dotted.input - dashed.input).abs() < f64::EPSILON);
+        // A pricing key that itself contains a dot resolves exactly, before
+        // any dash rewriting.
+        let real_dot = pricing_for("gpt-3.5-turbo").expect("dotted key should resolve");
+        assert!((real_dot.input - 0.5 / 1e6).abs() < f64::EPSILON);
+    }
+
     fn install_test_pricing() {
         let per_mtok =
             |input: f64, output: f64, cache_write_5m: f64, cache_write_1h: f64| Pricing {
@@ -281,6 +306,7 @@ mod tests {
                     "claude-sonnet-4-5".to_owned(),
                     per_mtok(3.0, 15.0, 3.75, 6.0),
                 ),
+                ("gpt-3.5-turbo".to_owned(), per_mtok(0.5, 1.5, 0.0, 0.0)),
                 (
                     "gpt-5.5".to_owned(),
                     Pricing {

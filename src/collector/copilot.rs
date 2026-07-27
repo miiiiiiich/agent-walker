@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -25,9 +26,14 @@ use crate::model::{
 ///   and therefore no token data — a documented gap, recovered when the
 ///   session eventually exits (the cumulative shutdown covers its lifetime).
 /// - Resuming appends to the SAME session file and a later clean exit appends
-///   ANOTHER shutdown whose totals are cumulative, so per (session, model)
-///   only the last shutdown may count. `merge_into`'s larger-volume-wins rule
-///   on the `copilot:{session}:{model}` key does exactly that.
+///   ANOTHER shutdown whose totals are cumulative. Each shutdown therefore
+///   emits the component-wise DELTA since the previous snapshot, dated at its
+///   own exit time — never the raw cumulative. Keeping one cumulative event
+///   instead would mis-window resumed sessions: the merged event would carry
+///   the latest totals at the EARLIEST exit's date, so a session first closed
+///   before the analysis window and resumed today would drop today's usage
+///   entirely. A counter going backwards (CLI update / metric reset) starts a
+///   new epoch and the snapshot counts in full.
 pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -47,8 +53,16 @@ pub fn collect(
     if let Ok(entries) = std::fs::read_dir(&sessions) {
         for entry in entries.flatten() {
             let path = entry.path().join("events.jsonl");
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                // Absent is the normal case (not every session dir has an
+                // event stream); anything else is a real read failure worth
+                // surfacing in the stats line.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    collection.stats.unreadable_files += 1;
+                    continue;
+                }
             };
             if let (Some(floor), Ok(mtime)) = (mtime_floor, meta.modified())
                 && mtime < floor
@@ -83,6 +97,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
     let mut project: Option<String> = None;
+    let mut cumulative: HashMap<String, RawCounters> = HashMap::new();
+    let mut shutdown_index = 0usize;
     let reader = BufReader::new(file);
 
     for line in reader.lines() {
@@ -130,8 +146,11 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     timestamp,
                     session_id.as_ref(),
                     project.as_deref(),
+                    &mut cumulative,
+                    shutdown_index,
                     &mut events,
                 );
+                shutdown_index += 1;
             }
             _ => {}
         }
@@ -141,17 +160,56 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     Some(events)
 }
 
-/// Per-model cumulative usage from a `session.shutdown`. Field semantics
-/// verified against the CLI's own on-screen totals: `inputTokens` INCLUDES
-/// `cacheReadTokens` (14,166 = 12,630 fresh + 1,536 cached in the probe
-/// session), so fresh input is the difference — the same convention as
-/// Codex. `reasoningTokens` is a subset of `outputTokens` and is tracked
-/// without being added to the volume.
+/// Raw cumulative counters from one `modelMetrics` entry, as logged:
+/// `input` includes `cache_read`, `output` includes `reasoning`.
+#[derive(Clone, Copy, Default)]
+struct RawCounters {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: u64,
+}
+
+impl RawCounters {
+    fn any_less_than(self, other: Self) -> bool {
+        self.input < other.input
+            || self.output < other.output
+            || self.cache_read < other.cache_read
+            || self.cache_write < other.cache_write
+            || self.reasoning < other.reasoning
+    }
+
+    fn minus(self, other: Self) -> Self {
+        Self {
+            input: self.input.saturating_sub(other.input),
+            output: self.output.saturating_sub(other.output),
+            cache_read: self.cache_read.saturating_sub(other.cache_read),
+            cache_write: self.cache_write.saturating_sub(other.cache_write),
+            reasoning: self.reasoning.saturating_sub(other.reasoning),
+        }
+    }
+}
+
+/// Per-model usage from a `session.shutdown`: the component-wise delta since
+/// the previous shutdown snapshot of the same model, so every clean exit is
+/// counted once at its own time (see the module doc for why the cumulative
+/// must not be kept whole). Field semantics verified against the CLI's own
+/// on-screen totals: `inputTokens` INCLUDES `cacheReadTokens` (14,166 =
+/// 12,630 fresh + 1,536 cached in the probe session), so fresh input is the
+/// difference — the same convention as Codex. `reasoningTokens` is a subset
+/// of `outputTokens` and is tracked without being added to the volume.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Per-line parse context; bundling into a struct adds noise for one caller."
+)]
 fn collect_shutdown_usage(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
     project: Option<&str>,
+    cumulative: &mut HashMap<String, RawCounters>,
+    shutdown_index: usize,
     events: &mut FileEvents,
 ) {
     let Some(metrics) = value
@@ -165,14 +223,40 @@ fn collect_shutdown_usage(
         let Some(usage) = entry.get("usage") else {
             continue;
         };
-        let input_tokens = u64_field(usage, "inputTokens");
-        let output_tokens = u64_field(usage, "outputTokens");
-        let cache_read = u64_field(usage, "cacheReadTokens");
-        if input_tokens == 0 && output_tokens == 0 {
+        let current = RawCounters {
+            input: u64_field(usage, "inputTokens"),
+            output: u64_field(usage, "outputTokens"),
+            cache_read: u64_field(usage, "cacheReadTokens"),
+            cache_write: u64_field(usage, "cacheWriteTokens"),
+            reasoning: u64_field(usage, "reasoningTokens"),
+        };
+        let previous = cumulative.get(model).copied().unwrap_or_default();
+        // A counter going backwards means the CLI restarted its accounting
+        // (update, epoch change): the snapshot is a fresh cumulative, not a
+        // continuation, so it counts in full.
+        let base = if current.any_less_than(previous) {
+            RawCounters::default()
+        } else {
+            previous
+        };
+        let delta = current.minus(base);
+        cumulative.insert(model.clone(), current);
+
+        let usage = TokenUsage {
+            input_tokens: delta.input.saturating_sub(delta.cache_read),
+            output_tokens: delta.output,
+            reasoning_output_tokens: delta.reasoning,
+            cache_read_input_tokens: delta.cache_read,
+            cache_creation_input_tokens: delta.cache_write,
+            ..TokenUsage::default()
+        };
+        // A re-emitted identical snapshot (an exit with no new activity)
+        // deltas to zero and adds nothing.
+        if usage.token_volume() == 0 {
             continue;
         }
         events.usage_events.push(KeyedUsageEvent {
-            key: session_id.map(|sid| format!("copilot:{sid}:{model}")),
+            key: session_id.map(|sid| format!("copilot:{sid}:{model}:{shutdown_index}")),
             event: UsageEvent {
                 timestamp,
                 session_id: session_id.cloned(),
@@ -181,14 +265,7 @@ fn collect_shutdown_usage(
                 attribution_agent: None,
                 attribution_skill: None,
                 project: project.map(ToOwned::to_owned),
-                usage: TokenUsage {
-                    input_tokens: input_tokens.saturating_sub(cache_read),
-                    output_tokens,
-                    reasoning_output_tokens: u64_field(usage, "reasoningTokens"),
-                    cache_read_input_tokens: cache_read,
-                    cache_creation_input_tokens: u64_field(usage, "cacheWriteTokens"),
-                    ..TokenUsage::default()
-                },
+                usage,
                 reported_cost_usd: None,
             },
         });
@@ -207,10 +284,13 @@ fn collect_tool_event(
     let Some(tool_name) = data.get("toolName").and_then(Value::as_str) else {
         return;
     };
-    let key = data
-        .get("toolCallId")
-        .and_then(Value::as_str)
-        .map(|id| format!("copilot-tool:{id}"));
+    // Scoped per session: toolCallId uniqueness across sessions is not
+    // guaranteed by anything we verified, and the seen-set in merge_into is
+    // global.
+    let key = match (session_id, data.get("toolCallId").and_then(Value::as_str)) {
+        (Some(sid), Some(id)) => Some(format!("copilot-tool:{sid}:{id}")),
+        _ => None,
+    };
     events.tool_events.push(KeyedToolEvent {
         key,
         event: ToolEvent {
@@ -281,11 +361,12 @@ mod tests {
         assert_eq!(collection.tool_events[0].tool_name, "web_fetch");
     }
 
-    /// A resumed session appends a SECOND shutdown whose totals are
-    /// cumulative — per (session, model) the larger (later) totals win and
-    /// nothing is summed twice.
+    /// A resumed session appends a SECOND shutdown with cumulative totals:
+    /// each shutdown must emit only its delta, dated at its own exit — so a
+    /// segment inside the analysis window survives even when an earlier exit
+    /// falls outside it.
     #[test]
-    fn resumed_session_cumulative_shutdowns_count_once() {
+    fn resumed_session_counts_each_segment_at_its_own_exit() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -302,15 +383,122 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(collection.usage_events.len(), 1);
-        let event = &collection.usage_events[0];
-        // The cumulative (larger) totals win; summing both would report
-        // 42,572 input instead of the session's true 28,406.
-        assert_eq!(event.usage.token_volume(), 28_406 + 286);
-        // Earliest timestamp is retained for attribution.
-        let first = OffsetDateTime::parse("2026-07-27T12:41:08.275Z", &Rfc3339)
+        assert_eq!(collection.usage_events.len(), 2);
+        let first = &collection.usage_events[0];
+        let second = &collection.usage_events[1];
+        assert_eq!(first.usage.token_volume(), 14_166 + 150);
+        // Second segment: 28,406 − 14,166 input and 286 − 150 output.
+        assert_eq!(second.usage.token_volume(), 14_240 + 136);
+        // Summing raw cumulatives would have reported 42,572 input.
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 28_406 + 286);
+        // Each segment keeps its own exit timestamp.
+        let t1 = OffsetDateTime::parse("2026-07-27T12:41:08.275Z", &Rfc3339)
             .expect("test timestamp should parse");
-        assert_eq!(event.timestamp, Some(first));
+        let t2 = OffsetDateTime::parse("2026-07-27T12:42:15.207Z", &Rfc3339)
+            .expect("test timestamp should parse");
+        assert_eq!(first.timestamp, Some(t1));
+        assert_eq!(second.timestamp, Some(t2));
+    }
+
+    /// A cumulative counter going backwards (CLI update / metric reset)
+    /// starts a new epoch: the snapshot counts in full, never a negative or
+    /// zero delta.
+    #[test]
+    fn cumulative_reset_counts_new_epoch_in_full() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T13:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":400,"outputTokens":40,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        let total: u64 = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum();
+        assert_eq!(total, 1_100 + 440);
+    }
+
+    /// An exit with no new activity re-emits the identical snapshot — the
+    /// delta is zero and nothing is added.
+    #[test]
+    fn identical_snapshot_reemission_adds_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let shutdown = r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#;
+        write_session(temp.path(), "s1", &format!("{shutdown}\n{shutdown}\n"));
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 1_100);
+    }
+
+    /// Cache writes are billed volume even when input/output stay zero.
+    #[test]
+    fn cache_write_only_snapshot_is_counted() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":500,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].usage.token_volume(), 500);
+    }
+
+    /// toolCallId uniqueness across sessions is unverified — the dedup key is
+    /// scoped per session so two sessions reusing an id both count.
+    #[test]
+    fn tool_call_ids_are_scoped_per_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let line = r#"{"type":"tool.execution_start","timestamp":"2026-07-27T12:00:00.000Z","data":{"toolCallId":"call_1","toolName":"web_fetch"}}"#;
+        write_session(temp.path(), "s1", &format!("{line}\n"));
+        write_session(temp.path(), "s2", &format!("{line}\n"));
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.tool_events.len(), 2);
+    }
+
+    /// A malformed line is skipped without aborting the file — the shutdown
+    /// after it still counts.
+    #[test]
+    fn malformed_line_does_not_abort_the_file() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                "not json at all\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":1000,"outputTokens":100,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(collection.usage_events.len(), 1);
     }
 
     /// A session that never exited cleanly has no shutdown — and no token

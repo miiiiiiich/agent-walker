@@ -14,7 +14,9 @@ exist. Everything is read locally; nothing leaves the machine.
   exit (`/exit`, or a non-interactive run completing). It carries per-model
   cumulative totals for the whole session
   (`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` /
-  `reasoningTokens`), mapped to the same schema as the other providers:
+  `reasoningTokens`). Each shutdown is counted as the delta since the previous
+  one, dated at its own exit time, and mapped to the same schema as the other
+  providers:
 
   ```
   tokens = (input − cache_read) + output + cache_read + cache_write
@@ -38,10 +40,12 @@ exist. Everything is read locally; nothing leaves the machine.
   activity but no tokens. The gap closes when the session eventually exits —
   the cumulative shutdown covers its whole lifetime.
 - **Resumed sessions**: `--resume` appends to the same session, and each
-  later clean exit appends another shutdown with cumulative totals. Only the
-  latest totals count (never summed), keyed per session and model.
-- **Long-lived sessions** attribute all their tokens to the day of the first
-  clean exit — day-level granularity is only as fine as your exit habits.
+  later clean exit appends another shutdown with cumulative totals. Every
+  exit contributes only what happened since the previous one — cumulatives
+  are never summed, and a counter going backwards (CLI update) starts a new
+  epoch counted in full.
+- **Day-level granularity is only as fine as your exit habits**: everything
+  between two clean exits lands on the later exit's day.
 - The CLI's AI-credit accounting (`totalNanoAiu`, premium requests) is not
   surfaced; agent-walker reports token volume and API-equivalent cost like
   every other tab.
