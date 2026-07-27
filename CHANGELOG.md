@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-07-28
 
 ### Fixed
 
@@ -308,7 +308,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
-[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...HEAD
+[0.11.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.0
 [0.9.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.9.0
