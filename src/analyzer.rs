@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
 use crate::model::{
-    Collection, DailySessions, DailyStat, LimitDay, LimitsHistory, ModelDailyStat, ModesSummary,
-    SkillStat, Summary, TokenUsage, ToolStat,
+    Collection, CreditsHistory, DailySessions, DailyStat, LimitDay, LimitsHistory, ModelDailyStat,
+    ModesSummary, SkillStat, Summary, TokenUsage, ToolStat,
 };
 
 use self::aggregates::Aggregates;
@@ -202,6 +202,7 @@ pub fn summarize(
         local_offset,
         &recent_active_days,
     );
+    let credits = credits_history(collection, codename_window_start, period_end, local_offset);
     let mode_usage = modes_summary(collection, codename_window_start, period_end, local_offset);
     let recent_window_active_days = recent_active_days.len();
 
@@ -222,6 +223,7 @@ pub fn summarize(
         agents,
         skills,
         limits,
+        credits,
         modes: mode_usage,
         tools,
         projects,
@@ -321,6 +323,53 @@ fn limits_history(
         date += Duration::days(1);
     }
     Some(LimitsHistory { days, peak })
+}
+
+/// Daily AI-credit spend over the fixed 30-day window: the sum of Copilot's
+/// `totalNanoAiu` deltas per local day, in credits (1e9 nano-AIU). `None`
+/// when the provider records no credit samples at all.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Credits are a display quantity; nano-AIU never approaches 2^52."
+)]
+fn credits_history(
+    collection: &Collection,
+    window_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> Option<CreditsHistory> {
+    let mut daily: BTreeMap<Date, u64> = BTreeMap::new();
+    for sample in &collection.credit_samples {
+        let date = sample.timestamp.to_offset(local_offset).date();
+        if date < window_start || date > period_end {
+            continue;
+        }
+        let entry = daily.entry(date).or_insert(0);
+        *entry = entry.saturating_add(sample.nano_aiu);
+    }
+    if daily.is_empty() {
+        return None;
+    }
+
+    let mut days = Vec::new();
+    let mut total_nano = 0u64;
+    let mut peak: Option<(Date, f64)> = None;
+    let mut date = window_start;
+    while date <= period_end {
+        let nano = daily.get(&date).copied().unwrap_or(0);
+        total_nano = total_nano.saturating_add(nano);
+        let credits = nano as f64 / 1e9;
+        if nano > 0 && peak.is_none_or(|(_, best)| credits > best) {
+            peak = Some((date, credits));
+        }
+        days.push((date, credits));
+        date += Duration::days(1);
+    }
+    Some(CreditsHistory {
+        days,
+        total: total_nano as f64 / 1e9,
+        peak,
+    })
 }
 
 /// Mode usage over the fixed 30-day window: Claude thinking / fast flags per
@@ -458,6 +507,7 @@ mod tests {
             ],
             duration_events: Vec::new(),
             rate_limit_samples: Vec::new(),
+            credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             stats: ScanStats::default(),
@@ -514,6 +564,7 @@ mod tests {
             session_touches: Vec::new(),
             duration_events: Vec::new(),
             rate_limit_samples: Vec::new(),
+            credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             stats: ScanStats::default(),
@@ -560,6 +611,7 @@ mod tests {
             session_touches: Vec::new(),
             duration_events: Vec::new(),
             rate_limit_samples: Vec::new(),
+            credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             stats: ScanStats::default(),
@@ -641,6 +693,7 @@ mod v09_tests {
             tool_events: Vec::new(),
             session_touches: Vec::new(),
             duration_events: Vec::new(),
+            credit_samples: Vec::new(),
             rate_limit_samples: vec![
                 RateLimitSample {
                     timestamp: datetime!(2026-06-22 08:00 UTC),

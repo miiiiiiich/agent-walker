@@ -31,6 +31,7 @@ pub(super) fn provider_color(provider: Provider) -> Color {
         Provider::Agy => BLUE,
         Provider::OpenCode => PURPLE,
         Provider::Cursor => TEAL,
+        Provider::Copilot => ACCENT,
         Provider::Combined => GOLD,
     }
 }

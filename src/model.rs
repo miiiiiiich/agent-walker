@@ -11,6 +11,7 @@ pub enum Provider {
     Codex,
     Agy,
     OpenCode,
+    Copilot,
     Cursor,
 }
 
@@ -22,6 +23,7 @@ impl Provider {
             Self::Codex => "Codex",
             Self::Agy => "Agy",
             Self::OpenCode => "OpenCode",
+            Self::Copilot => "Copilot",
             Self::Cursor => "Cursor",
         }
     }
@@ -140,6 +142,15 @@ pub struct RateLimitSample {
     pub used_percent: f64,
 }
 
+/// One interval's AI-credit spend: the delta of Copilot's cumulative
+/// `totalNanoAiu` between consecutive usage checkpoints / shutdowns.
+/// 1 credit = 1e9 nano-AIU.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditSample {
+    pub timestamp: OffsetDateTime,
+    pub nano_aiu: u64,
+}
+
 /// One Codex turn's reasoning-effort setting (`turn_context.payload.effort`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffortEvent {
@@ -191,6 +202,7 @@ pub struct Collection {
     pub session_touches: Vec<SessionTouch>,
     pub duration_events: Vec<DurationEvent>,
     pub rate_limit_samples: Vec<RateLimitSample>,
+    pub credit_samples: Vec<CreditSample>,
     pub effort_events: Vec<EffortEvent>,
     pub mode_events: Vec<ModeEvent>,
     pub stats: ScanStats,
@@ -206,6 +218,7 @@ impl Collection {
             session_touches: Vec::new(),
             duration_events: Vec::new(),
             rate_limit_samples: Vec::new(),
+            credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             stats: ScanStats::default(),
@@ -230,6 +243,9 @@ impl Collection {
             combined
                 .rate_limit_samples
                 .extend(collection.rate_limit_samples.iter().cloned());
+            combined
+                .credit_samples
+                .extend(collection.credit_samples.iter().cloned());
             combined
                 .effort_events
                 .extend(collection.effort_events.iter().cloned());
@@ -316,6 +332,16 @@ pub enum LimitDay {
 #[derive(Debug, Clone)]
 pub struct LimitsHistory {
     pub days: Vec<(Date, LimitDay)>,
+    pub peak: Option<(Date, f64)>,
+}
+
+/// Daily AI-credit spend over the fixed 30-day window (Copilot). Historical
+/// by design — spend that already happened, not a remaining-quota meter.
+#[derive(Debug, Clone)]
+pub struct CreditsHistory {
+    /// One entry per window day; 0.0 = no recorded spend.
+    pub days: Vec<(Date, f64)>,
+    pub total: f64,
     pub peak: Option<(Date, f64)>,
 }
 
@@ -418,6 +444,7 @@ pub struct Summary {
     /// all-time cut would silently under-count.
     pub skills: Vec<SkillStat>,
     pub limits: Option<LimitsHistory>,
+    pub credits: Option<CreditsHistory>,
     pub modes: ModesSummary,
     pub tools: Vec<ToolStat>,
     pub projects: Vec<ProjectStat>,

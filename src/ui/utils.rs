@@ -63,6 +63,18 @@ pub(super) fn weekday_index(date: Date) -> u8 {
     }
 }
 
+/// Compact credit formatting: two significant decimals under 10, one under
+/// 100, whole numbers beyond ("0.35", "12.4", "180").
+pub(super) fn format_credits(credits: f64) -> String {
+    if credits < 10.0 {
+        format!("{credits:.2}")
+    } else if credits < 100.0 {
+        format!("{credits:.1}")
+    } else {
+        format!("{credits:.0}")
+    }
+}
+
 pub(super) fn month_abbrev(month: time::Month) -> &'static str {
     match month {
         time::Month::January => "Jan",

@@ -66,6 +66,15 @@ pub fn agy_home() -> Result<PathBuf> {
     Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
+/// Root directory GitHub Copilot CLI writes. `COPILOT_HOME` overrides it;
+/// the default is `~/.copilot`, with session logs under
+/// `<root>/session-state/<uuid>/events.jsonl`.
+pub fn copilot_home() -> Result<PathBuf> {
+    resolve_root(std::env::var_os("COPILOT_HOME"), || {
+        Ok(home_dir()?.join(".copilot"))
+    })
+}
+
 /// Data directory OpenCode reads. `OPENCODE_HOME` overrides it; otherwise it
 /// follows the XDG data dir (`$XDG_DATA_HOME/opencode`, default
 /// `~/.local/share/opencode`), as documented at

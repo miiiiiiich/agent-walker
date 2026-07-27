@@ -2,6 +2,7 @@ pub mod agy;
 mod agy_conv;
 pub mod claude;
 pub mod codex;
+pub mod copilot;
 pub mod cursor;
 pub mod opencode;
 
@@ -16,8 +17,8 @@ use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::debug;
 
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, ModeEvent, RateLimitSample, ScanStats, SessionTouch,
-    ToolEvent, UsageEvent,
+    Collection, CreditSample, DurationEvent, EffortEvent, ModeEvent, RateLimitSample, ScanStats,
+    SessionTouch, ToolEvent, UsageEvent,
 };
 
 /// Bump whenever the serialized layout OR the parsing semantics (event
@@ -35,9 +36,11 @@ use crate::model::{
 ///   same layout, but cached events carry the old positional keys.
 /// - 11: Claude `usage.iterations` parsing (fallback/advisor calls) — cached
 ///   `FileEvents` lack the iteration events.
+/// - 12: `FileEvents` gained `credit_samples` (Copilot CREDITS), changing its
+///   bincode layout.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 11;
+const CACHE_VERSION: u32 = 12;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo
@@ -125,6 +128,7 @@ pub struct FileEvents {
     pub session_touches: Vec<SessionTouch>,
     pub duration_events: Vec<DurationEvent>,
     pub rate_limit_samples: Vec<KeyedRateLimitSample>,
+    pub credit_samples: Vec<KeyedCreditSample>,
     pub effort_events: Vec<KeyedEffortEvent>,
     pub mode_events: Vec<KeyedModeEvent>,
     pub lines_seen: usize,
@@ -149,6 +153,12 @@ pub struct KeyedToolEvent {
 pub struct KeyedRateLimitSample {
     pub key: Option<String>,
     pub event: RateLimitSample,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedCreditSample {
+    pub key: Option<String>,
+    pub event: CreditSample,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,6 +516,7 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
     let mut seen_usage: HashMap<String, usize> = HashMap::new();
     let mut seen_tools: HashMap<String, usize> = HashMap::new();
     let mut seen_limits: HashMap<String, usize> = HashMap::new();
+    let mut seen_credits: HashMap<String, usize> = HashMap::new();
     let mut seen_efforts: HashMap<String, usize> = HashMap::new();
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
 
@@ -557,6 +568,18 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
             dedupe_into(
                 &mut collection.rate_limit_samples,
                 &mut seen_limits,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = existing.timestamp.min(incoming.timestamp);
+                },
+            );
+        }
+
+        for keyed in events.credit_samples {
+            dedupe_into(
+                &mut collection.credit_samples,
+                &mut seen_credits,
                 keyed.key,
                 keyed.event,
                 |existing, incoming| {

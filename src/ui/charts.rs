@@ -419,6 +419,107 @@ pub(super) fn limits_chart_lines(
     out
 }
 
+/// CREDITS history: daily AI-credit spend as BY HOUR-style bars, auto-scaled
+/// to the busiest day (credits are a spend quantity, not a utilization
+/// percentage). Historical by design — a ledger of spend that already
+/// happened, never a remaining-quota meter. A zero day on the baseline
+/// renders as a faint dot so "no spend" reads differently from "tiny spend".
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Chart geometry is display-only."
+)]
+pub(super) fn credits_chart_lines(
+    summary: &Summary,
+    width: u16,
+    body_height: usize,
+) -> Vec<Line<'static>> {
+    let Some(credits) = &summary.credits else {
+        return Vec::new();
+    };
+    let Some((peak_date, peak_value)) = credits.peak else {
+        return Vec::new();
+    };
+    if credits.days.is_empty() || peak_value <= 0.0 {
+        return Vec::new();
+    }
+    let height = body_height.max(1);
+    let half_cells = height * 2;
+    let day_count = credits.days.len();
+    let graph_available = usize::from(width).saturating_sub(7);
+    let chars_per_bar = if graph_available >= day_count * 2 {
+        2
+    } else {
+        1
+    };
+
+    let annotation = format!(
+        "30d total {total} · peak {peak} · {month} {day}",
+        total = utils::format_credits(credits.total),
+        peak = utils::format_credits(peak_value),
+        month = utils::month_abbrev(peak_date.month()),
+        day = peak_date.day(),
+    );
+    let mut out = vec![utils::section_title("CREDITS", &annotation)];
+
+    for row in 0..height {
+        let label = match row {
+            0 => format!("{:>6}", utils::format_credits(peak_value)),
+            _ if row == height / 2 => format!("{:>6}", utils::format_credits(peak_value / 2.0)),
+            _ if row == height - 1 => format!("{:>6}", 0),
+            _ => " ".repeat(6),
+        };
+        let mut spans = vec![
+            Span::styled(label, Style::default().fg(theme::MUTED)),
+            Span::styled("│", Style::default().fg(theme::DIM)),
+        ];
+        let half_bottom = 2 * (height - 1 - row);
+        let half_top = half_bottom + 1;
+        let baseline = row == height - 1;
+        for (_, value) in &credits.days {
+            let level = if *value > 0.0 {
+                ((value / peak_value) * half_cells as f64).round().max(1.0) as usize
+            } else {
+                0
+            };
+            let glyph = if level > half_top {
+                "█"
+            } else if level > half_bottom {
+                "▄"
+            } else if baseline {
+                if *value > 0.0 { "▁" } else { "·" }
+            } else {
+                " "
+            };
+            let color = if *value > 0.0 {
+                theme::GREEN
+            } else {
+                theme::DIM
+            };
+            spans.push(Span::styled(
+                glyph.repeat(chars_per_bar),
+                Style::default().fg(color),
+            ));
+        }
+        out.push(Line::from(spans));
+    }
+
+    let points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
+        .iter()
+        .filter_map(|fraction| {
+            let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
+            let (date, _) = credits.days.get(index)?;
+            Some((
+                7 + index * chars_per_bar,
+                format!("{} {}", utils::month_abbrev(date.month()), date.day()),
+            ))
+        })
+        .collect();
+    out.push(axis_label_row(width, &points));
+    out
+}
+
 fn model_daily_values(summary: &Summary, model_name: &str) -> Vec<u64> {
     let usage_by_date = summary
         .model_daily
