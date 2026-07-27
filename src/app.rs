@@ -493,6 +493,7 @@ mod tests {
             agents: Vec::new(),
             skills: Vec::new(),
             limits: None,
+            credits: None,
             modes: crate::model::ModesSummary::default(),
             tools: Vec::new(),
             projects: Vec::new(),

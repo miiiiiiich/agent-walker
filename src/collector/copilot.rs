@@ -9,10 +9,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedToolEvent, KeyedUsageEvent, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedCreditSample, KeyedToolEvent, KeyedUsageEvent, merge_into, parse_files_cached,
+    project_from_cwd,
 };
 use crate::model::{
-    Collection, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    Collection, CreditSample, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
+    ToolEvent, UsageEvent,
 };
 
 /// GitHub Copilot CLI (`@github/copilot`, the agentic CLI — not the retired
@@ -99,6 +101,9 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut project: Option<String> = None;
     let mut cumulative: HashMap<String, RawCounters> = HashMap::new();
     let mut shutdown_index = 0usize;
+    let mut last_nano_aiu = 0u64;
+    let mut credit_index = 0usize;
+    let mut turn_starts: HashMap<String, OffsetDateTime> = HashMap::new();
     let reader = BufReader::new(file);
 
     for line in reader.lines() {
@@ -140,7 +145,46 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             Some("tool.execution_start") => {
                 collect_tool_event(&value, timestamp, session_id.as_ref(), &mut events);
             }
+            // Explicit turn boundaries (unlike Claude, whose turn durations
+            // are inferred from prompt-to-activity gaps) — pair start/end by
+            // turnId for the COMPLETION panel.
+            Some("assistant.turn_start") => {
+                if let (Some(turn_id), Some(timestamp)) = (turn_id(&value), timestamp) {
+                    turn_starts.insert(turn_id, timestamp);
+                }
+            }
+            Some("assistant.turn_end") => {
+                collect_turn_duration(
+                    &value,
+                    timestamp,
+                    session_id.as_ref(),
+                    &mut turn_starts,
+                    &mut events,
+                );
+            }
+            // `totalNanoAiu` is a cumulative AI-credit ledger carried on both
+            // periodic checkpoints and shutdowns — unlike tokens it exists
+            // even for sessions that never exit cleanly. Deltas feed the
+            // CREDITS history.
+            Some("session.usage_checkpoint") => {
+                collect_credit_delta(
+                    &value,
+                    timestamp,
+                    session_id.as_ref(),
+                    &mut last_nano_aiu,
+                    &mut credit_index,
+                    &mut events,
+                );
+            }
             Some("session.shutdown") => {
+                collect_credit_delta(
+                    &value,
+                    timestamp,
+                    session_id.as_ref(),
+                    &mut last_nano_aiu,
+                    &mut credit_index,
+                    &mut events,
+                );
                 collect_shutdown_usage(
                     &value,
                     timestamp,
@@ -270,6 +314,81 @@ fn collect_shutdown_usage(
             },
         });
     }
+}
+
+/// Close a turn: pair the `turn_end` with its recorded `turn_start` by
+/// turnId and emit the explicit duration.
+fn collect_turn_duration(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    turn_starts: &mut HashMap<String, OffsetDateTime>,
+    events: &mut FileEvents,
+) {
+    if let (Some(turn_id), Some(end)) = (turn_id(value), timestamp)
+        // Validate before consuming: a clock-skewed (end < start) record must
+        // not eat the start entry, or a later valid end could never pair.
+        && turn_starts.get(&turn_id).is_some_and(|start| end >= *start)
+        && let Some(start) = turn_starts.remove(&turn_id)
+    {
+        events.duration_events.push(DurationEvent {
+            timestamp: Some(end),
+            session_id: session_id.cloned(),
+            duration_ms: u64::try_from((end - start).whole_milliseconds()).unwrap_or(0),
+            status: Some("turn".to_owned()),
+        });
+    }
+}
+
+fn turn_id(value: &Value) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| data.get("turnId"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// AI-credit spend since the previous checkpoint of this session, from the
+/// cumulative `totalNanoAiu`. A value going backwards (CLI update / epoch
+/// reset) counts the fresh cumulative in full, mirroring the token rule.
+fn collect_credit_delta(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    last_nano_aiu: &mut u64,
+    credit_index: &mut usize,
+    events: &mut FileEvents,
+) {
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    // Untrusted log data: clamp like token counts so downstream daily sums
+    // can never overflow (1<<50 nano-AIU ≈ a million credits).
+    let Some(current) = value
+        .get("data")
+        .and_then(|data| data.get("totalNanoAiu"))
+        .and_then(Value::as_u64)
+        .map(|nano| nano.min(1 << 50))
+    else {
+        return;
+    };
+    let delta = if current < *last_nano_aiu {
+        current
+    } else {
+        current - *last_nano_aiu
+    };
+    *last_nano_aiu = current;
+    if delta == 0 {
+        return;
+    }
+    events.credit_samples.push(KeyedCreditSample {
+        key: session_id.map(|sid| format!("copilot-credit:{sid}:{index}", index = *credit_index)),
+        event: CreditSample {
+            timestamp,
+            nano_aiu: delta,
+        },
+    });
+    *credit_index += 1;
 }
 
 fn collect_tool_event(
@@ -521,6 +640,123 @@ mod tests {
 
         assert_eq!(collection.usage_events.len(), 0);
         assert!(!collection.session_touches.is_empty());
+        // Credits exist even without a clean exit — the checkpoint ledger.
+        assert_eq!(collection.credit_samples.len(), 1);
+        assert_eq!(collection.credit_samples[0].nano_aiu, 1_958_555_000);
+    }
+
+    /// Credits accrue as deltas of the cumulative nano-AIU ledger across
+    /// checkpoints and shutdown, attributed to each record's own time.
+    #[test]
+    fn credit_deltas_accrue_across_checkpoints_and_shutdown() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.usage_checkpoint","timestamp":"2026-07-27T10:00:00.000Z","data":{"totalNanoAiu":1000000000,"totalPremiumRequests":0}}"#,
+                "\n",
+                r#"{"type":"session.usage_checkpoint","timestamp":"2026-07-27T11:00:00.000Z","data":{"totalNanoAiu":3500000000,"totalPremiumRequests":0}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T12:00:00.000Z","data":{"totalNanoAiu":4000000000,"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let deltas: Vec<u64> = collection
+            .credit_samples
+            .iter()
+            .map(|sample| sample.nano_aiu)
+            .collect();
+        assert_eq!(deltas, vec![1_000_000_000, 2_500_000_000, 500_000_000]);
+    }
+
+    /// The nano-AIU ledger resetting (decrease) starts a new epoch counted
+    /// in full: 100→40→70 counts 100+40+30, and a reset through zero
+    /// (100→0→30) counts 100+30. A shutdown carrying the same cumulative as
+    /// the last checkpoint deltas to zero and adds nothing.
+    #[test]
+    fn credit_resets_and_equal_snapshots() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"session.usage_checkpoint","timestamp":"2026-07-27T10:00:00.000Z","data":{"totalNanoAiu":100}}"#,
+                "\n",
+                r#"{"type":"session.usage_checkpoint","timestamp":"2026-07-27T10:10:00.000Z","data":{"totalNanoAiu":40}}"#,
+                "\n",
+                r#"{"type":"session.usage_checkpoint","timestamp":"2026-07-27T10:20:00.000Z","data":{"totalNanoAiu":70}}"#,
+                "\n",
+                r#"{"type":"session.shutdown","timestamp":"2026-07-27T10:30:00.000Z","data":{"totalNanoAiu":70,"modelMetrics":{}}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let total: u64 = collection
+            .credit_samples
+            .iter()
+            .map(|sample| sample.nano_aiu)
+            .sum();
+        // 100 (first) + 40 (reset epoch) + 30 (delta) + 0 (equal shutdown).
+        assert_eq!(total, 170);
+        assert_eq!(collection.credit_samples.len(), 3);
+    }
+
+    /// A clock-skewed `turn_end` (before its start) must not consume the
+    /// start entry — the later valid end still pairs.
+    #[test]
+    fn skewed_turn_end_does_not_eat_the_start() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"assistant.turn_start","timestamp":"2026-07-27T12:00:10.000Z","data":{"turnId":"0"}}"#,
+                "\n",
+                r#"{"type":"assistant.turn_end","timestamp":"2026-07-27T12:00:05.000Z","data":{"turnId":"0"}}"#,
+                "\n",
+                r#"{"type":"assistant.turn_end","timestamp":"2026-07-27T12:00:20.000Z","data":{"turnId":"0"}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 10_000);
+    }
+
+    /// Turn durations pair `assistant.turn_start` / `turn_end` by turnId —
+    /// explicit boundaries, no heuristics.
+    #[test]
+    fn turn_durations_pair_start_and_end_by_turn_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            concat!(
+                r#"{"type":"assistant.turn_start","timestamp":"2026-07-27T12:00:00.000Z","data":{"turnId":"0"}}"#,
+                "\n",
+                r#"{"type":"assistant.turn_end","timestamp":"2026-07-27T12:00:08.000Z","data":{"turnId":"0"}}"#,
+                "\n",
+                r#"{"type":"assistant.turn_end","timestamp":"2026-07-27T12:00:09.000Z","data":{"turnId":"unmatched"}}"#,
+                "\n"
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 8_000);
+        assert_eq!(
+            collection.duration_events[0].status.as_deref(),
+            Some("turn")
+        );
     }
 
     /// Multi-model sessions split per model under one session key space.

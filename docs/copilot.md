@@ -29,6 +29,14 @@ exist. Everything is read locally; nothing leaves the machine.
 
 - **Model** per entry in `modelMetrics` (e.g. `gpt-5-mini`,
   `claude-sonnet-4.6`).
+- **AI credits** (the CREDITS panel, Copilot tab only): daily spend history
+  from the cumulative `totalNanoAiu` ledger (1 credit = 1e9 nano-AIU),
+  carried on periodic usage checkpoints as well as shutdowns — so credits
+  keep tracking even for sessions that never exit cleanly, complementing the
+  token gap below. Historical by design: a ledger of spend that already
+  happened, never a remaining-quota meter.
+- **Turn durations** from explicit `assistant.turn_start` / `turn_end`
+  pairs (no heuristics — Copilot logs real turn boundaries).
 - **Project** from the session's working directory (`session.start`).
 - **Tools** from `tool.execution_start` events, deduplicated by tool-call id.
 - **Activity** from every timestamped event in the session stream.
@@ -37,8 +45,8 @@ exist. Everything is read locally; nothing leaves the machine.
 
 - **Sessions that never exit cleanly have no token data.** The CLI writes
   token totals only at shutdown; a crashed or still-open session contributes
-  activity but no tokens. The gap closes when the session eventually exits —
-  the cumulative shutdown covers its whole lifetime.
+  activity and credits, but no tokens. The gap closes when the session
+  eventually exits — the cumulative shutdown covers its whole lifetime.
 - **Resumed sessions**: `--resume` appends to the same session, and each
   later clean exit appends another shutdown with cumulative totals. Every
   exit contributes only what happened since the previous one — cumulatives
@@ -46,6 +54,5 @@ exist. Everything is read locally; nothing leaves the machine.
   epoch counted in full.
 - **Day-level granularity is only as fine as your exit habits**: everything
   between two clean exits lands on the later exit's day.
-- The CLI's AI-credit accounting (`totalNanoAiu`, premium requests) is not
-  surfaced; agent-walker reports token volume and API-equivalent cost like
-  every other tab.
+- Premium-request counts are not surfaced; tokens, API-equivalent cost, and
+  the credit ledger are.

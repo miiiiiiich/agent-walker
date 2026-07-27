@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   double-count nor fall out of the analysis window. Sessions that never exit
   cleanly contribute activity but no tokens until they close — see
   docs/copilot.md for the full contract. Dotted model spellings
-  (`claude-sonnet-4.6`) now resolve against dashed pricing keys.
+  (`claude-sonnet-4.6`) now resolve against dashed pricing keys. The tab
+  also carries a Copilot-only CREDITS panel — daily AI-credit spend rebuilt
+  from the cumulative nano-AIU ledger, which keeps tracking even for
+  sessions that never exit cleanly — and COMPLETION turn durations from the
+  CLI's explicit turn boundaries.
 
 ## [0.10.1] - 2026-07-21
 

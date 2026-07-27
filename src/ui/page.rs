@@ -91,6 +91,18 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         }
     }
 
+    // CREDITS history is Copilot-only for the same reason LIMITS is
+    // Codex-only: the AI-credit ledger is that provider's own accounting,
+    // and it is deliberately historical.
+    if summary.provider == Provider::Copilot {
+        let chart_width = if two_column { left_u16 } else { width };
+        let credits = charts::credits_chart_lines(summary, chart_width, CHART_BODY);
+        if !credits.is_empty() {
+            lines.extend(credits);
+            lines.push(Line::default());
+        }
+    }
+
     // Per-tab v0.9 sections: SKILLS is Claude-only (attribution is a Claude
     // log feature), MODES renders each provider's own dial. The Total tab
     // shows neither — they are not cross-provider metrics.
@@ -349,6 +361,16 @@ mod tests {
             fast_turns: 0,
             efforts: vec![("xhigh".to_owned(), 93), ("low".to_owned(), 6)],
         };
+        summary.credits = Some(crate::model::CreditsHistory {
+            days: (0..30)
+                .map(|offset| {
+                    let date = time::macros::date!(2026 - 06 - 28) + time::Duration::days(offset);
+                    (date, if offset == 20 { 4.2 } else { 0.4 })
+                })
+                .collect(),
+            total: 15.8,
+            peak: Some((time::macros::date!(2026 - 07 - 18), 4.2)),
+        });
         summary
     }
 
@@ -371,10 +393,17 @@ mod tests {
         assert!(codex.contains("xhigh"));
         assert!(!codex.contains("SKILLS"));
 
+        let copilot = rendered(&v09_summary(Provider::Copilot), 110);
+        assert!(copilot.contains("CREDITS"));
+        assert!(copilot.contains("30d total"));
+        assert!(!copilot.contains("SKILLS"));
+        assert!(!copilot.contains("LIMITS"));
+
         let total = rendered(&v09_summary(Provider::Combined), 110);
         assert!(!total.contains("SKILLS"));
         assert!(!total.contains("LIMITS"));
         assert!(!total.contains("MODES"));
+        assert!(!total.contains("CREDITS"));
     }
 
     /// Narrow terminals stack the sections; the per-tab rules still hold.
@@ -429,9 +458,20 @@ mod tests {
         assert!(codex_page.contains("peak 100%"));
         assert!(codex_page.contains("xhigh"));
 
+        let copilot = report
+            .providers
+            .iter()
+            .find(|summary| summary.provider == Provider::Copilot)
+            .expect("demo should have a Copilot provider");
+        let copilot_page = rendered(copilot, 110);
+        assert!(copilot_page.contains("CREDITS"));
+        assert!(copilot_page.contains("30d total"));
+        assert!(copilot_page.contains("COMPLETION"));
+
         let total_page = rendered(&report.combined, 110);
         assert!(!total_page.contains("SKILLS"));
         assert!(!total_page.contains("LIMITS"));
         assert!(!total_page.contains("MODES"));
+        assert!(!total_page.contains("CREDITS"));
     }
 }
