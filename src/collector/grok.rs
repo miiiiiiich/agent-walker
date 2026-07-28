@@ -112,7 +112,11 @@ pub fn collect(
         return collection;
     }
     primary.sort();
-    fork_copies.sort();
+    // Nested forks (a fork of a fork) must merge ancestor-first, or the
+    // shared copied turns would take their metadata from whichever encoded
+    // path happens to sort first. Depth in the fork ancestry decides;
+    // lexical order only breaks ties.
+    sort_forks_ancestor_first(&mut fork_copies, &dir_meta);
     let files: Vec<PathBuf> = primary.into_iter().chain(fork_copies).collect();
 
     let mut per_file =
@@ -156,12 +160,51 @@ pub fn collect(
     collection
 }
 
+/// Order fork copies by ancestry depth (parents before their children),
+/// breaking ties lexically, so merge metadata always comes from the oldest
+/// copy of a shared turn.
+fn sort_forks_ancestor_first(fork_copies: &mut [PathBuf], dir_meta: &HashMap<PathBuf, DirMeta>) {
+    let parent_by_session: HashMap<&str, &DirMeta> = dir_meta
+        .iter()
+        .filter_map(|(path, meta)| {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(|sid| (sid, meta))
+        })
+        .collect();
+    let depth_of = |path: &PathBuf| -> usize {
+        let mut depth = 0usize;
+        let mut current = dir_meta
+            .get(path)
+            .and_then(|meta| meta.parent_session_id.clone());
+        while let Some(parent) = current {
+            depth += 1;
+            if depth >= 64 {
+                break; // cycle guard for corrupt ancestry
+            }
+            current = parent_by_session
+                .get(parent.as_str())
+                .and_then(|meta| meta.parent_session_id.clone());
+        }
+        depth
+    };
+    fork_copies.sort_by(|left, right| {
+        depth_of(left)
+            .cmp(&depth_of(right))
+            .then_with(|| left.cmp(right))
+    });
+}
+
 /// Enumeration-time facts from `summary.json`, re-read fresh on every run.
 struct DirMeta {
     /// `session_kind`: `None` for an ordinary session, `Some` for fork /
-    /// worktree copies (subagents are filtered out before this is stored).
+    /// worktree / subagent variants.
     kind: Option<String>,
     project: Option<String>,
+    /// Fork ancestry (`parent_session_id`), used to order nested forks
+    /// ancestor-first so merge metadata always comes from the oldest copy.
+    parent_session_id: Option<String>,
 }
 
 /// Read the sibling `summary.json`. `Ok` with `kind: None` covers both a
@@ -177,6 +220,7 @@ fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
             return Ok(DirMeta {
                 kind: None,
                 project: None,
+                parent_session_id: None,
             });
         }
         Err(_) => return Err(()),
@@ -192,6 +236,10 @@ fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
             .and_then(|info| info.get("cwd"))
             .and_then(Value::as_str)
             .map(project_from_cwd),
+        parent_session_id: summary
+            .get("parent_session_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -529,6 +577,43 @@ mod tests {
         assert_eq!(
             collection.usage_events[0].project.as_deref(),
             Some("parent/project")
+        );
+    }
+
+    /// A fork of a fork must merge ancestor-first regardless of how the
+    /// encoded paths sort: the shared copied turn keeps the FIRST fork's
+    /// session identity even when the grandchild's directory sorts before
+    /// it.
+    #[test]
+    fn nested_forks_merge_ancestor_first() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        // Fork A (depth 1) does its own unique turn "p-a".
+        let turn_a = r#"{"timestamp":1785200000,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","prompt_id":"p-a","usage":{"inputTokens":900,"outputTokens":90,"cachedReadTokens":0,"reasoningTokens":0,"modelUsage":{"grok-4.5":{"inputTokens":900,"outputTokens":90,"cachedReadTokens":0,"reasoningTokens":0}}}}}}"#;
+        write_session(
+            temp.path(),
+            "cwd",
+            "zz-fork-a",
+            &format!("{turn_a}\n"),
+            Some(r#"{"session_kind":"fork","parent_session_id":"gone-primary"}"#),
+        );
+        // Fork B (depth 2, forked from A) copies A's turn with a rewritten
+        // timestamp — and its directory sorts BEFORE A's.
+        let copy = turn_a.replace("\"timestamp\":1785200000", "\"timestamp\":1785999999");
+        write_session(
+            temp.path(),
+            "cwd",
+            "aa-fork-b",
+            &format!("{copy}\n"),
+            Some(r#"{"session_kind":"fork","parent_session_id":"zz-fork-a"}"#),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        // Ancestor-first ordering: the turn belongs to fork A, not B.
+        assert_eq!(
+            collection.usage_events[0].session_id.as_deref(),
+            Some("zz-fork-a")
         );
     }
 

@@ -39,8 +39,10 @@ exist. Everything is read locally; nothing leaves the machine.
   collapses into its original (keeping the original's timestamp).
 - **Subagent sessions** (parallel `task` runs) get their own directories,
   marked `session_kind: "subagent…"` in `summary.json`, while the
-  coordinator folds their usage into its own turn totals. Those directories
-  are excluded wholesale — the parent already carries the tokens.
+  coordinator folds their usage into its own turn totals. Their usage and
+  turn durations are therefore suppressed (the parent already carries the
+  tokens) — but their unique tool calls and activity ARE kept, attributed
+  as subagent work.
 - **Resume** appends to the same directory; nothing is copied.
 
 ## Caveats
