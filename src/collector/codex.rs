@@ -9,8 +9,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedEffortEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent,
-    list_files, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedRateLimitSample, KeyedToolEvent,
+    KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
     Collection, DurationEvent, EffortEvent, Provider, RateLimitSample, SessionTouch, SourceKind,
@@ -333,11 +333,14 @@ fn collect_duration_event(
     let Some(duration_ms) = u64_path(value, &["payload", "duration_ms"]) else {
         return;
     };
-    events.duration_events.push(DurationEvent {
-        timestamp,
-        session_id: session_id.cloned(),
-        duration_ms,
-        status,
+    events.duration_events.push(KeyedDurationEvent {
+        key: None,
+        event: DurationEvent {
+            timestamp,
+            session_id: session_id.cloned(),
+            duration_ms,
+            status,
+        },
     });
 }
 

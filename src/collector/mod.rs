@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub mod grok;
 pub mod opencode;
 
 use std::collections::HashMap;
@@ -38,9 +39,11 @@ use crate::model::{
 ///   `FileEvents` lack the iteration events.
 /// - 12: `FileEvents` gained `credit_samples` (Copilot CREDITS), changing its
 ///   bincode layout.
+/// - 13: duration events became keyed (`KeyedDurationEvent`, Grok fork
+///   dedup), changing the `FileEvents` layout.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 12;
+const CACHE_VERSION: u32 = 13;
 
 /// Normalize a working-directory path into a project label: strip the home
 /// prefix and (on Windows) normalize separators to `/` so the same repo
@@ -126,7 +129,7 @@ pub struct FileEvents {
     pub usage_events: Vec<KeyedUsageEvent>,
     pub tool_events: Vec<KeyedToolEvent>,
     pub session_touches: Vec<SessionTouch>,
-    pub duration_events: Vec<DurationEvent>,
+    pub duration_events: Vec<KeyedDurationEvent>,
     pub rate_limit_samples: Vec<KeyedRateLimitSample>,
     pub credit_samples: Vec<KeyedCreditSample>,
     pub effort_events: Vec<KeyedEffortEvent>,
@@ -159,6 +162,15 @@ pub struct KeyedRateLimitSample {
 pub struct KeyedCreditSample {
     pub key: Option<String>,
     pub event: CreditSample,
+}
+
+/// Duration event with an optional cross-file dedup key. Most collectors
+/// leave it `None` (their durations never appear twice); Grok keys turn
+/// durations by `prompt_id` because fork copies replay the parent's turns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedDurationEvent {
+    pub key: Option<String>,
+    pub event: DurationEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,6 +515,11 @@ fn dedupe_into<E>(
     }
 }
 
+fn absorb_file_stats(collection: &mut Collection, events: &FileEvents) {
+    collection.stats.lines_seen += events.lines_seen;
+    collection.stats.parse_errors += events.parse_errors;
+}
+
 /// Merge ordered per-file events into the collection, applying cross-file
 /// deduplication. Keyed usage duplicates keep the variant with the larger
 /// token volume but fill missing metadata from the loser; keyed tool /
@@ -512,11 +529,16 @@ fn dedupe_into<E>(
 /// order doesn't put originals first (`archived_sessions` sorts before
 /// `sessions` wholesale), so first-seen-wins would let a replay shift an
 /// event's day attribution.
+#[allow(
+    clippy::too_many_lines,
+    reason = "One homogeneous keyed-dedupe loop per event kind; splitting them adds indirection without reuse and the count grows with event kinds, not complexity."
+)]
 pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<FileEvents>)>) {
     let mut seen_usage: HashMap<String, usize> = HashMap::new();
     let mut seen_tools: HashMap<String, usize> = HashMap::new();
     let mut seen_limits: HashMap<String, usize> = HashMap::new();
     let mut seen_credits: HashMap<String, usize> = HashMap::new();
+    let mut seen_durations: HashMap<String, usize> = HashMap::new();
     let mut seen_efforts: HashMap<String, usize> = HashMap::new();
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
 
@@ -527,10 +549,19 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
             debug!(path = %path.display(), "skipping unreadable log file");
             continue;
         };
-        collection.stats.lines_seen += events.lines_seen;
-        collection.stats.parse_errors += events.parse_errors;
+        absorb_file_stats(collection, &events);
         collection.session_touches.extend(events.session_touches);
-        collection.duration_events.extend(events.duration_events);
+        for keyed in events.duration_events {
+            dedupe_into(
+                &mut collection.duration_events,
+                &mut seen_durations,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                },
+            );
+        }
 
         for keyed in events.usage_events {
             dedupe_into(

@@ -9,8 +9,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedCreditSample, KeyedToolEvent, KeyedUsageEvent, merge_into, parse_files_cached,
-    project_from_cwd,
+    FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedToolEvent, KeyedUsageEvent, merge_into,
+    parse_files_cached, project_from_cwd,
 };
 use crate::model::{
     Collection, CreditSample, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
@@ -358,11 +358,14 @@ fn collect_turn_duration(
         && turn_starts.get(&turn_id).is_some_and(|start| end >= *start)
         && let Some(start) = turn_starts.remove(&turn_id)
     {
-        events.duration_events.push(DurationEvent {
-            timestamp: Some(end),
-            session_id: session_id.cloned(),
-            duration_ms: u64::try_from((end - start).whole_milliseconds()).unwrap_or(0),
-            status: Some("turn".to_owned()),
+        events.duration_events.push(KeyedDurationEvent {
+            key: None,
+            event: DurationEvent {
+                timestamp: Some(end),
+                session_id: session_id.cloned(),
+                duration_ms: u64::try_from((end - start).whole_milliseconds()).unwrap_or(0),
+                status: Some("turn".to_owned()),
+            },
         });
     }
 }

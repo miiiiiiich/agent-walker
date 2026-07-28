@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Grok Build (xAI) support: a new auto-detected provider tab reading
+  `~/.grok/sessions/*/*/updates.jsonl` (override with `--grok-dir` /
+  `GROK_HOME`). Per-prompt token deltas with per-model splits come from the
+  durable `turn_completed` records; fork copies deduplicate by `prompt_id`
+  (their timestamps are rewritten, the id is not), and subagent session
+  directories are excluded because the coordinator already folds their
+  usage into its own totals. See docs/grok.md for the full contract.
+
 ## [0.11.0] - 2026-07-28
 
 ### Fixed
@@ -308,6 +320,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.11.0...HEAD
 [0.11.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.1
 [0.10.0]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.0

@@ -87,7 +87,7 @@ Flags:
 | `--share <path>` | Render the stats card to a PNG, print its caption, and exit |
 | `--no-cache` | Rescan every log file, ignoring the parse cache |
 | `--no-cursor` | Disable the Cursor collector — the only one that sends a credential off the machine (your Cursor session cookie, to cursor.com) — so it makes no network request |
-| `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` / `--copilot-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_HOME`, and `COPILOT_HOME` when set) |
+| `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` / `--copilot-dir` / `--grok-dir` | Point at non-standard log locations (also honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_HOME`, `COPILOT_HOME`, and `GROK_HOME` when set) |
 | `--cursor-state-db` | Point at a non-standard Cursor `state.vscdb` (or set `CURSOR_TOKEN` to supply the session token directly) |
 | `--completions <shell>` | Print shell completions (e.g. `--completions zsh`) and exit |
 
@@ -115,6 +115,7 @@ Every agent is auto-detected — install nothing, configure nothing, just run it
 | **[Claude Code](docs/claude.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[Codex CLI](docs/codex.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[OpenCode](docs/opencode.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[Grok Build](docs/grok.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[GitHub Copilot CLI](docs/copilot.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **[Cursor](docs/cursor.md)** | ✅ | ✅ | — | — | ✅ |
 | **[Antigravity](docs/agy.md)** | ✅ | ✅ | ✅ | ✅ | ✅ |

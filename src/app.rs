@@ -8,7 +8,7 @@ use clap_complete::Shell;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
-use crate::collector::{agy, claude, codex, copilot, cursor, opencode};
+use crate::collector::{agy, claude, codex, copilot, cursor, grok, opencode};
 use crate::format::snapshot_app;
 use crate::model::{AppSummary, Collection};
 use crate::ui;
@@ -37,6 +37,12 @@ pub struct Args {
     /// feeds the token totals like every other provider.
     #[arg(long, value_name = "DIR")]
     pub agy_dir: Option<PathBuf>,
+
+    /// Override the Grok Build root (default `~/.grok`, or `$GROK_HOME`).
+    /// Auto-detected: its tab appears only when session logs are present
+    /// under `sessions/`.
+    #[arg(long, value_name = "DIR")]
+    pub grok_dir: Option<PathBuf>,
 
     /// Override the GitHub Copilot CLI root (default `~/.copilot`, or
     /// `$COPILOT_HOME`). Auto-detected: its tab appears only when
@@ -113,6 +119,9 @@ pub struct Config {
     /// rather than fatal, since Antigravity is optional — its tab only shows up
     /// when logs are actually found there.
     pub agy_dir: Option<PathBuf>,
+    /// Grok Build root, or `None` when it can't be resolved. Optional and
+    /// auto-detected like the other secondary providers.
+    pub grok_dir: Option<PathBuf>,
     /// GitHub Copilot CLI root, or `None` when it can't be resolved. Optional
     /// and auto-detected like Antigravity: the tab appears only when session
     /// logs exist under `session-state/`.
@@ -189,6 +198,7 @@ pub fn run(args: Args) -> Result<()> {
         copilot_dir: args
             .copilot_dir
             .or_else(|| crate::paths::copilot_home().ok()),
+        grok_dir: args.grok_dir.or_else(|| crate::paths::grok_home().ok()),
         opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
         // Cursor is auto-detected (a signed-in state.vscdb) but is the one
         // collector that reaches the network; `None` when signed out / disabled.
@@ -246,6 +256,105 @@ pub fn load_report(config: &Config) -> Result<AppSummary> {
     })
 }
 
+/// Run every collector (threaded where independent) and keep the providers
+/// that produced anything. Split out of `load_report_inner` so the report
+/// assembly stays readable as providers accumulate.
+fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<Collection>> {
+    let (
+        codex_result,
+        agy_result,
+        opencode_result,
+        copilot_result,
+        grok_result,
+        cursor_result,
+        claude_collection,
+    ) =
+        std::thread::scope(|scope| {
+            let codex_handle = scope.spawn(|| {
+                codex::collect(
+                    &config.codex_dir,
+                    mtime_floor,
+                    config.use_cache,
+                    config.local_offset,
+                )
+            });
+            // Cursor is auto-detected (disable with --no-cursor) and the only
+            // collector that hits the network, so it runs in its own thread
+            // alongside the local ones.
+            let cursor_handle = scope.spawn(|| {
+                config.cursor.as_ref().map(|cursor| {
+                    cursor::collect(
+                        &cursor.state_db,
+                        &cursor.cli_config,
+                        cursor.token.as_deref(),
+                        mtime_floor,
+                        config.local_offset,
+                    )
+                })
+            });
+            // Antigravity and OpenCode are probed whenever their directory
+            // resolved; the collector returns an empty collection for a missing
+            // dir / DB, and an empty provider is filtered out before it ever
+            // becomes a tab.
+            let agy_handle = scope.spawn(|| {
+                config.agy_dir.as_ref().map(|dir| {
+                    agy::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let opencode_handle = scope.spawn(|| {
+                config.opencode_dir.as_ref().map(|dir| {
+                    opencode::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let copilot_handle = scope.spawn(|| {
+                config.copilot_dir.as_ref().map(|dir| {
+                    copilot::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let grok_handle = scope.spawn(|| {
+                config.grok_dir.as_ref().map(|dir| {
+                    grok::collect(dir, mtime_floor, config.use_cache, config.local_offset)
+                })
+            });
+            let claude_collection = claude::collect(
+                &config.claude_dir,
+                mtime_floor,
+                config.use_cache,
+                config.local_offset,
+            );
+            (
+                codex_handle.join(),
+                agy_handle.join(),
+                opencode_handle.join(),
+                copilot_handle.join(),
+                grok_handle.join(),
+                cursor_handle.join(),
+                claude_collection,
+            )
+        });
+
+    let mut collections = vec![
+        claude_collection,
+        codex_result.map_err(|_| anyhow!("Codex collector thread panicked"))?,
+    ];
+    if let Some(agy) = agy_result.map_err(|_| anyhow!("Antigravity collector thread panicked"))? {
+        collections.push(agy);
+    }
+    if let Some(oc) = opencode_result.map_err(|_| anyhow!("OpenCode collector thread panicked"))? {
+        collections.push(oc);
+    }
+    if let Some(cp) = copilot_result.map_err(|_| anyhow!("Copilot collector thread panicked"))? {
+        collections.push(cp);
+    }
+    if let Some(gk) = grok_result.map_err(|_| anyhow!("Grok collector thread panicked"))? {
+        collections.push(gk);
+    }
+    if let Some(cursor) = cursor_result.map_err(|_| anyhow!("Cursor collector thread panicked"))? {
+        collections.push(cursor);
+    }
+    Ok(collections)
+}
+
 /// A provider earns a tab only if it has real activity. Token volume catches
 /// most agents; sessions, tools, completions, and the fixed-window credit
 /// ledger are the fallback for a session that logged activity but no usage
@@ -292,88 +401,7 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
         .max(u64::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30) + 1);
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
-    let (
-        codex_result,
-        agy_result,
-        opencode_result,
-        copilot_result,
-        cursor_result,
-        claude_collection,
-    ) = std::thread::scope(|scope| {
-        let codex_handle = scope.spawn(|| {
-            codex::collect(
-                &config.codex_dir,
-                mtime_floor,
-                config.use_cache,
-                config.local_offset,
-            )
-        });
-        // Cursor is auto-detected (disable with --no-cursor) and the only
-        // collector that hits the network, so it runs in its own thread
-        // alongside the local ones.
-        let cursor_handle = scope.spawn(|| {
-            config.cursor.as_ref().map(|cursor| {
-                cursor::collect(
-                    &cursor.state_db,
-                    &cursor.cli_config,
-                    cursor.token.as_deref(),
-                    mtime_floor,
-                    config.local_offset,
-                )
-            })
-        });
-        // Antigravity and OpenCode are probed whenever their directory
-        // resolved; the collector returns an empty collection for a missing
-        // dir / DB, and an empty provider is filtered out before it ever
-        // becomes a tab.
-        let agy_handle = scope.spawn(|| {
-            config
-                .agy_dir
-                .as_ref()
-                .map(|dir| agy::collect(dir, mtime_floor, config.use_cache, config.local_offset))
-        });
-        let opencode_handle = scope.spawn(|| {
-            config.opencode_dir.as_ref().map(|dir| {
-                opencode::collect(dir, mtime_floor, config.use_cache, config.local_offset)
-            })
-        });
-        let copilot_handle = scope.spawn(|| {
-            config.copilot_dir.as_ref().map(|dir| {
-                copilot::collect(dir, mtime_floor, config.use_cache, config.local_offset)
-            })
-        });
-        let claude_collection = claude::collect(
-            &config.claude_dir,
-            mtime_floor,
-            config.use_cache,
-            config.local_offset,
-        );
-        (
-            codex_handle.join(),
-            agy_handle.join(),
-            opencode_handle.join(),
-            copilot_handle.join(),
-            cursor_handle.join(),
-            claude_collection,
-        )
-    });
-
-    let mut collections = vec![
-        claude_collection,
-        codex_result.map_err(|_| anyhow!("Codex collector thread panicked"))?,
-    ];
-    if let Some(agy) = agy_result.map_err(|_| anyhow!("Antigravity collector thread panicked"))? {
-        collections.push(agy);
-    }
-    if let Some(oc) = opencode_result.map_err(|_| anyhow!("OpenCode collector thread panicked"))? {
-        collections.push(oc);
-    }
-    if let Some(cp) = copilot_result.map_err(|_| anyhow!("Copilot collector thread panicked"))? {
-        collections.push(cp);
-    }
-    if let Some(cursor) = cursor_result.map_err(|_| anyhow!("Cursor collector thread panicked"))? {
-        collections.push(cursor);
-    }
+    let collections = collect_all(config, mtime_floor)?;
 
     let providers = collections
         .iter()
