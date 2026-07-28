@@ -30,14 +30,95 @@ fn axis_label_row(width: u16, points: &[(usize, String)]) -> Line<'static> {
     ))
 }
 
-/// Tokens by hour of day as hand-rendered bars with a labelled y-axis; the
-/// peak hour glows gold.
+/// Geometry shared by every vertical (column) chart: a 6-char y-label
+/// column plus the axis bar, then exactly ONE character per column — the
+/// deliberate density standard (wider 2-char bars read worse; user decision
+/// 2026-07-28) — and an x-axis label row underneath. New column charts must
+/// render through `column_chart_lines` so they inherit this frame.
+pub(super) const Y_AXIS_WIDTH: usize = 7;
+
+/// One column of a column chart.
+pub(super) struct ChartColumn {
+    /// Fill level in half-cells (`0..=2 * body_height`).
+    pub level: usize,
+    pub color: Color,
+    /// Glyph drawn on the baseline row when the column is empty — charts
+    /// distinguish "measured zero" (`▁`), "no data" (`·`), and blank.
+    pub baseline: &'static str,
+}
+
+/// Render a column chart in the shared frame. `y_labels` are the top /
+/// middle / bottom axis labels (right-aligned into the 6-char gutter);
+/// `x_points` pair a column index with its label.
+pub(super) fn column_chart_lines(
+    title: &'static str,
+    annotation: &str,
+    y_labels: &[String; 3],
+    columns: &[ChartColumn],
+    x_points: &[(usize, String)],
+    width: u16,
+    body_height: usize,
+) -> Vec<Line<'static>> {
+    let height = body_height.max(1);
+    let mut out = vec![utils::section_title(title, annotation)];
+    for row in 0..height {
+        let label = if row == 0 {
+            format!("{:>6}", y_labels[0])
+        } else if row == height / 2 {
+            format!("{:>6}", y_labels[1])
+        } else if row == height - 1 {
+            format!("{:>6}", y_labels[2])
+        } else {
+            " ".repeat(6)
+        };
+        let mut spans = vec![
+            Span::styled(label, Style::default().fg(theme::MUTED)),
+            Span::styled("│", Style::default().fg(theme::DIM)),
+        ];
+        let half_bottom = 2 * (height - 1 - row);
+        let half_top = half_bottom + 1;
+        let baseline = row == height - 1;
+        for column in columns {
+            let glyph = if column.level > half_top {
+                "█"
+            } else if column.level > half_bottom {
+                "▄"
+            } else if baseline && column.level == 0 {
+                column.baseline
+            } else {
+                " "
+            };
+            spans.push(Span::styled(
+                glyph.to_owned(),
+                Style::default().fg(column.color),
+            ));
+        }
+        out.push(Line::from(spans));
+    }
+    let points: Vec<(usize, String)> = x_points
+        .iter()
+        .map(|(index, label)| (Y_AXIS_WIDTH + index, label.clone()))
+        .collect();
+    out.push(axis_label_row(width, &points));
+    out
+}
+
+/// Half-cell fill level for a value against the chart maximum: zero stays
+/// zero, anything positive shows at least one half-cell.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "Chart geometry is display-only."
 )]
+pub(super) fn level_for(value: f64, max: f64, body_height: usize) -> usize {
+    if value <= 0.0 || max <= 0.0 {
+        return 0;
+    }
+    let half_cells = body_height.max(1) * 2;
+    ((value / max) * half_cells as f64).round().max(1.0) as usize
+}
+
 pub(super) fn hourly_chart_lines(
     summary: &Summary,
     width: u16,
@@ -48,11 +129,6 @@ pub(super) fn hourly_chart_lines(
         return Vec::new();
     }
     let peak_hour = summary.busiest_hour.map(|(hour, _)| usize::from(hour));
-    let graph_available = usize::from(width).saturating_sub(7);
-    let chars_per_bar = if graph_available >= 48 { 2 } else { 1 };
-    let height = body_height.max(1);
-    let half_cells = height * 2;
-
     let annotation = summary
         .busiest_hour
         .map_or_else(String::new, |(hour, usage)| {
@@ -62,71 +138,47 @@ pub(super) fn hourly_chart_lines(
                 format!("peak {hour:02}:00 · {}", format_tokens(usage))
             }
         });
-    let mut out = vec![utils::section_title("BY HOUR", &annotation)];
 
-    let levels: Vec<usize> = summary
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "Chart geometry is display-only."
+    )]
+    let columns: Vec<ChartColumn> = summary
         .hourly_usage
         .iter()
-        .map(|value| {
-            if *value == 0 {
-                0
-            } else {
-                ((*value as f64 / max as f64) * half_cells as f64)
-                    .round()
-                    .max(1.0) as usize
-            }
-        })
-        .collect();
-
-    for row in 0..height {
-        let label = if row == 0 {
-            format!("{:>6}", format_tokens(max))
-        } else if row == height / 2 {
-            format!(
-                "{:>6}",
-                format_tokens((max as f64 * (height - height / 2) as f64 / height as f64) as u64)
-            )
-        } else if row == height - 1 {
-            format!("{:>6}", 0)
-        } else {
-            " ".repeat(6)
-        };
-        let mut spans = vec![
-            Span::styled(label, Style::default().fg(theme::MUTED)),
-            Span::styled("│", Style::default().fg(theme::DIM)),
-        ];
-        let half_bottom = 2 * (height - 1 - row);
-        let half_top = half_bottom + 1;
-        for (hour, level) in levels.iter().enumerate() {
-            let glyph = if *level > half_top {
-                "█"
-            } else if *level > half_bottom {
-                "▄"
-            } else {
-                " "
-            };
-            let color = if peak_hour == Some(hour) {
+        .enumerate()
+        .map(|(hour, value)| ChartColumn {
+            level: level_for(*value as f64, max as f64, body_height),
+            color: if peak_hour == Some(hour) {
                 theme::GOLD
             } else {
                 theme::BLUE
-            };
-            spans.push(Span::styled(
-                glyph.repeat(chars_per_bar),
-                Style::default().fg(color),
-            ));
-        }
-        out.push(Line::from(spans));
-    }
-
-    let points: Vec<(usize, String)> = (0..=6)
-        .map(|step| {
-            let hour = step * 4;
-            let column = (hour * chars_per_bar).min(24 * chars_per_bar - 1);
-            (7 + column, format!("{hour:02}"))
+            },
+            baseline: " ",
         })
         .collect();
-    out.push(axis_label_row(width, &points));
-    out
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Chart geometry is display-only."
+    )]
+    let mid = (max as f64 / 2.0) as u64;
+    let x_points: Vec<(usize, String)> = (0..=6)
+        .map(|step| {
+            let hour = step * 4;
+            (hour.min(23), format!("{hour:02}"))
+        })
+        .collect();
+    column_chart_lines(
+        "BY HOUR",
+        &annotation,
+        &[format_tokens(max), format_tokens(mid), "0".to_owned()],
+        &columns,
+        &x_points,
+        width,
+        body_height,
+    )
 }
 
 /// Daily volume as stacked per-model bars, rendered by hand: one column per
@@ -149,7 +201,7 @@ pub(super) fn model_chart_lines(
     width: u16,
     body_height: usize,
 ) -> Vec<Line<'static>> {
-    const Y_WIDTH: usize = 7; // 6-char label column + axis bar
+    const Y_WIDTH: usize = Y_AXIS_WIDTH;
     let day_count = summary.daily.len();
     let graph_width = usize::from(width).saturating_sub(Y_WIDTH).max(1);
     let height = body_height.max(1);
@@ -311,11 +363,11 @@ pub(super) fn model_chart_lines(
     out
 }
 
-/// LIMITS history: daily peak of the plan's 5h window as BY HOUR-style bars.
-/// The y-axis is FIXED at 0-100% (unlike the auto-scaled charts) so a quiet
-/// month doesn't inflate a 3% day into a full column. A day that hit the
-/// limit renders red; a day with no provider use renders as a faint dot; a
-/// day with use but no recorded sample stays blank.
+/// LIMITS history: daily peak of the plan's 5h window in the shared column
+/// frame. The y-axis is FIXED at 0-100% (unlike the auto-scaled charts) so a
+/// quiet month doesn't inflate a 3% day into a full column. A day that hit
+/// the limit renders red; a day with no provider use renders as a faint dot;
+/// a day with use but no recorded sample stays blank.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -333,16 +385,6 @@ pub(super) fn limits_chart_lines(
     if limits.days.is_empty() {
         return Vec::new();
     }
-    let height = body_height.max(1);
-    let half_cells = height * 2;
-    let day_count = limits.days.len();
-    let graph_available = usize::from(width).saturating_sub(7);
-    let chars_per_bar = if graph_available >= day_count * 2 {
-        2
-    } else {
-        1
-    };
-
     let annotation = limits.peak.map_or_else(String::new, |(date, value)| {
         format!(
             "peak {value:.0}% · {} {}",
@@ -350,80 +392,67 @@ pub(super) fn limits_chart_lines(
             date.day()
         )
     });
-    let mut out = vec![utils::section_title("LIMITS", &annotation)];
 
-    let level_of = |day: &LimitDay| -> usize {
-        match day {
-            LimitDay::Measured(value) if *value > 0.0 => {
-                ((value / 100.0) * half_cells as f64).round().max(1.0) as usize
-            }
-            _ => 0,
-        }
-    };
-
-    for row in 0..height {
-        let label = match row {
-            0 => format!("{:>5}%", 100),
-            _ if row == height / 2 => format!("{:>5}%", 50),
-            _ if row == height - 1 => format!("{:>6}", 0),
-            _ => " ".repeat(6),
-        };
-        let mut spans = vec![
-            Span::styled(label, Style::default().fg(theme::MUTED)),
-            Span::styled("│", Style::default().fg(theme::DIM)),
-        ];
-        let half_bottom = 2 * (height - 1 - row);
-        let half_top = half_bottom + 1;
-        let baseline = row == height - 1;
-        for (_, day) in &limits.days {
-            let level = level_of(day);
-            let glyph = if level > half_top {
-                "█"
-            } else if level > half_bottom {
-                "▄"
-            } else if baseline {
-                match day {
-                    // Measured 0% is a real data point, not an absence.
-                    LimitDay::Measured(_) => "▁",
-                    LimitDay::NoUse => "·",
-                    LimitDay::NoSample => " ",
-                }
-            } else {
-                " "
-            };
-            let color = match day {
-                LimitDay::Measured(value) if *value >= 99.5 => theme::HOT,
-                LimitDay::Measured(_) => theme::GREEN,
-                _ => theme::DIM,
-            };
-            spans.push(Span::styled(
-                glyph.repeat(chars_per_bar),
-                Style::default().fg(color),
-            ));
-        }
-        out.push(Line::from(spans));
-    }
-
-    let points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
+    let half_cells = body_height.max(1) * 2;
+    let columns: Vec<ChartColumn> = limits
+        .days
+        .iter()
+        .map(|(_, day)| match day {
+            LimitDay::Measured(value) => ChartColumn {
+                level: if *value > 0.0 {
+                    ((value / 100.0) * half_cells as f64).round().max(1.0) as usize
+                } else {
+                    0
+                },
+                color: if *value >= 99.5 {
+                    theme::HOT
+                } else {
+                    theme::GREEN
+                },
+                // Measured 0% is a real data point, not an absence.
+                baseline: "▁",
+            },
+            LimitDay::NoUse => ChartColumn {
+                level: 0,
+                color: theme::DIM,
+                baseline: "·",
+            },
+            LimitDay::NoSample => ChartColumn {
+                level: 0,
+                color: theme::DIM,
+                baseline: " ",
+            },
+        })
+        .collect();
+    let day_count = limits.days.len();
+    let x_points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
         .iter()
         .filter_map(|fraction| {
             let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
             let (date, _) = limits.days.get(index)?;
             Some((
-                7 + index * chars_per_bar,
+                index,
                 format!("{} {}", utils::month_abbrev(date.month()), date.day()),
             ))
         })
         .collect();
-    out.push(axis_label_row(width, &points));
-    out
+    column_chart_lines(
+        "LIMITS",
+        &annotation,
+        &["100%".to_owned(), "50%".to_owned(), "0".to_owned()],
+        &columns,
+        &x_points,
+        width,
+        body_height,
+    )
 }
 
-/// CREDITS history: daily AI-credit spend as BY HOUR-style bars, auto-scaled
-/// to the busiest day (credits are a spend quantity, not a utilization
-/// percentage). Historical by design — a ledger of spend that already
-/// happened, never a remaining-quota meter. A zero day on the baseline
-/// renders as a faint dot so "no spend" reads differently from "tiny spend".
+/// CREDITS history: daily AI-credit spend in the shared column frame,
+/// auto-scaled to the busiest day (credits are a spend quantity, not a
+/// utilization percentage). Historical by design — a ledger of spend that
+/// already happened, never a remaining-quota meter. A zero day on the
+/// baseline renders as a faint dot so "no spend" reads differently from
+/// "tiny spend".
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -444,16 +473,6 @@ pub(super) fn credits_chart_lines(
     if credits.days.is_empty() || peak_value <= 0.0 {
         return Vec::new();
     }
-    let height = body_height.max(1);
-    let half_cells = height * 2;
-    let day_count = credits.days.len();
-    let graph_available = usize::from(width).saturating_sub(7);
-    let chars_per_bar = if graph_available >= day_count * 2 {
-        2
-    } else {
-        1
-    };
-
     let annotation = format!(
         "30d total {total} · peak {peak} · {month} {day}",
         total = utils::format_credits(credits.total),
@@ -461,65 +480,48 @@ pub(super) fn credits_chart_lines(
         month = utils::month_abbrev(peak_date.month()),
         day = peak_date.day(),
     );
-    let mut out = vec![utils::section_title("CREDITS", &annotation)];
 
-    for row in 0..height {
-        let label = match row {
-            0 => format!("{:>6}", utils::format_credits(peak_value)),
-            _ if row == height / 2 => format!("{:>6}", utils::format_credits(peak_value / 2.0)),
-            _ if row == height - 1 => format!("{:>6}", 0),
-            _ => " ".repeat(6),
-        };
-        let mut spans = vec![
-            Span::styled(label, Style::default().fg(theme::MUTED)),
-            Span::styled("│", Style::default().fg(theme::DIM)),
-        ];
-        let half_bottom = 2 * (height - 1 - row);
-        let half_top = half_bottom + 1;
-        let baseline = row == height - 1;
-        for (_, value) in &credits.days {
-            let level = if *value > 0.0 {
-                ((value / peak_value) * half_cells as f64).round().max(1.0) as usize
-            } else {
-                0
-            };
-            let glyph = if level > half_top {
-                "█"
-            } else if level > half_bottom {
-                "▄"
-            } else if baseline {
-                if *value > 0.0 { "▁" } else { "·" }
-            } else {
-                " "
-            };
-            let color = if *value > 0.0 {
+    let columns: Vec<ChartColumn> = credits
+        .days
+        .iter()
+        .map(|(_, value)| ChartColumn {
+            level: level_for(*value, peak_value, body_height),
+            color: if *value > 0.0 {
                 theme::GREEN
             } else {
                 theme::DIM
-            };
-            spans.push(Span::styled(
-                glyph.repeat(chars_per_bar),
-                Style::default().fg(color),
-            ));
-        }
-        out.push(Line::from(spans));
-    }
-
-    let points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
+            },
+            baseline: "·",
+        })
+        .collect();
+    let day_count = credits.days.len();
+    let x_points: Vec<(usize, String)> = [0.0, 0.5, 1.0]
         .iter()
         .filter_map(|fraction| {
             let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
             let (date, _) = credits.days.get(index)?;
             Some((
-                7 + index * chars_per_bar,
+                index,
                 format!("{} {}", utils::month_abbrev(date.month()), date.day()),
             ))
         })
         .collect();
-    out.push(axis_label_row(width, &points));
-    out
+    column_chart_lines(
+        "CREDITS",
+        &annotation,
+        &[
+            utils::format_credits(peak_value),
+            utils::format_credits(peak_value / 2.0),
+            "0".to_owned(),
+        ],
+        &columns,
+        &x_points,
+        width,
+        body_height,
+    )
 }
 
+/// Per-day volumes for one model, aligned to `summary.daily`'s date axis.
 fn model_daily_values(summary: &Summary, model_name: &str) -> Vec<u64> {
     let usage_by_date = summary
         .model_daily
@@ -532,4 +534,80 @@ fn model_daily_values(summary: &Summary, model_name: &str) -> Vec<u64> {
         .iter()
         .map(|day| usage_by_date.get(&day.date).copied().unwrap_or(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared column frame is the density contract: exactly one char per
+    /// column after the 7-char y-axis gutter, so every column chart stacked
+    /// in the left rail has the same width for the same day count.
+    #[test]
+    fn column_chart_body_width_is_axis_plus_one_char_per_column() {
+        let columns: Vec<ChartColumn> = (0..30)
+            .map(|index| ChartColumn {
+                level: index % 13,
+                color: theme::GREEN,
+                baseline: "·",
+            })
+            .collect();
+        let lines = column_chart_lines(
+            "LIMITS",
+            "",
+            &["100%".to_owned(), "50%".to_owned(), "0".to_owned()],
+            &columns,
+            &[],
+            120,
+            6,
+        );
+        // Title + 6 body rows + axis row.
+        assert_eq!(lines.len(), 8);
+        for body in &lines[1..7] {
+            assert_eq!(body.width(), Y_AXIS_WIDTH + columns.len());
+        }
+    }
+
+    /// Baseline glyphs distinguish measured-zero, no-data, and blank — and
+    /// only appear on the bottom row.
+    #[test]
+    fn baseline_glyphs_render_only_on_the_bottom_row() {
+        let columns = vec![
+            ChartColumn {
+                level: 0,
+                color: theme::GREEN,
+                baseline: "▁",
+            },
+            ChartColumn {
+                level: 0,
+                color: theme::DIM,
+                baseline: "·",
+            },
+            ChartColumn {
+                level: 12,
+                color: theme::GREEN,
+                baseline: "▁",
+            },
+        ];
+        let lines = column_chart_lines(
+            "CREDITS",
+            "",
+            &["1".to_owned(), "0.5".to_owned(), "0".to_owned()],
+            &columns,
+            &[],
+            80,
+            6,
+        );
+        let row = |index: usize| -> String {
+            lines[index]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let bottom = row(6);
+        assert!(bottom.ends_with("▁·█"));
+        // No baseline glyph leaks into upper rows.
+        assert!(!row(1).contains('▁') && !row(1).contains('·'));
+    }
 }

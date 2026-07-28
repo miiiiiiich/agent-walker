@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Chart density unified: every column chart (TOKENS PER DAY, BY HOUR,
+  LIMITS, CREDITS) now renders exactly one character per column through a
+  shared frame — the 2-chars-per-bar widening on wide terminals is gone,
+  and left-rail charts stack with matching widths instead of jumping
+  between densities. Horizontal stat bars share one track/row shape across
+  sections. Purely visual; no numbers change.
+
 ## [0.12.0] - 2026-07-28
 
 ### Added
@@ -320,6 +331,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[Unreleased]: https://github.com/miiiiiiich/agent-walker/compare/v0.12.0...HEAD
 [0.12.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/miiiiiiich/agent-walker/releases/tag/v0.10.1

@@ -147,21 +147,16 @@ pub(super) fn project_lines(summary: &Summary, width: u16) -> Vec<Line<'static>>
         let label = utils::compact_label_tail(&project.name, label_width - 1);
         let value = project.usage.token_volume();
         let filled = utils::bar_fill(value, max, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{label:<label_width$}"),
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled("▄".repeat(filled), Style::default().fg(theme::ACCENT)),
-            Span::styled(
-                "▄".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {:>7}", format_tokens(value)),
-                Style::default().fg(theme::MUTED),
-            ),
-        ]));
+        let mut spans = vec![Span::styled(
+            format!("{label:<label_width$}"),
+            Style::default().fg(theme::TEXT),
+        )];
+        spans.extend(utils::bar_track(filled, bar_width, theme::ACCENT));
+        spans.push(Span::styled(
+            format!(" {:>7}", format_tokens(value)),
+            Style::default().fg(theme::MUTED),
+        ));
+        lines.push(Line::from(spans));
     }
     let hidden = summary.projects.len().saturating_sub(6);
     if hidden > 0 {
@@ -223,30 +218,14 @@ pub(super) fn model_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             format_percent(volume, total_volume)
         };
         let filled = utils::bar_fill(volume, max_volume, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(
-                    "{:<14}",
-                    utils::compact_label(&short_model_name(&model.name), 13)
-                ),
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled(
-                "▄".repeat(filled),
-                Style::default().fg(theme::model_color(index)),
-            ),
-            Span::styled(
-                "▄".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {:>8}", format_tokens(volume)),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{share:>7}"), Style::default().fg(theme::MUTED)),
-        ]));
+        lines.push(utils::stat_bar_line(
+            &short_model_name(&model.name),
+            theme::model_color(index),
+            filled,
+            bar_width,
+            &format_tokens(volume),
+            &share,
+        ));
     }
     lines
 }
@@ -436,21 +415,16 @@ pub(super) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'static>
         } else {
             compact_duration(*secs)
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<14}", labels[index]),
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled("▄".repeat(filled), Style::default().fg(colors[index])),
-            Span::styled(
-                "▄".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {value:>6} {pct:>3}%"),
-                Style::default().fg(theme::MUTED),
-            ),
-        ]));
+        let mut spans = vec![Span::styled(
+            format!("{:<14}", labels[index]),
+            Style::default().fg(theme::TEXT),
+        )];
+        spans.extend(utils::bar_track(filled, bar_width, colors[index]));
+        spans.push(Span::styled(
+            format!(" {value:>6} {pct:>3}%"),
+            Style::default().fg(theme::MUTED),
+        ));
+        lines.push(Line::from(spans));
     }
     lines
 }
@@ -559,27 +533,14 @@ pub(super) fn skill_lines(summary: &Summary, width: u16, limit: usize) -> Vec<Li
     for skill in summary.skills.iter().take(limit) {
         let volume = skill.usage.token_volume();
         let filled = utils::bar_fill(volume, max_volume, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<14}", utils::compact_label(&skill.name, 13)),
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled("▄".repeat(filled), Style::default().fg(theme::ACCENT)),
-            Span::styled(
-                "▄".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {:>8}", format_tokens(volume)),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:>7}", format_percent(volume, attributed)),
-                Style::default().fg(theme::MUTED),
-            ),
-        ]));
+        lines.push(utils::stat_bar_line(
+            &skill.name,
+            theme::ACCENT,
+            filled,
+            bar_width,
+            &format_tokens(volume),
+            &format_percent(volume, attributed),
+        ));
     }
     lines
 }
@@ -600,42 +561,32 @@ pub(super) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         let thinking = u64::try_from(modes.thinking_turns).unwrap_or(0);
         let turns = u64::try_from(modes.assistant_turns).unwrap_or(1).max(1);
         let filled = utils::bar_fill(thinking, turns, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled("thinking  ", Style::default().fg(theme::TEXT)),
-            Span::styled("█".repeat(filled), Style::default().fg(theme::PURPLE)),
-            Span::styled(
-                "█".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {:>6}", format_percent(thinking, turns)),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" of turns", Style::default().fg(theme::MUTED)),
-        ]));
+        let mut spans = vec![Span::styled("thinking  ", Style::default().fg(theme::TEXT))];
+        spans.extend(utils::bar_track(filled, bar_width, theme::PURPLE));
+        spans.push(Span::styled(
+            format!(" {:>6}", format_percent(thinking, turns)),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" of turns", Style::default().fg(theme::MUTED)));
+        lines.push(Line::from(spans));
     }
 
     if modes.fast_turns > 0 && modes.assistant_turns > 0 {
         let fast = u64::try_from(modes.fast_turns).unwrap_or(0);
         let turns = u64::try_from(modes.assistant_turns).unwrap_or(1).max(1);
         let filled = utils::bar_fill(fast, turns, bar_width);
-        lines.push(Line::from(vec![
-            Span::styled("fast      ", Style::default().fg(theme::TEXT)),
-            Span::styled("█".repeat(filled), Style::default().fg(theme::GOLD)),
-            Span::styled(
-                "█".repeat(bar_width - filled),
-                Style::default().fg(theme::FAINT),
-            ),
-            Span::styled(
-                format!(" {:>6}", format_percent(fast, turns)),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" of turns", Style::default().fg(theme::MUTED)),
-        ]));
+        let mut spans = vec![Span::styled("fast      ", Style::default().fg(theme::TEXT))];
+        spans.extend(utils::bar_track(filled, bar_width, theme::GOLD));
+        spans.push(Span::styled(
+            format!(" {:>6}", format_percent(fast, turns)),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" of turns", Style::default().fg(theme::MUTED)));
+        lines.push(Line::from(spans));
     }
 
     if !modes.efforts.is_empty() {

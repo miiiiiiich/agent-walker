@@ -69,10 +69,10 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.extend(charts::hourly_chart_lines(summary, width, CHART_BODY));
         } else {
-            // Cap TOKENS PER DAY at the left column so it never overruns MODELS;
-            // BY HOUR fills the right column and joins at the shared boundary.
-            let model_w = left_u16.min(u16::try_from(7 + summary.daily.len()).unwrap_or(left_u16));
-            let left = charts::model_chart_lines(summary, model_w, CHART_BODY);
+            // Every left-rail chart takes the full left column; the shared
+            // one-char-per-column standard inside charts.rs keeps TOKENS PER
+            // DAY, LIMITS, and CREDITS at identical widths.
+            let left = charts::model_chart_lines(summary, left_u16, CHART_BODY);
             let right = charts::hourly_chart_lines(summary, right_u16, CHART_BODY);
             lines.extend(join_columns(&left, &right, left_width + 2));
         }
@@ -377,6 +377,54 @@ mod tests {
     /// SKILLS renders on the Claude tab only; LIMITS on the Codex tab only;
     /// MODES on each provider tab; the Total tab shows none of them even when
     /// the combined summary carries the data.
+    /// Wrapper-level frame pins: LIMITS and CREDITS render in the shared
+    /// column frame (7-char gutter + one char per window day) with their own
+    /// y-axis labels, and the canonical stat row keeps its exact shape.
+    #[test]
+    fn column_chart_wrappers_share_the_frame() {
+        let text = |line: &ratatui::text::Line<'_>| -> String {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+
+        let codex = v09_summary(Provider::Codex);
+        let limits = charts::limits_chart_lines(&codex, 110, 6);
+        let days = codex
+            .limits
+            .as_ref()
+            .expect("fixture has limits")
+            .days
+            .len();
+        assert_eq!(limits[1].width(), charts::Y_AXIS_WIDTH + days);
+        assert!(text(&limits[1]).starts_with("  100%│"));
+
+        let copilot = v09_summary(Provider::Copilot);
+        let credits = charts::credits_chart_lines(&copilot, 110, 6);
+        let days = copilot
+            .credits
+            .as_ref()
+            .expect("fixture has credits")
+            .days
+            .len();
+        assert_eq!(credits[1].width(), charts::Y_AXIS_WIDTH + days);
+        assert!(text(&credits[1]).starts_with("  4.20│"));
+
+        let row = utils::stat_bar_line("grok", theme::GREEN, 5, 10, "1.2B", "48%");
+        assert_eq!(
+            text(&row),
+            format!(
+                "{:<14}{}{} {:>8}{:>7}",
+                "grok",
+                "▄".repeat(5),
+                "▄".repeat(5),
+                "1.2B",
+                "48%"
+            )
+        );
+    }
+
     #[test]
     fn v09_sections_render_on_their_own_tabs_only() {
         let claude = rendered(&v09_summary(Provider::Claude), 110);
