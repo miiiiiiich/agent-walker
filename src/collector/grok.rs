@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -32,9 +33,12 @@ use crate::model::{
 ///   deduplicated globally by `prompt_id`, under which a fork copy collapses
 ///   into its original and the earliest timestamp wins.
 /// - Resuming appends to the same directory; no copy is involved.
+/// - The mtime floor is deliberately not applied (see `collect`), and
+///   summary-derived facts are stamped after the parse cache so they are
+///   re-read fresh every run.
 pub fn collect(
     root: &Path,
-    mtime_floor: Option<SystemTime>,
+    _mtime_floor: Option<SystemTime>,
     use_cache: bool,
     local_offset: UtcOffset,
 ) -> Collection {
@@ -44,10 +48,19 @@ pub fn collect(
         return collection;
     }
 
-    // Enumerate `<cwd>/<session>/updates.jsonl` explicitly — session dirs
-    // also hold subagent/terminal/compaction artifacts a recursive glob
-    // would pick up.
-    let mut files: Vec<PathBuf> = Vec::new();
+    // No mtime floor here, deliberately: a fork copies its parent's update
+    // stream with envelope timestamps rewritten to the fork instant, so a
+    // parent idle past the floor while its fresh fork is scanned would leave
+    // the copied prompt_ids nothing to collide with — the parent's history
+    // would land on the fork day in full. Parsing everything is cheap: the
+    // per-file cache absorbs unchanged sessions.
+    //
+    // Ordinary sessions are parsed BEFORE fork/worktree copies so the merge
+    // keeps the original's metadata (project, session) regardless of how the
+    // encoded directory names sort.
+    let mut primary: Vec<PathBuf> = Vec::new();
+    let mut fork_copies: Vec<PathBuf> = Vec::new();
+    let mut dir_meta: HashMap<PathBuf, DirMeta> = HashMap::new();
     let Ok(cwd_dirs) = std::fs::read_dir(&sessions) else {
         collection.stats.unreadable_dirs += 1;
         return collection;
@@ -58,73 +71,124 @@ pub fn collect(
             continue;
         };
         let Ok(session_dirs) = std::fs::read_dir(cwd_dir.path()) else {
+            collection.stats.unreadable_dirs += 1;
             continue;
         };
-        for session_dir in session_dirs.flatten() {
+        for session_dir in session_dirs {
+            let Ok(session_dir) = session_dir else {
+                collection.stats.unreadable_files += 1;
+                continue;
+            };
             let dir = session_dir.path();
             // Subagent sessions are folded into their coordinator's turn
             // totals; counting their own directory too would double-count.
             // An unreadable/corrupt summary is skipped for the same reason —
             // it might be hiding a subagent marker (fail closed) — and
-            // surfaced in the stats. This also means every parsed session
-            // had a readable summary, so the project/cwd read in parse_file
-            // can only go stale in the brief window before a brand-new
-            // session writes its summary (bounded by the next turn append
-            // invalidating the updates.jsonl cache entry).
-            match session_kind(&dir) {
-                Ok(Some(kind)) if kind.starts_with("subagent") => continue,
-                Ok(_) => {}
-                Err(()) => {
-                    collection.stats.unreadable_files += 1;
-                    continue;
-                }
+            // surfaced in the stats.
+            let Ok(meta) = read_summary(&dir) else {
+                collection.stats.unreadable_files += 1;
+                continue;
+            };
+            if meta
+                .kind
+                .as_deref()
+                .is_some_and(|kind| kind.starts_with("subagent"))
+            {
+                continue;
             }
             let path = dir.join("updates.jsonl");
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
+            match std::fs::metadata(&path) {
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => {
                     collection.stats.unreadable_files += 1;
                     continue;
                 }
-            };
-            if let (Some(floor), Ok(mtime)) = (mtime_floor, meta.modified())
-                && mtime < floor
-            {
-                continue;
             }
-            files.push(path);
+            if meta.kind.is_some() {
+                fork_copies.push(path.clone());
+            } else {
+                primary.push(path.clone());
+            }
+            dir_meta.insert(path, meta);
         }
     }
-    if files.is_empty() {
+    if primary.is_empty() && fork_copies.is_empty() {
         return collection;
     }
-    files.sort();
+    primary.sort();
+    fork_copies.sort();
+    let files: Vec<PathBuf> = primary.into_iter().chain(fork_copies).collect();
 
-    let per_file = parse_files_cached(use_cache.then_some("grok"), &files, local_offset, |path| {
-        parse_file(path, local_offset)
-    });
+    let mut per_file =
+        parse_files_cached(use_cache.then_some("grok"), &files, local_offset, |path| {
+            parse_file(path, local_offset)
+        });
+    // Summary-derived facts are applied AFTER the cache, from a fresh read
+    // every run: the cached parse depends only on updates.jsonl content, so
+    // a summary that appears or changes later (fork marker, cwd) can never
+    // be baked stale into a cache entry.
+    for (path, events) in &mut per_file {
+        let Some(events) = events else { continue };
+        let Some(meta) = dir_meta.get(path) else {
+            continue;
+        };
+        // Fork/worktree copies re-play the parent's turns: usage dedupes by
+        // prompt_id and tools by call id, but durations carry no key — drop
+        // them wholesale (the fork's own new turns lose theirs; the copied
+        // majority would otherwise double-count).
+        if meta.kind.is_some() {
+            events.duration_events.clear();
+        }
+        if let Some(project) = &meta.project {
+            for keyed in &mut events.usage_events {
+                if keyed.event.project.is_none() {
+                    keyed.event.project = Some(project.clone());
+                }
+            }
+        }
+    }
     merge_into(&mut collection, per_file);
     collection
 }
 
-/// `session_kind` from the sibling `summary.json`. `Ok(None)` covers both a
+/// Enumeration-time facts from `summary.json`, re-read fresh on every run.
+struct DirMeta {
+    /// `session_kind`: `None` for an ordinary session, `Some` for fork /
+    /// worktree copies (subagents are filtered out before this is stored).
+    kind: Option<String>,
+    project: Option<String>,
+}
+
+/// Read the sibling `summary.json`. `Ok` with `kind: None` covers both a
 /// missing file and a summary without the field — ordinary sessions. An
 /// existing-but-unreadable or corrupt summary is `Err`: the caller must NOT
 /// fail open and treat the directory as an ordinary session, because if it
 /// was actually a subagent its usage is already folded into the coordinator
 /// and counting it would double-count.
-fn session_kind(session_dir: &Path) -> Result<Option<String>, ()> {
+fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
     let raw = match std::fs::read_to_string(session_dir.join("summary.json")) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DirMeta {
+                kind: None,
+                project: None,
+            });
+        }
         Err(_) => return Err(()),
     };
     let summary = serde_json::from_str::<Value>(&raw).map_err(|_| ())?;
-    Ok(summary
-        .get("session_kind")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned))
+    Ok(DirMeta {
+        kind: summary
+            .get("session_kind")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        project: summary
+            .get("info")
+            .and_then(|info| info.get("cwd"))
+            .and_then(Value::as_str)
+            .map(project_from_cwd),
+    })
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
@@ -134,28 +198,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned);
-    // The raw cwd lives in summary.json (the directory name is a lossy
-    // encoding); fall back to no project when it can't be read.
-    let summary = std::fs::read_to_string(session_dir.join("summary.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let project = summary.as_ref().and_then(|summary| {
-        summary
-            .get("info")
-            .and_then(|info| info.get("cwd"))
-            .and_then(Value::as_str)
-            .map(project_from_cwd)
-    });
-    // Fork/worktree sessions start as a copy of their parent's update stream.
-    // Usage dedupes by prompt_id and tools by call id, but duration events
-    // carry no key — so forks skip duration collection entirely rather than
-    // re-count the copied turns (the fork's own new turns lose their
-    // durations; the copied majority would otherwise double).
-    let is_fork_copy = summary
-        .as_ref()
-        .and_then(|summary| summary.get("session_kind"))
-        .and_then(Value::as_str)
-        .is_some();
     let mut events = FileEvents::default();
     let reader = BufReader::new(file);
 
@@ -190,14 +232,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         };
         match update.get("sessionUpdate").and_then(Value::as_str) {
             Some("turn_completed") => {
-                collect_turn_usage(
-                    update,
-                    timestamp,
-                    session_id.as_ref(),
-                    project.as_deref(),
-                    is_fork_copy,
-                    &mut events,
-                );
+                collect_turn_usage(update, timestamp, session_id.as_ref(), &mut events);
             }
             Some("tool_call") => {
                 collect_tool_event(update, timestamp, session_id.as_ref(), &mut events);
@@ -221,8 +256,6 @@ fn collect_turn_usage(
     update: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
-    project: Option<&str>,
-    skip_durations: bool,
     events: &mut FileEvents,
 ) {
     let Some(prompt_id) = update.get("prompt_id").and_then(Value::as_str) else {
@@ -269,7 +302,8 @@ fn collect_turn_usage(
                 source_kind: SourceKind::Main,
                 attribution_agent: None,
                 attribution_skill: None,
-                project: project.map(ToOwned::to_owned),
+                // Stamped post-cache in collect() from a fresh summary read.
+                project: None,
                 usage,
                 reported_cost_usd: None,
             },
@@ -278,8 +312,7 @@ fn collect_turn_usage(
 
     // `apiDurationMs` is the time models spent working on this prompt — the
     // closest durable duration signal the log carries.
-    if !skip_durations
-        && let Some(duration_ms) = usage.get("apiDurationMs").and_then(Value::as_u64)
+    if let Some(duration_ms) = usage.get("apiDurationMs").and_then(Value::as_u64)
         && duration_ms > 0
     {
         events.duration_events.push(DurationEvent {
@@ -422,6 +455,53 @@ mod tests {
         // Durations carry no dedup key: the original's counts, the fork's
         // copied turn does not re-emit.
         assert_eq!(collection.duration_events.len(), 1);
+    }
+
+    /// The mtime floor must not exclude fork parents: a parent idle past
+    /// the floor while its fresh fork is scanned would leave the copied
+    /// `prompt_id`s nothing to collide with, landing the parent's history on
+    /// the fork day. The collector ignores the floor entirely.
+    #[test]
+    fn mtime_floor_is_ignored() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(temp.path(), "cwd", "s1", &format!("{TURN}\n"), None);
+
+        let future = std::time::SystemTime::now() + std::time::Duration::from_hours(24);
+        let collection = collect(temp.path(), Some(future), false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    /// Metadata attribution must not depend on how encoded cwd names sort:
+    /// a fork whose directory sorts BEFORE its parent still yields the
+    /// parent's project on the merged event, because ordinary sessions are
+    /// parsed first.
+    #[test]
+    fn fork_sorting_first_keeps_parent_project() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "zzz-cwd",
+            "s1",
+            &format!("{TURN}\n"),
+            Some(r#"{"info":{"cwd":"/parent/project"}}"#),
+        );
+        let copy = TURN.replace("\"timestamp\":1785170203", "\"timestamp\":1785999999");
+        write_session(
+            temp.path(),
+            "aaa-cwd",
+            "s2-fork",
+            &format!("{copy}\n"),
+            Some(r#"{"session_kind":"fork","info":{"cwd":"/fork/project"}}"#),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(
+            collection.usage_events[0].project.as_deref(),
+            Some("parent/project")
+        );
     }
 
     /// A fork whose parent is gone (deleted or outside the mtime window)
