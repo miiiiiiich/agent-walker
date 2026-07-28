@@ -5,6 +5,7 @@ use crate::model::{LimitDay, Summary};
 use super::{ChartColumn, column_chart_lines};
 use crate::ui::{theme, utils};
 
+/// LIMITS history: daily peak of the plan's 5h window in the shared column
 /// frame. The y-axis is FIXED at 0-100% (unlike the auto-scaled charts) so a
 /// quiet month doesn't inflate a 3% day into a full column. A day that hit
 /// the limit renders red; a day with no provider use renders as a faint dot;
