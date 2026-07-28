@@ -1,6 +1,11 @@
-//! Braille-art badge icons for each PW24 codename animal (20×10), shown next to
-//! the ACTIVITY grass. Source PNGs are pre-thresholded to pure black/white so
-//! faint gray frame artifacts don't fill the whole box when downscaled.
+//! The codename badge: braille-art icons for each PW24 animal (20×10, source
+//! PNGs pre-thresholded to pure black/white so faint gray frame artifacts
+//! don't fill the box when downscaled), plus the badge line renderer and the
+//! OPS color mapping that paint it next to the ACTIVITY grass.
+
+use ratatui::prelude::*;
+
+use super::theme;
 
 pub(super) const FALLBACK: &str = "\
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n\
@@ -354,5 +359,63 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
         "Butterfly" => BUTTERFLY,
         "Bee" => BEE,
         _ => FALLBACK,
+    }
+}
+
+/// Codename badge: title (OPS in its colour, animal in white) above the
+/// braille animal in the OPS colour, with the rank as a nameplate under the
+/// art — `────  RANK S  ────` — like the plaque on a statue's pedestal.
+pub(super) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
+    let color = ops_color(codename.ops);
+    let icon: Vec<&str> = braille_for(codename.animal)
+        .lines()
+        .filter(|l| !l.chars().all(|c| c == '⠀' || c == ' '))
+        .collect();
+
+    let mut lines = vec![
+        Line::default(),
+        Line::from(vec![
+            Span::styled(
+                codename.ops.to_owned(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}", codename.animal),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    for row in icon {
+        lines.push(Line::from(Span::styled(
+            row.to_owned(),
+            Style::default().fg(color),
+        )));
+    }
+    if let (Some(letters), Some((red, green, blue))) =
+        (codename.rank.letters(), codename.rank.display_rgb())
+    {
+        lines.push(Line::from(vec![
+            Span::styled("────  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("RANK {letters}"),
+                Style::default()
+                    .fg(Color::Rgb(red, green, blue))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ────", Style::default().fg(theme::MUTED)),
+        ]));
+    }
+    lines
+}
+
+fn ops_color(ops: &str) -> Color {
+    match ops {
+        "Aurora" => theme::TEAL,
+        "Sol" => theme::GOLD,
+        "Luna" => theme::BLUE,
+        "Eclipse" => theme::PURPLE,
+        _ => theme::MUTED,
     }
 }

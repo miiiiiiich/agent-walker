@@ -7,7 +7,6 @@ use super::badge;
 use super::charts;
 use super::hero;
 use super::sections;
-use super::theme;
 use super::utils;
 
 /// Two-column layout needs at least this much width; below it sections stack.
@@ -45,7 +44,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     // gutter would collapse and the badge would collide with the grass. Skip the
     // ACTIVITY title/legend row (index 0) since the badge's first row is blank.
     let activity = activity::activity_lines(summary);
-    let badge = codename_badge_lines(&crate::codename::for_summary(summary));
+    let badge = badge::codename_badge_lines(&crate::codename::for_summary(summary));
     let grass_width = activity.iter().skip(1).map(Line::width).max().unwrap_or(0);
     if badge.is_empty() {
         lines.extend(activity);
@@ -258,64 +257,6 @@ fn centre_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Codename badge: title (OPS in its colour, animal in white) above the
-/// braille animal in the OPS colour, with the rank as a nameplate under the
-/// art — `────  RANK S  ────` — like the plaque on a statue's pedestal.
-fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
-    let color = ops_color(codename.ops);
-    let icon: Vec<&str> = badge::braille_for(codename.animal)
-        .lines()
-        .filter(|l| !l.chars().all(|c| c == '⠀' || c == ' '))
-        .collect();
-
-    let mut lines = vec![
-        Line::default(),
-        Line::from(vec![
-            Span::styled(
-                codename.ops.to_owned(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {}", codename.animal),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
-    for row in icon {
-        lines.push(Line::from(Span::styled(
-            row.to_owned(),
-            Style::default().fg(color),
-        )));
-    }
-    if let (Some(letters), Some((red, green, blue))) =
-        (codename.rank.letters(), codename.rank.display_rgb())
-    {
-        lines.push(Line::from(vec![
-            Span::styled("────  ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                format!("RANK {letters}"),
-                Style::default()
-                    .fg(Color::Rgb(red, green, blue))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ────", Style::default().fg(theme::MUTED)),
-        ]));
-    }
-    lines
-}
-
-fn ops_color(ops: &str) -> Color {
-    match ops {
-        "Aurora" => theme::TEAL,
-        "Sol" => theme::GOLD,
-        "Luna" => theme::BLUE,
-        "Eclipse" => theme::PURPLE,
-        _ => theme::MUTED,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use time::macros::date;
@@ -411,7 +352,7 @@ mod tests {
         assert_eq!(credits[1].width(), charts::Y_AXIS_WIDTH + days);
         assert!(text(&credits[1]).starts_with("  4.20│"));
 
-        let row = utils::stat_bar_line("grok", theme::GREEN, 5, 10, "1.2B", "48%");
+        let row = utils::stat_bar_line("grok", crate::ui::theme::GREEN, 5, 10, "1.2B", "48%");
         assert_eq!(
             text(&row),
             format!(
