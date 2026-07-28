@@ -26,6 +26,52 @@ pub(super) fn bar_fill(value: u64, max: u64, width: usize) -> usize {
     .min(width)
 }
 
+/// The bar track every horizontal stat row shares: a filled head and a
+/// FAINT remainder, both `▄` — one look for every section's bars. New
+/// sections must build their bars from this, not raw span pairs.
+pub(super) fn bar_track(filled: usize, width: usize, color: Color) -> [Span<'static>; 2] {
+    let filled = filled.min(width);
+    [
+        Span::styled("▄".repeat(filled), Style::default().fg(color)),
+        Span::styled(
+            "▄".repeat(width - filled),
+            Style::default().fg(theme::FAINT),
+        ),
+    ]
+}
+
+/// The canonical horizontal stat row: 14-char label, shared bar track, bold
+/// 8-char value, muted 7-char share (empty omits the column). List sections
+/// (MODELS / SKILLS and future ones) use this shape as-is so the dashboard
+/// stays visually uniform.
+pub(super) fn stat_bar_line(
+    label: &str,
+    color: Color,
+    filled: usize,
+    bar_width: usize,
+    value: &str,
+    share: &str,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{:<14}", compact_label(label, 13)),
+        Style::default().fg(theme::TEXT),
+    )];
+    spans.extend(bar_track(filled, bar_width, color));
+    spans.push(Span::styled(
+        format!(" {value:>8}"),
+        Style::default()
+            .fg(theme::TEXT)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if !share.is_empty() {
+        spans.push(Span::styled(
+            format!("{share:>7}"),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn section_title(title: &'static str, annotation: &str) -> Line<'static> {
     let mut spans = vec![
         Span::styled("▍ ", Style::default().fg(theme::GOLD)),
@@ -121,17 +167,17 @@ pub(super) fn count_bar_line(
         ((value as f64 / max as f64) * width as f64).round() as usize
     }
     .min(width);
-    let empty = width - filled;
     let label = compact_label(label, 13);
-    Line::from(vec![
-        Span::styled(format!("{label:<14}"), Style::default().fg(theme::TEXT)),
-        Span::styled("▄".repeat(filled), Style::default().fg(color)),
-        Span::styled("▄".repeat(empty), Style::default().fg(theme::FAINT)),
-        Span::styled(
-            format!(" {:>6}", format_count(value)),
-            Style::default().fg(theme::MUTED),
-        ),
-    ])
+    let mut spans = vec![Span::styled(
+        format!("{label:<14}"),
+        Style::default().fg(theme::TEXT),
+    )];
+    spans.extend(bar_track(filled, width, color));
+    spans.push(Span::styled(
+        format!(" {:>6}", format_count(value)),
+        Style::default().fg(theme::MUTED),
+    ));
+    Line::from(spans)
 }
 
 /// Truncate keeping the END of the label — repository names differ at the
