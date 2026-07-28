@@ -8,7 +8,8 @@ use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedToolEvent, KeyedUsageEvent, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedToolEvent, KeyedUsageEvent, merge_into,
+    parse_files_cached, project_from_cwd,
 };
 use crate::model::{
     Collection, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent,
@@ -25,8 +26,9 @@ use crate::model::{
 ///   per-model split in `modelUsage`) and a `prompt_id`.
 /// - Subagent runs get their own session directory, marked by
 ///   `summary.json`'s `session_kind: "subagent*"`, while the coordinator
-///   folds their usage into its own turn totals — so subagent directories
-///   are EXCLUDED wholesale or the fold would double-count.
+///   folds their usage into its own turn totals — so their usage and turn
+///   durations are suppressed (the fold already carries them), while their
+///   unique tool calls and activity are kept as subagent work.
 /// - Forking copies `updates.jsonl` into the new session directory with
 ///   envelope timestamps rewritten to the fork instant (the same shape as
 ///   the Codex fork replay, GH-36) but `prompt_id` preserved — so usage is
@@ -89,13 +91,6 @@ pub fn collect(
                 collection.stats.unreadable_files += 1;
                 continue;
             };
-            if meta
-                .kind
-                .as_deref()
-                .is_some_and(|kind| kind.starts_with("subagent"))
-            {
-                continue;
-            }
             let path = dir.join("updates.jsonl");
             match std::fs::metadata(&path) {
                 Ok(_) => {}
@@ -133,12 +128,21 @@ pub fn collect(
         let Some(meta) = dir_meta.get(path) else {
             continue;
         };
-        // Fork/worktree copies re-play the parent's turns: usage dedupes by
-        // prompt_id and tools by call id, but durations carry no key — drop
-        // them wholesale (the fork's own new turns lose theirs; the copied
-        // majority would otherwise double-count).
-        if meta.kind.is_some() {
+        // Subagent sessions: their token usage is folded into the
+        // coordinator's turn totals, so usage (and its per-turn durations)
+        // would double-count — but their tool calls and activity are unique
+        // records the coordinator does NOT carry. Keep those, marked as
+        // subagent work.
+        if meta
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("subagent"))
+        {
+            events.usage_events.clear();
             events.duration_events.clear();
+            for keyed in &mut events.tool_events {
+                keyed.event.source_kind = SourceKind::Subagent;
+            }
         }
         if let Some(project) = &meta.project {
             for keyed in &mut events.usage_events {
@@ -311,15 +315,20 @@ fn collect_turn_usage(
     }
 
     // `apiDurationMs` is the time models spent working on this prompt — the
-    // closest durable duration signal the log carries.
+    // closest durable duration signal the log carries. Keyed by `prompt_id`
+    // like the usage events, so a fork's copied turns collapse into their
+    // originals while the fork's own new turns keep their durations.
     if let Some(duration_ms) = usage.get("apiDurationMs").and_then(Value::as_u64)
         && duration_ms > 0
     {
-        events.duration_events.push(DurationEvent {
-            timestamp,
-            session_id: session_id.cloned(),
-            duration_ms,
-            status: Some("turn".to_owned()),
+        events.duration_events.push(KeyedDurationEvent {
+            key: Some(format!("grok-duration:{prompt_id}")),
+            event: DurationEvent {
+                timestamp,
+                session_id: session_id.cloned(),
+                duration_ms,
+                status: Some("turn".to_owned()),
+            },
         });
     }
 }
@@ -440,21 +449,40 @@ mod tests {
             Some(r#"{"session_kind":"fork","parent_session_id":"s1"}"#),
         );
 
+        // The fork also does NEW work after the copy: a unique prompt.
+        let new_turn = r#"{"timestamp":1786000100,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","prompt_id":"p-new","usage":{"inputTokens":500,"outputTokens":50,"cachedReadTokens":0,"reasoningTokens":0,"apiDurationMs":1234,"modelUsage":{"grok-4.5":{"inputTokens":500,"outputTokens":50,"cachedReadTokens":0,"reasoningTokens":0}}}}}}"#;
+        let fork_dir = temp
+            .path()
+            .join("sessions")
+            .join("other-cwd")
+            .join("s2-fork");
+        let existing =
+            fs::read_to_string(fork_dir.join("updates.jsonl")).expect("fixture should read");
+        fs::write(
+            fork_dir.join("updates.jsonl"),
+            format!("{existing}{new_turn}\n"),
+        )
+        .expect("fixture should be written");
+
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(collection.usage_events.len(), 1);
-        let event = &collection.usage_events[0];
-        assert_eq!(event.usage.token_volume(), 264_488 + 4_276);
+        // Copied turn once + the fork's own new turn.
+        assert_eq!(collection.usage_events.len(), 2);
+        let copied = collection
+            .usage_events
+            .iter()
+            .find(|event| event.usage.token_volume() == 264_488 + 4_276)
+            .expect("copied turn should survive once");
         // The original's timestamp survives, not the fork instant.
         assert_eq!(
-            event.timestamp.map(OffsetDateTime::unix_timestamp),
+            copied.timestamp.map(OffsetDateTime::unix_timestamp),
             Some(1_785_170_203)
         );
         // Tool call ids are global, so the copied call collapses too.
         assert_eq!(collection.tool_events.len(), 1);
-        // Durations carry no dedup key: the original's counts, the fork's
-        // copied turn does not re-emit.
-        assert_eq!(collection.duration_events.len(), 1);
+        // Durations dedupe by prompt_id: the copied turn's counts once, and
+        // the fork's own new turn KEEPS its duration.
+        assert_eq!(collection.duration_events.len(), 2);
     }
 
     /// The mtime floor must not exclude fork parents: a parent idle past
@@ -567,22 +595,28 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 0);
     }
 
-    /// Subagent sessions are folded into their coordinator's totals — their
-    /// own directories must be excluded wholesale.
+    /// Subagent usage is folded into the coordinator's totals, so their own
+    /// usage and durations are suppressed — but their unique tool calls and
+    /// activity are kept, marked as subagent work.
     #[test]
-    fn subagent_sessions_are_excluded() {
+    fn subagent_sessions_keep_tools_but_not_usage() {
         let temp = TempDir::new().expect("test tempdir should be created");
+        let tool = r#"{"timestamp":1785170100,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-sub-1","title":"web_fetch"}}}"#;
         write_session(
             temp.path(),
             "cwd",
             "sub1",
-            &format!("{TURN}\n"),
+            &format!("{TURN}\n{tool}\n"),
             Some(r#"{"session_kind":"subagent"}"#),
         );
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.usage_events.len(), 0);
+        assert_eq!(collection.duration_events.len(), 0);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].source_kind, SourceKind::Subagent);
+        assert!(!collection.session_touches.is_empty());
     }
 
     /// A multi-model turn splits per model from `modelUsage`; the totals are

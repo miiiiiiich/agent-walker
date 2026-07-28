@@ -8,8 +8,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedModeEvent, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
-    parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedModeEvent, KeyedToolEvent, KeyedUsageEvent, list_files,
+    merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
     Collection, DurationEvent, ModeEvent, Provider, SessionTouch, SourceKind, TokenUsage,
@@ -205,11 +205,14 @@ fn push_turn_duration(
     if duration_ms == 0 {
         return;
     }
-    events.duration_events.push(DurationEvent {
-        timestamp: Some(start),
-        session_id: None,
-        duration_ms,
-        status: Some("turn".to_owned()),
+    events.duration_events.push(KeyedDurationEvent {
+        key: None,
+        event: DurationEvent {
+            timestamp: Some(start),
+            session_id: None,
+            duration_ms,
+            status: Some("turn".to_owned()),
+        },
     });
 }
 
