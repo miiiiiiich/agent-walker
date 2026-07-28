@@ -4,13 +4,16 @@ mod duration;
 mod projects;
 mod streak;
 
+mod credits;
+mod limits;
+mod modes;
+
 use std::collections::BTreeMap;
 
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
 use crate::model::{
-    Collection, CreditsHistory, DailySessions, DailyStat, LimitDay, LimitsHistory, ModelDailyStat,
-    ModesSummary, SkillStat, Summary, TokenUsage, ToolStat,
+    Collection, DailySessions, DailyStat, ModelDailyStat, SkillStat, Summary, TokenUsage, ToolStat,
 };
 
 use self::aggregates::Aggregates;
@@ -195,15 +198,17 @@ pub fn summarize(
             .cmp(&left.usage.token_volume())
             .then_with(|| left.name.cmp(&right.name))
     });
-    let limits = limits_history(
+    let limits = limits::limits_history(
         collection,
         codename_window_start,
         period_end,
         local_offset,
         &recent_active_days,
     );
-    let credits = credits_history(collection, codename_window_start, period_end, local_offset);
-    let mode_usage = modes_summary(collection, codename_window_start, period_end, local_offset);
+    let credits =
+        credits::credits_history(collection, codename_window_start, period_end, local_offset);
+    let mode_usage =
+        modes::modes_summary(collection, codename_window_start, period_end, local_offset);
     let recent_window_active_days = recent_active_days.len();
 
     Summary {
@@ -276,142 +281,6 @@ fn build_aggregates(
         );
     }
     aggregates
-}
-
-/// Daily-peak LIMITS history over the fixed 30-day window. Tri-state per day:
-/// a day with samples carries its peak `used_percent`; a day with provider
-/// activity but no sample (older CLI versions) is `NoSample`; a day without
-/// activity is `NoUse` — the chart renders the three differently, so a
-/// measured 0% is never confused with "didn't use Codex that day".
-fn limits_history(
-    collection: &Collection,
-    window_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-    active_days: &std::collections::HashSet<Date>,
-) -> Option<LimitsHistory> {
-    let mut daily_peak: BTreeMap<Date, f64> = BTreeMap::new();
-    for sample in &collection.rate_limit_samples {
-        let date = sample.timestamp.to_offset(local_offset).date();
-        if date < window_start || date > period_end {
-            continue;
-        }
-        let entry = daily_peak.entry(date).or_insert(0.0);
-        if sample.used_percent > *entry {
-            *entry = sample.used_percent;
-        }
-    }
-    if daily_peak.is_empty() {
-        return None;
-    }
-
-    let mut days = Vec::new();
-    let mut peak: Option<(Date, f64)> = None;
-    let mut date = window_start;
-    while date <= period_end {
-        let day = match daily_peak.get(&date) {
-            Some(&value) => {
-                if peak.is_none_or(|(_, best)| value > best) {
-                    peak = Some((date, value));
-                }
-                LimitDay::Measured(value)
-            }
-            None if active_days.contains(&date) => LimitDay::NoSample,
-            None => LimitDay::NoUse,
-        };
-        days.push((date, day));
-        date += Duration::days(1);
-    }
-    Some(LimitsHistory { days, peak })
-}
-
-/// Daily AI-credit spend over the fixed 30-day window: the sum of Copilot's
-/// `totalNanoAiu` deltas per local day, in credits (1e9 nano-AIU). `None`
-/// when the provider records no credit samples at all.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Credits are a display quantity; nano-AIU never approaches 2^52."
-)]
-fn credits_history(
-    collection: &Collection,
-    window_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-) -> Option<CreditsHistory> {
-    let mut daily: BTreeMap<Date, u64> = BTreeMap::new();
-    for sample in &collection.credit_samples {
-        let date = sample.timestamp.to_offset(local_offset).date();
-        if date < window_start || date > period_end {
-            continue;
-        }
-        let entry = daily.entry(date).or_insert(0);
-        *entry = entry.saturating_add(sample.nano_aiu);
-    }
-    if daily.is_empty() {
-        return None;
-    }
-
-    let mut days = Vec::new();
-    let mut total_nano = 0u64;
-    let mut peak: Option<(Date, f64)> = None;
-    let mut date = window_start;
-    while date <= period_end {
-        let nano = daily.get(&date).copied().unwrap_or(0);
-        total_nano = total_nano.saturating_add(nano);
-        let credits = nano as f64 / 1e9;
-        if nano > 0 && peak.is_none_or(|(_, best)| credits > best) {
-            peak = Some((date, credits));
-        }
-        days.push((date, credits));
-        date += Duration::days(1);
-    }
-    Some(CreditsHistory {
-        days,
-        total: total_nano as f64 / 1e9,
-        peak,
-    })
-}
-
-/// Mode usage over the fixed 30-day window: Claude thinking / fast flags per
-/// assistant message, Codex reasoning-effort per turn.
-fn modes_summary(
-    collection: &Collection,
-    window_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-) -> ModesSummary {
-    let in_window = |timestamp: Option<OffsetDateTime>| {
-        timestamp
-            .map(|ts| ts.to_offset(local_offset).date())
-            .is_some_and(|date| date >= window_start && date <= period_end)
-    };
-
-    let mut modes = ModesSummary::default();
-    for event in &collection.mode_events {
-        if !in_window(event.timestamp) {
-            continue;
-        }
-        modes.assistant_turns += 1;
-        if event.has_thinking {
-            modes.thinking_turns += 1;
-        }
-        if event.fast {
-            modes.fast_turns += 1;
-        }
-    }
-
-    let mut effort_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for event in &collection.effort_events {
-        if !in_window(event.timestamp) {
-            continue;
-        }
-        *effort_counts.entry(event.effort.clone()).or_default() += 1;
-    }
-    modes.efforts = effort_counts.into_iter().collect();
-    modes
-        .efforts
-        .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    modes
 }
 
 fn init_daily_usage(period_start: Date, period_days: u16) -> BTreeMap<Date, TokenUsage> {
@@ -643,6 +512,7 @@ mod v09_tests {
     use time::macros::{date, datetime};
 
     use super::*;
+    use crate::model::LimitDay;
     use crate::model::{
         Collection, EffortEvent, ModeEvent, Provider, RateLimitSample, ScanStats, SourceKind,
         UsageEvent,
