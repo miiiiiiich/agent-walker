@@ -113,6 +113,10 @@ Claude Code は既定で**約30日でトランスクリプトを整理する**�
 - Antigravity のログのタイムスタンプはタイムゾーンなし＝ローカル想定。
 - Windows バイナリは 0.3 以降で配布。Windows Terminal / PowerShell で動き、ログは `%USERPROFILE%` から読む。WSL でもそのまま動く（パスは Linux 形式のまま）。
 
+## 謝辞
+
+[ccusage](https://github.com/ccusage/ccusage) は AI コーディングエージェントのローカル利用量トラッキングの先駆者で、agent-walker が扱う問題のいくつかを最初に特定・解決した。[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) も参照。
+
 ## ライセンス
 
 MIT または Apache-2.0、好きな方で。

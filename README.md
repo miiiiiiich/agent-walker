@@ -168,6 +168,12 @@ indefinitely; no setting needed.
   Windows Terminal / PowerShell and reads logs from `%USERPROFILE%`. WSL
   installs work too — paths just stay in their Linux form.
 
+## Acknowledgements
+
+[ccusage](https://github.com/ccusage/ccusage) pioneered local usage tracking
+for AI coding agents and first identified and solved problems that
+agent-walker also addresses. See [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+
 ## License
 
 MIT or Apache-2.0, at your option.
