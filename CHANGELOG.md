@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-07-30
+
+### Added
+
+- `THIRD_PARTY_NOTICES` — ccusage's copyright notice and full MIT license
+  text, in recognition of its prior work on problems agent-walker also
+  addresses (#50). The notice ships in every binary release archive, the
+  npm package, and the cargo source package. The README gains an
+  acknowledgements section.
+
 ## [0.13.0] - 2026-07-29
 
 ### Changed
@@ -331,6 +341,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.13.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.10.1...v0.11.0
