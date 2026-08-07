@@ -1,0 +1,19 @@
+[project]
+name = "release-scripts"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = ["requests-oauthlib>=2.0.0"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.390"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

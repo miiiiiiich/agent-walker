@@ -1,0 +1,44 @@
+name: Draft release
+
+# Creates the draft GitHub Release with a body rendered from CHANGELOG.md.
+# Wired into release.yml as a dist custom plan-job (dist-workspace.toml:
+# plan-jobs = ["./draft-release"]), so builds wait for the draft and a
+# missing CHANGELOG section stops the release before anything is built.
+# dist (create-release = false) uploads artifacts into this draft and
+# undrafts it once everything is attached.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    # release.yml also runs on pull_request (plan only) — only draft on tags
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Create draft release with notes from CHANGELOG
+        run: |
+          if EXISTING=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$EXISTING" = "true" ]; then
+              echo "draft for $TAG already exists (re-run); leaving it as is"
+              exit 0
+            fi
+            echo "a published release for $TAG already exists — refusing to touch it" >&2
+            exit 1
+          fi
+          python3 scripts/draft_release.py "$TAG" > notes.md
+          TITLE="$(python3 scripts/draft_release.py "$TAG" --title)"
+          PRERELEASE_FLAG=""
+          case "${TAG%%+*}" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
+          gh release create "$TAG" --draft $PRERELEASE_FLAG --title "$TITLE" --notes-file notes.md
