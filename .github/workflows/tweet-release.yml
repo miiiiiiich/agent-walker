@@ -1,0 +1,54 @@
+name: Tweet release
+
+# release.yml publishes the release with the default GITHUB_TOKEN, and
+# GitHub suppresses events caused by that token — a `release: published`
+# trigger would never fire. So we chain on the Release workflow's
+# completion instead and resolve the tag from its run.
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to tweet (e.g. v0.13.1)"
+        required: true
+      dry_run:
+        description: "Print the tweet without posting"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  tweet:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install requests-oauthlib==2.0.0
+      - name: Resolve release payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+            --jq '{tag_name, body, draft}' > release.json
+          if [ "$(jq -r .draft release.json)" = "true" ]; then
+            echo "release $TAG is still a draft; not tweeting"
+            exit 1
+          fi
+      - name: Compose and post
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+        run: python .github/scripts/tweet_release.py
