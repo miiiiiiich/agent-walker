@@ -7,17 +7,24 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app (npx / bunx only)
+# The installers to generate for each app
 installers = ["npm"]
-# A namespace to use when publishing this package to the npm registry
+# The npm package should have this name
 npm-package = "agent-walker"
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
 hosting = "github"
-# Whether to attest build provenance with GitHub Artifact Attestations
+# Whether dist should create a Github Release or use an existing draft
+create-release = false
+# Whether to enable GitHub Attestations
 github-attestations = true
-# Extra files to ship inside every release archive
+# Extra static files to include in each App (path relative to this Cargo.toml's dir)
 include = ["THIRD_PARTY_NOTICES"]
 # Publish jobs to run in CI
 publish-jobs = ["npm"]
+# Plan jobs to run in CI
+plan-jobs = ["./draft-release"]
+
+[dist.github-custom-runners]
+x86_64-apple-darwin = "macos-15"
