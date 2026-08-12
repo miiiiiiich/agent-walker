@@ -19,7 +19,27 @@ def changelog_section(version: str, changelog: str) -> tuple[str, str]:
 
 def version_from(tag: str) -> str:
     # dist also fires on package-qualified tags like "agent-walker/0.14.0"
-    return tag.rsplit("/", 1)[-1].lstrip("v")
+    package, _, version = tag.rpartition("/")
+    if package and package != "agent-walker":
+        sys.exit(f"tag {tag} names a package this workspace does not ship")
+    return version.lstrip("v")
+
+
+def usage(version: str) -> str:
+    if "-" in version.split("+", 1)[0]:
+        # prereleases are not published to npm (dist skips publish-npm),
+        # so unversioned npx/bunx would silently run the latest stable
+        return (
+            "This is a prerelease — it is not published to npm. "
+            "Download the platform binary from the assets below."
+        )
+    return """No install — `npx` / `bunx` fetch the prebuilt binary for your platform:
+
+```sh
+npx agent-walker
+# or
+bunx agent-walker
+```"""
 
 
 def main() -> None:
@@ -37,13 +57,7 @@ def main() -> None:
 
 ## Usage
 
-No install — `npx` / `bunx` fetch the prebuilt binary for your platform:
-
-```sh
-npx agent-walker
-# or
-bunx agent-walker
-```
+{usage(version)}
 
 Prebuilt binaries are attached below, each carrying a [GitHub Artifact Attestation](https://github.com/{REPO}/attestations) — verify with `gh attestation verify <file> --repo {REPO}`.
 """

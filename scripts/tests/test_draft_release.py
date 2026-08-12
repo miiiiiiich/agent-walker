@@ -1,6 +1,6 @@
 import pytest
 
-from draft_release import changelog_section, version_from
+from draft_release import changelog_section, usage, version_from
 
 CHANGELOG = """# Changelog
 
@@ -62,3 +62,16 @@ def test_version_from_tag_formats():
     assert version_from("0.14.0") == "0.14.0"
     assert version_from("agent-walker/0.14.0") == "0.14.0"
     assert version_from("agent-walker/v0.14.0") == "0.14.0"
+
+
+def test_version_from_rejects_foreign_package():
+    with pytest.raises(SystemExit) as e:
+        version_from("other/0.13.1")
+    assert "other/0.13.1" in str(e.value)
+
+
+def test_usage_stable_vs_prerelease():
+    assert "npx agent-walker" in usage("0.14.0")
+    assert "npx" not in usage("0.14.0-rc.1")
+    assert "prerelease" in usage("0.14.0-rc.1")
+    assert "npx agent-walker" in usage("0.14.0+build5")
