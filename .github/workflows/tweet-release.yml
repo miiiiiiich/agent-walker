@@ -82,14 +82,19 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.workflow_run.head_branch }}
+      # assets uploaded by a retry always post-date the failed run, so
+      # deleting only what predates it can never race a concurrent re-run
+      # into publishing a release with missing files
+      CUTOFF: ${{ github.event.workflow_run.updated_at }}
     steps:
-      - name: Clear stale assets from the draft
+      - name: Clear assets that predate the failed run
         run: |
           if [ "$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
             echo "no draft for $TAG; nothing to clean"
             exit 0
           fi
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
+            --jq ".assets[] | select(.createdAt < \"$CUTOFF\") | .name" | while IFS= read -r asset; do
             echo "deleting stale asset: $asset"
             gh release delete-asset "$TAG" "$asset" -y --repo "${{ github.repository }}"
           done
