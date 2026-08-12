@@ -1,6 +1,14 @@
 import pytest
 
-from draft_release import changelog_section, usage, version_from
+from draft_release import changelog_section, check_version_matches, usage, version_from
+
+CARGO_TOML = """[package]
+name = "agent-walker"
+version = "1.2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+"""
 
 CHANGELOG = """# Changelog
 
@@ -76,6 +84,13 @@ def test_inline_links_do_not_truncate_section():
     _, section = changelog_section("1.2.0", CHANGELOG)
     assert "Migration guide" in section
     assert "a bug" in section
+
+
+def test_version_match_against_cargo_toml():
+    check_version_matches("1.2.0", CARGO_TOML)
+    with pytest.raises(SystemExit) as e:
+        check_version_matches("1.3.0", CARGO_TOML)
+    assert "1.3.0" in str(e.value) and "1.2.0" in str(e.value)
 
 
 def test_usage_stable_vs_prerelease():
