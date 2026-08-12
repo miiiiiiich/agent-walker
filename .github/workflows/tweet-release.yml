@@ -35,11 +35,14 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
-      # deliberately the default branch, not the tag's commit: this job
-      # holds the X credentials, and tag-controlled code must not run
-      # with them. The script is CI-gated on main; minor version skew
-      # against the tag is the accepted lesser risk.
+      # pinned to the default branch on every trigger: this job holds
+      # the X credentials, and neither tag-controlled nor
+      # branch-dispatched code may run with them. The script is
+      # CI-gated on main; version skew against the tag is the accepted
+      # lesser risk.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
