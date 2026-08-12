@@ -53,7 +53,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
         run: |
-          gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+          # package-qualified tags contain a slash, which must not become
+          # an extra path segment
+          TAG_PATH=$(jq -rn --arg t "$TAG" '$t|@uri')
+          gh api "repos/${{ github.repository }}/releases/tags/$TAG_PATH" \
             --jq '{tag_name, body, draft}' > release.json
           if [ "$(jq -r .draft release.json)" = "true" ]; then
             echo "release $TAG is still a draft; not tweeting"
@@ -95,10 +98,12 @@ jobs:
             echo "no draft for $TAG; nothing to clean"
             exit 0
           fi
-          # only names dist actually produces (platform archives +
-          # checksums, npm package, manifest, source tarball) — anything
-          # else on the draft was curated by a human and is not ours
-          DIST_NAMES='^(agent-walker-.+\.(tar\.xz|zip)(\.sha256)?|agent-walker-npm-package\.tar\.gz|dist-manifest\.json|sha256\.sum|source\.tar\.gz(\.sha256)?)$'
+          # only names dist actually produces — platform archives are
+          # pinned to the configured target triples (keep in sync with
+          # dist-workspace.toml) so curated archives like
+          # agent-walker-notes.zip survive recovery
+          TRIPLES='aarch64-apple-darwin|aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc'
+          DIST_NAMES="^(agent-walker-($TRIPLES)\\.(tar\\.xz|zip)(\\.sha256)?|agent-walker-npm-package\\.tar\\.gz|dist-manifest\\.json|sha256\\.sum|source\\.tar\\.gz(\\.sha256)?)$"
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
             --jq ".assets[] | select(.createdAt < \"$CUTOFF\" and (.name | test(\"$DIST_NAMES\"))) | .name" | while IFS= read -r asset; do
             echo "deleting stale asset: $asset"
