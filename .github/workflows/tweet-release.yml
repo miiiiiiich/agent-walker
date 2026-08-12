@@ -1,9 +1,11 @@
-name: Tweet release
+name: Post release
 
-# release.yml publishes the release with the default GITHUB_TOKEN, and
-# GitHub suppresses events caused by that token — a `release: published`
-# trigger would never fire. So we chain on the Release workflow's
-# completion instead and resolve the tag from its run.
+# Runs after the Release workflow: tweet on success, clear stale draft
+# assets on failure so any kind of re-run uploads cleanly.
+#
+# This chains on workflow_run because release.yml publishes with the
+# default GITHUB_TOKEN, and GitHub suppresses events caused by that
+# token — a `release: published` trigger would never fire.
 
 on:
   workflow_run:
@@ -58,3 +60,31 @@ jobs:
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
         run: python scripts/tweet_release.py
+
+  # a failed host step can leave partially uploaded assets on the draft;
+  # cleared here (not in the draft job) because "re-run failed jobs"
+  # skips jobs that already succeeded
+  clean-draft:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_run' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'cancelled') &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.workflow_run.head_branch }}
+    steps:
+      - name: Clear stale assets from the draft
+        run: |
+          if [ "$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
+            echo "no draft for $TAG; nothing to clean"
+            exit 0
+          fi
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+            echo "deleting stale asset: $asset"
+            gh release delete-asset "$TAG" "$asset" -y --repo "${{ github.repository }}"
+          done

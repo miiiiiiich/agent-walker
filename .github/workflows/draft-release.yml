@@ -29,12 +29,7 @@ jobs:
         run: |
           if EXISTING=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$EXISTING" = "true" ]; then
-              # re-run: clear partially uploaded assets so the host step's
-              # gh release upload doesn't collide with stale names
-              echo "draft for $TAG already exists (re-run); clearing stale assets"
-              gh release view "$TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
-                gh release delete-asset "$TAG" "$asset" -y
-              done
+              echo "draft for $TAG already exists (re-run); leaving it as is"
               exit 0
             fi
             echo "a published release for $TAG already exists — refusing to touch it" >&2
@@ -42,8 +37,11 @@ jobs:
           fi
           python3 scripts/draft_release.py "$TAG" > notes.md
           TITLE="$(python3 scripts/draft_release.py "$TAG" --title)"
+          # prerelease markers live in the version component, not the
+          # package prefix of package-qualified tags (agent-walker/0.14.0)
+          VERSION="${TAG##*/}"
           PRERELEASE_FLAG=""
-          case "${TAG%%+*}" in
+          case "${VERSION%%+*}" in
             *-*) PRERELEASE_FLAG="--prerelease" ;;
           esac
           gh release create "$TAG" --draft $PRERELEASE_FLAG --title "$TITLE" --notes-file notes.md
