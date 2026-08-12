@@ -35,12 +35,11 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
-      # workflow_run checkouts default to the default-branch tip, not the
-      # released commit — pin to the triggering run's sha (empty on
-      # workflow_dispatch, which then falls back to the default branch)
+      # deliberately the default branch, not the tag's commit: this job
+      # holds the X credentials, and tag-controlled code must not run
+      # with them. The script is CI-gated on main; minor version skew
+      # against the tag is the accepted lesser risk.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -93,10 +92,12 @@ jobs:
             echo "no draft for $TAG; nothing to clean"
             exit 0
           fi
-          # dist artifacts all carry the app-name prefix; anything else on
-          # the draft was curated by a human and is not ours to delete
+          # only names dist actually produces (platform archives +
+          # checksums, npm package, manifest, source tarball) — anything
+          # else on the draft was curated by a human and is not ours
+          DIST_NAMES='^(agent-walker-.+\.(tar\.xz|zip)(\.sha256)?|agent-walker-npm-package\.tar\.gz|dist-manifest\.json|sha256\.sum|source\.tar\.gz(\.sha256)?)$'
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
-            --jq ".assets[] | select(.createdAt < \"$CUTOFF\" and (.name | startswith(\"agent-walker\"))) | .name" | while IFS= read -r asset; do
+            --jq ".assets[] | select(.createdAt < \"$CUTOFF\" and (.name | test(\"$DIST_NAMES\"))) | .name" | while IFS= read -r asset; do
             echo "deleting stale asset: $asset"
             gh release delete-asset "$TAG" "$asset" -y --repo "${{ github.repository }}"
           done

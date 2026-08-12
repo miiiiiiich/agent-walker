@@ -17,6 +17,8 @@ CHANGELOG = """# Changelog
 - feature one, wrapped across
   two lines (#42)
 
+[Migration guide](https://example.com/migrate) for the breaking parts.
+
 ### Fixed
 
 - a bug
@@ -64,10 +66,16 @@ def test_version_from_tag_formats():
     assert version_from("agent-walker/v0.14.0") == "0.14.0"
 
 
-def test_version_from_rejects_foreign_package():
-    with pytest.raises(SystemExit) as e:
-        version_from("other/0.13.1")
-    assert "other/0.13.1" in str(e.value)
+def test_version_from_arbitrary_prefixes():
+    # dist accepts any prefix (verified against `dist plan`)
+    assert version_from("releases/v0.14.0") == "0.14.0"
+    assert version_from("other/0.14.0") == "0.14.0"
+
+
+def test_inline_links_do_not_truncate_section():
+    _, section = changelog_section("1.2.0", CHANGELOG)
+    assert "Migration guide" in section
+    assert "a bug" in section
 
 
 def test_usage_stable_vs_prerelease():

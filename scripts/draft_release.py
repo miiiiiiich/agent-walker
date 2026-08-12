@@ -7,8 +7,10 @@ CHANGELOG = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
 
 
 def changelog_section(version: str, changelog: str) -> tuple[str, str]:
+    # a section ends at the next version heading or at the footer's
+    # link-reference definitions — not at any body line starting with "["
     pattern = re.compile(
-        r"^## \[" + re.escape(version) + r"\] - (\S+)\s*\n(.*?)(?=^## \[|^\[|\Z)",
+        r"^## \[" + re.escape(version) + r"\] - (\S+)\s*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     m = pattern.search(changelog)
@@ -18,11 +20,10 @@ def changelog_section(version: str, changelog: str) -> tuple[str, str]:
 
 
 def version_from(tag: str) -> str:
-    # dist also fires on package-qualified tags like "agent-walker/0.14.0"
-    package, _, version = tag.rpartition("/")
-    if package and package != "agent-walker":
-        sys.exit(f"tag {tag} names a package this workspace does not ship")
-    return version.lstrip("v")
+    # dist accepts arbitrary tag prefixes (agent-walker/0.14.0,
+    # releases/v1.0.0 — verified against `dist plan`); only the version
+    # component matters here
+    return tag.rsplit("/", 1)[-1].lstrip("v")
 
 
 def usage(version: str) -> str:
