@@ -36,7 +36,8 @@ def effective_weight(tweet: str) -> int:
 
 
 def compose(tag: str, body: str) -> str:
-    head = f"agent-walker {tag}"
+    # package-qualified tags (agent-walker/0.14.0) would double the name
+    head = f"agent-walker {tag.rsplit('/', 1)[-1]}"
     url = f"https://github.com/miiiiiiich/agent-walker/releases/tag/{tag}"
     budget = MAX_WEIGHT - weight(head) - 2 - (URL_WEIGHT + 2)
     lines = []

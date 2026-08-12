@@ -45,7 +45,7 @@ npx agent-walker
 bunx agent-walker
 ```
 
-Prebuilt binaries are attached below. Every artifact carries a [GitHub Artifact Attestation](https://github.com/{REPO}/attestations) — verify with `gh attestation verify <file> --repo {REPO}`.
+Prebuilt binaries are attached below, each carrying a [GitHub Artifact Attestation](https://github.com/{REPO}/attestations) — verify with `gh attestation verify <file> --repo {REPO}`.
 """
     print(body)
 

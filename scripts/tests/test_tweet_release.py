@@ -62,3 +62,9 @@ def test_compose_without_bullets():
     tweet = compose("v1.2.0", "## Release Notes\n\nno bullets here")
     assert effective_weight(tweet) <= MAX_WEIGHT
     assert "releases/tag/v1.2.0" in tweet
+
+
+def test_compose_package_qualified_tag():
+    tweet = compose("agent-walker/1.2.0", BODY)
+    assert tweet.startswith("agent-walker 1.2.0\n")
+    assert "releases/tag/agent-walker/1.2.0" in tweet
