@@ -35,7 +35,12 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
+      # workflow_run checkouts default to the default-branch tip, not the
+      # released commit — pin to the triggering run's sha (empty on
+      # workflow_dispatch, which then falls back to the default branch)
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
