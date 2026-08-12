@@ -29,7 +29,12 @@ jobs:
         run: |
           if EXISTING=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$EXISTING" = "true" ]; then
-              echo "draft for $TAG already exists (re-run); leaving it as is"
+              # re-run: clear partially uploaded assets so the host step's
+              # gh release upload doesn't collide with stale names
+              echo "draft for $TAG already exists (re-run); clearing stale assets"
+              gh release view "$TAG" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+                gh release delete-asset "$TAG" "$asset" -y
+              done
               exit 0
             fi
             echo "a published release for $TAG already exists — refusing to touch it" >&2

@@ -62,7 +62,7 @@ gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/age
 ## Use
 
 No install — `npx` / `bunx` fetch the prebuilt binary for your platform
-(macOS arm64/x64, Linux arm64/x64 GNU, Windows x64) and run it:
+(macOS Apple Silicon, Linux arm64/x64 GNU, Windows x64) and run it:
 
 ```sh
 npx agent-walker

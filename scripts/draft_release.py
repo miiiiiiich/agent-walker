@@ -17,9 +17,14 @@ def changelog_section(version: str, changelog: str) -> tuple[str, str]:
     return m.group(1), m.group(2).strip()
 
 
+def version_from(tag: str) -> str:
+    # dist also fires on package-qualified tags like "agent-walker/0.14.0"
+    return tag.rsplit("/", 1)[-1].lstrip("v")
+
+
 def main() -> None:
     tag = sys.argv[1]
-    version = tag.lstrip("v")
+    version = version_from(tag)
     date, section = changelog_section(version, CHANGELOG.read_text())
 
     if "--title" in sys.argv[2:]:

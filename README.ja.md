@@ -39,7 +39,7 @@ gh attestation verify agent-walker-aarch64-apple-darwin.tar.xz -R miiiiiiich/age
 
 ## 使う
 
-インストール不要 — `npx` / `bunx` がプラットフォーム（macOS arm64/x64・Linux arm64/x64 GNU・Windows x64）に合ったバイナリを取ってきて実行：
+インストール不要 — `npx` / `bunx` がプラットフォーム（macOS Apple Silicon・Linux arm64/x64 GNU・Windows x64）に合ったバイナリを取ってきて実行：
 
 ```sh
 npx agent-walker

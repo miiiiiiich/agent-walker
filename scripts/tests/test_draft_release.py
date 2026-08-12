@@ -1,6 +1,6 @@
 import pytest
 
-from draft_release import changelog_section
+from draft_release import changelog_section, version_from
 
 CHANGELOG = """# Changelog
 
@@ -55,3 +55,10 @@ def test_missing_version_exits():
     with pytest.raises(SystemExit) as e:
         changelog_section("9.9.9", CHANGELOG)
     assert "9.9.9" in str(e.value)
+
+
+def test_version_from_tag_formats():
+    assert version_from("v0.14.0") == "0.14.0"
+    assert version_from("0.14.0") == "0.14.0"
+    assert version_from("agent-walker/0.14.0") == "0.14.0"
+    assert version_from("agent-walker/v0.14.0") == "0.14.0"
