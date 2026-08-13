@@ -4,9 +4,10 @@ use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
 /// MODES: how the model is allowed to think, per provider dial — Claude
-/// shows the thinking fire rate (plus fast mode once it has data), Codex the
-/// reasoning-effort mix. Deliberately small (a couple of rows): the dials are
-/// asymmetric across providers, so each tab renders only its own rows.
+/// shows the thinking fire rate (plus fast mode once it has data) and its
+/// reasoning-effort mix, Codex the reasoning-effort mix alone. Deliberately
+/// small (a couple of rows): the dials are asymmetric across providers, so
+/// each tab renders only its own rows.
 pub(in crate::ui) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let modes = &summary.modes;
     if modes.is_empty() {

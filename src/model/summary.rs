@@ -92,7 +92,8 @@ pub struct CreditsHistory {
 }
 
 /// Mode usage over the fixed 30-day window: how the user lets the model
-/// think. Claude: thinking-block fire rate (+ fast mode when used);
+/// think. Claude: thinking-block fire rate (+ fast mode when used) and the
+/// reasoning-effort distribution (top-level `effort`, CLI v2.1.212+);
 /// Codex: reasoning-effort distribution.
 #[derive(Debug, Clone, Default)]
 pub struct ModesSummary {

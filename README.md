@@ -34,7 +34,7 @@ reads the session logs on your disk and answers, in one screen:
 - **How hard did you push the plan?** — daily peak of the 5h-window
   utilization over the last month on the Codex tab: history, not a live meter
 - **How do you let it think?** — how often extended thinking actually fired
-  (Claude) and the reasoning-effort mix (Codex)
+  (Claude) and the reasoning-effort mix (Claude and Codex)
 
 ## Privacy
 

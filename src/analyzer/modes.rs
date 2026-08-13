@@ -1,4 +1,5 @@
-//! MODES panel data: Claude thinking / fast flags and Codex reasoning effort.
+//! MODES panel data: Claude thinking / fast flags and the reasoning-effort
+//! mix (Claude and Codex).
 use std::collections::BTreeMap;
 
 use time::{Date, OffsetDateTime, UtcOffset};
@@ -6,7 +7,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 use crate::model::{Collection, ModesSummary};
 
 /// Mode usage over the fixed 30-day window: Claude thinking / fast flags per
-/// assistant message, Codex reasoning-effort per turn.
+/// assistant message, reasoning effort per Claude message / Codex turn.
 pub(super) fn modes_summary(
     collection: &Collection,
     window_start: Date,
