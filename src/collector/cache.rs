@@ -31,9 +31,11 @@ use super::events::FileEvents;
 ///   bincode layout.
 /// - 13: duration events became keyed (`KeyedDurationEvent`, Grok fork
 ///   dedup), changing the `FileEvents` layout.
+/// - 14: Claude top-level `effort` extraction — v13 caches deserialize fine
+///   but carry empty effort events for already-parsed sessions.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 13;
+const CACHE_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

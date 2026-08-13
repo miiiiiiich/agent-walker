@@ -8,12 +8,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedModeEvent, KeyedToolEvent, KeyedUsageEvent, list_files,
-    merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedModeEvent, KeyedToolEvent,
+    KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, ModeEvent, Provider, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, ModeEvent, Provider, SessionTouch, SourceKind,
+    TokenUsage, ToolEvent, UsageEvent,
 };
 
 /// Background/observer harnesses (e.g. the claude-mem observer) keep
@@ -266,6 +266,7 @@ fn parse_line(
     };
 
     collect_mode_event(value, message, timestamp, events);
+    collect_effort_event(value, message, timestamp, events);
 
     let usage_value = message.get("usage").or_else(|| value.get("usage"));
     let message_id = string_field(message, "id");
@@ -374,6 +375,31 @@ fn collect_mode_event(
             has_thinking,
             fast,
         },
+    });
+}
+
+/// One effort event per assistant message (keyed by message id), from the
+/// top-level `effort` field Claude Code writes since v2.1.212 (2026-07-17).
+/// Older lines lack the field and contribute nothing; subagent (sidechain)
+/// messages carry it too, so the mix covers delegated turns.
+fn collect_effort_event(
+    value: &Value,
+    message: &Value,
+    timestamp: Option<OffsetDateTime>,
+    events: &mut FileEvents,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return;
+    }
+    let Some(effort) = string_field(value, "effort") else {
+        return;
+    };
+    let Some(message_id) = string_field(message, "id") else {
+        return;
+    };
+    events.effort_events.push(KeyedEffortEvent {
+        key: Some(format!("claude-effort:{message_id}")),
+        event: EffortEvent { timestamp, effort },
     });
 }
 
@@ -640,6 +666,38 @@ mod tests {
         assert!(collection.mode_events[0].fast);
         assert!(!collection.mode_events[1].has_thinking);
         assert!(!collection.mode_events[1].fast);
+    }
+
+    /// The top-level `effort` field (present since CLI v2.1.212) becomes one
+    /// effort event per assistant message; duplicate lines for the same
+    /// message dedupe by id, and lines without the field contribute nothing.
+    #[test]
+    fn collects_effort_events_deduped_by_message_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"assistant","effort":"xhigh","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:00:01Z","sessionId":"s1","type":"assistant","effort":"xhigh","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","effort":"max","message":{"id":"m2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"deep"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"old CLI"}]}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut efforts: Vec<&str> = collection
+            .effort_events
+            .iter()
+            .map(|event| event.effort.as_str())
+            .collect();
+        efforts.sort_unstable();
+        assert_eq!(efforts, ["max", "xhigh"]);
     }
 
     /// Streaming duplicates of one message can disagree: the larger-volume
