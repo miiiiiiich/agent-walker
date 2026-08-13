@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-08-14
+
+### Added
+
+- **MODES** (Claude tab): the reasoning-effort mix, read from the top-level
+  `effort` field Claude Code writes since v2.1.212. Delegated (subagent)
+  turns are included, so the mix covers what you hand to subagents too —
+  the panel sits next to the thinking / fast dials, matching the Codex
+  tab's effort mix.
+
+### Changed
+
+- Release notes are now written from this changelog instead of the
+  generated installer boilerplate, and every release is announced on X
+  automatically.
+
+### Removed
+
+- Intel macOS (`x86_64-apple-darwin`) prebuilt binaries. It was the
+  slowest build in the pipeline for a platform Apple stopped shipping;
+  Apple Silicon remains supported.
+
 ## [0.13.1] - 2026-07-30
 
 ### Added
@@ -341,6 +363,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.13.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.11.0...v0.12.0
