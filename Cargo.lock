@@ -274,9 +274,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -284,9 +284,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
 dependencies = [
  "anstream",
  "anstyle",
@@ -296,9 +296,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.7"
+version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db8b397918185f0161ff3d6fcaa9e4bfc09b8367caf6e1d4a2848e5477ed027b"
+checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
 dependencies = [
  "clap",
 ]
@@ -1223,9 +1223,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.1"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2050,9 +2050,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.1"
+version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",
@@ -2578,9 +2578,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.54"
+version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e1d5e639ff6bab73cb6885cc7e7b1de96c3f32c68ec55f3952614bec1092244"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
  "libc",
