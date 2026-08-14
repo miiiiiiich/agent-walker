@@ -7,17 +7,19 @@ CHANGELOG = Path(__file__).resolve().parents[1] / "CHANGELOG.md"
 CARGO_TOML = Path(__file__).resolve().parents[1] / "Cargo.toml"
 
 
-def changelog_section(version: str, changelog: str) -> tuple[str, str]:
+def changelog_section(version: str, changelog: str) -> str:
+    # the Keep-a-Changelog heading format (## [x.y.z] - date) is still
+    # required; the date itself is unused — GitHub renders release dates.
     # a section ends at the next version heading or at the footer's
     # link-reference definitions — not at any body line starting with "["
     pattern = re.compile(
-        r"^## \[" + re.escape(version) + r"\] - (\S+)\s*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\Z)",
+        r"^## \[" + re.escape(version) + r"\] - \S+\s*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     m = pattern.search(changelog)
     if not m:
         sys.exit(f"CHANGELOG.md has no section for [{version}] — write it before tagging")
-    return m.group(1), m.group(2).strip()
+    return m.group(1).strip()
 
 
 def version_from(tag: str) -> str:
@@ -61,7 +63,7 @@ def main() -> None:
     tag = sys.argv[1]
     version = version_from(tag)
     check_version_matches(version, CARGO_TOML.read_text())
-    _date, section = changelog_section(version, CHANGELOG.read_text())
+    section = changelog_section(version, CHANGELOG.read_text())
 
     if "--title" in sys.argv[2:]:
         # version only — GitHub renders the release date itself
