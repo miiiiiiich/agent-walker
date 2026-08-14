@@ -16,17 +16,18 @@ def bullets_from(body: str) -> list[str]:
     body = re.sub(r"^## Release Notes\s*", "", body.strip())
     body = re.split(r"^## ", body, maxsplit=1, flags=re.MULTILINE)[0]
     out = []
-    for m in re.finditer(r"^- (.+?)(?=^[^\s]|\Z)", body, re.MULTILINE | re.DOTALL):
-        text = " ".join(m.group(1).split())
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-        text = re.sub(r"https?://\S+", "", text)
-        text = text.replace("`", "").replace("**", "")
-        text = re.sub(r"\s*\(#\d+\)", "", text)
-        text = " ".join(text.split())
-        text = re.split(r"(?<=[.!?]) ", text)[0].rstrip(".")
-        if len(text) > 90:
-            text = text[:89].rstrip() + "…"
-        out.append(text)
+    # [preamble, section1, chunk1, section2, chunk2, …]
+    parts = re.split(r"^### +(.+)$", body, flags=re.MULTILINE)
+    for section, chunk in zip(["", *parts[1::2]], [parts[0], *parts[2::2]]):
+        for m in re.finditer(r"^- (.+?)(?=^[^\s]|\Z)", chunk, re.MULTILINE | re.DOTALL):
+            text = " ".join(m.group(1).split())
+            text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+            text = re.sub(r"https?://\S+", "", text)
+            text = text.replace("`", "").replace("**", "")
+            text = re.sub(r"\s*\(#\d+\)", "", text)
+            text = " ".join(text.split())
+            text = re.split(r"(?<=[.!?]) ", text)[0].rstrip(".")
+            out.append(f"{section.strip()}: {text}" if section.strip() else text)
     return out
 
 
@@ -45,11 +46,9 @@ def compose(tag: str, body: str) -> str:
         line = f"・{b}"
         w = weight(line) + 1
         if w > budget:
-            if not lines and budget > 40:
-                while weight(line) + 1 > budget:
-                    line = line[:-8] + "…"
-                lines.append(line)
-            break
+            # whole sentences only — a bullet that doesn't fit is skipped,
+            # never cut mid-text; the release link carries the rest
+            continue
         lines.append(line)
         budget -= w
 

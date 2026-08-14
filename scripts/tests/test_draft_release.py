@@ -42,21 +42,20 @@ CHANGELOG = """# Changelog
 """
 
 
-def test_extracts_date_and_section():
-    date, section = changelog_section("1.2.0", CHANGELOG)
-    assert date == "2026-08-01"
+def test_extracts_section():
+    section = changelog_section("1.2.0", CHANGELOG)
     assert "feature one" in section
     assert "a bug" in section
 
 
 def test_stops_at_next_version():
-    _, section = changelog_section("1.2.0", CHANGELOG)
+    section = changelog_section("1.2.0", CHANGELOG)
     assert "older entry" not in section
     assert "something in flight" not in section
 
 
 def test_last_section_stops_at_link_definitions():
-    _, section = changelog_section("1.1.0", CHANGELOG)
+    section = changelog_section("1.1.0", CHANGELOG)
     assert "older entry" in section
     assert "example.com" not in section
 
@@ -81,7 +80,7 @@ def test_version_from_arbitrary_prefixes():
 
 
 def test_inline_links_do_not_truncate_section():
-    _, section = changelog_section("1.2.0", CHANGELOG)
+    section = changelog_section("1.2.0", CHANGELOG)
     assert "Migration guide" in section
     assert "a bug" in section
 
