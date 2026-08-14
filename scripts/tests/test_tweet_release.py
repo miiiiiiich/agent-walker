@@ -24,6 +24,7 @@ def test_bullets_strip_markup_and_scope():
     bullets = bullets_from(BODY)
     assert len(bullets) == 2
     first = bullets[0]
+    assert first.startswith("Added: ")
     assert "**" not in first and "`" not in first
     assert "https://" not in first
     assert "(#30)" not in first
@@ -31,11 +32,12 @@ def test_bullets_strip_markup_and_scope():
     assert "must not appear" not in " ".join(bullets)
 
 
-def test_bullets_cap_length():
-    long_bullet = "- " + "word " * 40
-    bullets = bullets_from("## Release Notes\n\n" + long_bullet)
-    assert len(bullets[0]) <= 90
-    assert bullets[0].endswith("…")
+def test_compose_skips_oversized_bullets_without_truncation():
+    body = "## Release Notes\n\n### Added\n\n- " + "word " * 60 + "\n- Short and sweet.\n"
+    tweet = compose("v1.2.0", body)
+    assert "…" not in tweet
+    assert "・Added: Short and sweet" in tweet
+    assert "word word word" not in tweet
 
 
 def test_effective_weight_counts_urls_as_23():

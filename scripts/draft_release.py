@@ -61,10 +61,11 @@ def main() -> None:
     tag = sys.argv[1]
     version = version_from(tag)
     check_version_matches(version, CARGO_TOML.read_text())
-    date, section = changelog_section(version, CHANGELOG.read_text())
+    _date, section = changelog_section(version, CHANGELOG.read_text())
 
     if "--title" in sys.argv[2:]:
-        print(f"{version} - {date}")
+        # version only — GitHub renders the release date itself
+        print(f"v{version}")
         return
 
     body = f"""## Release Notes
