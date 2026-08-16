@@ -9,12 +9,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedRateLimitSample, KeyedToolEvent,
-    KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedPermissionEvent, KeyedRateLimitSample,
+    KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, Provider, RateLimitSample, SessionTouch, SourceKind,
-    TokenUsage, ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, PermissionEvent, Provider, RateLimitSample,
+    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 pub fn collect(
@@ -127,6 +127,13 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
             if !in_replay_burst {
                 collect_effort_event(
+                    &value,
+                    timestamp,
+                    current_session_id.as_ref(),
+                    line_index,
+                    &mut events,
+                );
+                collect_permission_event(
                     &value,
                     timestamp,
                     current_session_id.as_ref(),
@@ -314,6 +321,27 @@ fn collect_effort_event(
     events.effort_events.push(KeyedEffortEvent {
         key,
         event: EffortEvent { timestamp, effort },
+    });
+}
+
+fn collect_permission_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    line_index: usize,
+    events: &mut FileEvents,
+) {
+    let Some(mode) = string_path(value, &["payload", "approval_policy"]) else {
+        return;
+    };
+    let key = match (session_id, string_path(value, &["payload", "turn_id"])) {
+        (Some(sid), Some(turn_id)) => Some(format!("codex-permission:v2:{sid}:{turn_id}")),
+        (Some(sid), None) => positional_key("codex-permission", sid, timestamp, line_index),
+        _ => None,
+    };
+    events.permission_events.push(KeyedPermissionEvent {
+        key,
+        event: PermissionEvent { timestamp, mode },
     });
 }
 
@@ -694,7 +722,7 @@ mod tests {
             concat!(
                 r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","approval_policy":"never"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300},"secondary":{"used_percent":12.0,"window_minutes":10080}}}}"#,
                 "\n",
@@ -709,6 +737,8 @@ mod tests {
 
         assert_eq!(collection.effort_events.len(), 1);
         assert_eq!(collection.effort_events[0].effort, "xhigh");
+        assert_eq!(collection.permission_events.len(), 1);
+        assert_eq!(collection.permission_events[0].mode, "never");
         // Only the PRIMARY (5h) window is sampled; the weekly window is
         // deliberately dropped from the LIMITS history.
         assert_eq!(collection.rate_limit_samples.len(), 1);
@@ -757,7 +787,7 @@ mod tests {
         concat!(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"p1","model_provider":"openai"}}"#,
             "\n",
-            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
@@ -778,7 +808,7 @@ mod tests {
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"session_meta","payload":{"id":"p1","model_provider":"openai"}}"#,
             "\n",
-            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
@@ -786,7 +816,7 @@ mod tests {
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
             "\n",
-            r#"{"timestamp":"2026-06-01T01:00:05Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","turn_id":"t9"}}"#,
+            r#"{"timestamp":"2026-06-01T01:00:05Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","approval_policy":"never","turn_id":"t9"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":90,"cached_input_tokens":10,"output_tokens":40,"total_tokens":130},"total_token_usage":{"input_tokens":310,"cached_input_tokens":50,"output_tokens":70,"total_tokens":380}},"rate_limits":{"primary":{"used_percent":15.0,"window_minutes":300,"resets_at":1750018000}}}}"#,
             "\n",
@@ -893,6 +923,8 @@ mod tests {
         assert_eq!(collection.rate_limit_samples.len(), 1);
         assert_eq!(collection.effort_events.len(), 1);
         assert_eq!(collection.effort_events[0].effort, "xhigh");
+        assert_eq!(collection.permission_events.len(), 1);
+        assert_eq!(collection.permission_events[0].mode, "never");
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 222);
     }
@@ -967,11 +999,11 @@ mod tests {
             concat!(
                 r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:02Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-06-01T00:00:59Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:59Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
                 "\n"
             ),
         )
@@ -1050,7 +1082,7 @@ mod tests {
             concat!(
                 r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"total_tokens":110}}}}"#,
                 "\n",
@@ -1081,7 +1113,7 @@ mod tests {
             concat!(
                 r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
                 "\n",
-                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t1"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","approval_policy":"on-request","turn_id":"t1"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","turn_id":"t2"}}"#,
                 "\n"

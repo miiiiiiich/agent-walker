@@ -379,6 +379,7 @@ mod tests {
             credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
+            permission_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -436,6 +437,7 @@ mod tests {
             credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
+            permission_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -483,6 +485,7 @@ mod tests {
             credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
+            permission_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -514,8 +517,8 @@ mod v09_tests {
     use super::*;
     use crate::model::LimitDay;
     use crate::model::{
-        Collection, EffortEvent, ModeEvent, Provider, RateLimitSample, ScanStats, SourceKind,
-        UsageEvent,
+        Collection, EffortEvent, ModeEvent, PermissionEvent, Provider, RateLimitSample, ScanStats,
+        SourceKind, UsageEvent,
     };
 
     fn skill_event(at: OffsetDateTime, skill: Option<&str>, tokens: u64) -> UsageEvent {
@@ -538,6 +541,7 @@ mod v09_tests {
     /// SKILLS / LIMITS / MODES all cut on the fixed 30-day codename window
     /// (display `--days` = 90 here), and LIMITS days are tri-state.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn v09_sections_use_fixed_window_and_tristate_days() {
         let now = datetime!(2026-06-30 12:00 UTC);
         let collection = Collection {
@@ -612,6 +616,25 @@ mod v09_tests {
                     fast: true,
                 },
             ],
+            permission_events: vec![
+                PermissionEvent {
+                    timestamp: Some(datetime!(2026-06-25 10:00 UTC)),
+                    mode: "dontAsk".to_owned(),
+                },
+                PermissionEvent {
+                    timestamp: Some(datetime!(2026-06-25 11:00 UTC)),
+                    mode: "dontAsk".to_owned(),
+                },
+                PermissionEvent {
+                    timestamp: Some(datetime!(2026-06-25 12:00 UTC)),
+                    mode: "auto".to_owned(),
+                },
+                // Outside the 30d window: ignored.
+                PermissionEvent {
+                    timestamp: Some(datetime!(2026-05-20 10:00 UTC)),
+                    mode: "default".to_owned(),
+                },
+            ],
             stats: ScanStats::default(),
         };
 
@@ -642,6 +665,10 @@ mod v09_tests {
         assert_eq!(summary.modes.assistant_turns, 2);
         assert_eq!(summary.modes.thinking_turns, 1);
         assert_eq!(summary.modes.fast_turns, 0);
+        assert_eq!(
+            summary.modes.permissions,
+            vec![("dontAsk".to_owned(), 2), ("auto".to_owned(), 1)]
+        );
         assert_eq!(
             summary.modes.efforts,
             vec![("xhigh".to_owned(), 2), ("low".to_owned(), 1)]

@@ -33,9 +33,11 @@ use super::events::FileEvents;
 ///   dedup), changing the `FileEvents` layout.
 /// - 14: Claude top-level `effort` extraction — v13 caches deserialize fine
 ///   but carry empty effort events for already-parsed sessions.
+/// - 15: `FileEvents` gained `permission_events` (autonomy mix), changing
+///   its bincode layout.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 14;
+const CACHE_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

@@ -100,6 +100,7 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
     let mut seen_durations: HashMap<String, usize> = HashMap::new();
     let mut seen_efforts: HashMap<String, usize> = HashMap::new();
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
+    let mut seen_permissions: HashMap<String, usize> = HashMap::new();
 
     for (path, events) in per_file {
         collection.stats.files_seen += 1;
@@ -182,6 +183,18 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
             dedupe_into(
                 &mut collection.effort_events,
                 &mut seen_efforts,
+                keyed.key,
+                keyed.event,
+                |existing, incoming| {
+                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                },
+            );
+        }
+
+        for keyed in events.permission_events {
+            dedupe_into(
+                &mut collection.permission_events,
+                &mut seen_permissions,
                 keyed.key,
                 keyed.event,
                 |existing, incoming| {

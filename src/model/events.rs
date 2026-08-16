@@ -79,6 +79,15 @@ pub struct EffortEvent {
     pub effort: String,
 }
 
+/// One turn's granted-autonomy setting: Claude's `permissionMode` per user
+/// turn (default / auto / acceptEdits / dontAsk / plan / bypassPermissions),
+/// Codex's `approval_policy` per `turn_context` (never / on-request / …).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionEvent {
+    pub timestamp: Option<OffsetDateTime>,
+    pub mode: String,
+}
+
 /// Per-assistant-message mode flags for Claude: whether extended thinking
 /// fired (a `thinking` content block exists — block presence only, text is
 /// never read) and whether fast mode served it (`usage.speed == "fast"`).
@@ -126,6 +135,7 @@ pub struct Collection {
     pub credit_samples: Vec<CreditSample>,
     pub effort_events: Vec<EffortEvent>,
     pub mode_events: Vec<ModeEvent>,
+    pub permission_events: Vec<PermissionEvent>,
     pub stats: ScanStats,
 }
 
@@ -142,6 +152,7 @@ impl Collection {
             credit_samples: Vec::new(),
             effort_events: Vec::new(),
             mode_events: Vec::new(),
+            permission_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }
@@ -173,6 +184,9 @@ impl Collection {
             combined
                 .mode_events
                 .extend(collection.mode_events.iter().cloned());
+            combined
+                .permission_events
+                .extend(collection.permission_events.iter().cloned());
             combined.stats.add_assign(&collection.stats);
         }
         combined.stats.usage_events = combined.usage_events.len();

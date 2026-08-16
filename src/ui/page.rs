@@ -301,6 +301,7 @@ mod tests {
             thinking_turns: 49,
             fast_turns: 0,
             efforts: vec![("xhigh".to_owned(), 93), ("low".to_owned(), 6)],
+            permissions: Vec::new(),
         };
         summary.credits = Some(crate::model::CreditsHistory {
             days: (0..30)

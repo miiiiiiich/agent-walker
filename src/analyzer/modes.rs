@@ -1,5 +1,5 @@
-//! MODES panel data: Claude thinking / fast flags and the reasoning-effort
-//! mix (Claude and Codex).
+//! MODES panel data: Claude thinking / fast flags, the reasoning-effort mix,
+//! and the granted-autonomy (permission) mix (Claude and Codex).
 use std::collections::BTreeMap;
 
 use time::{Date, OffsetDateTime, UtcOffset};
@@ -44,6 +44,18 @@ pub(super) fn modes_summary(
     modes.efforts = effort_counts.into_iter().collect();
     modes
         .efforts
+        .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut permission_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for event in &collection.permission_events {
+        if !in_window(event.timestamp) {
+            continue;
+        }
+        *permission_counts.entry(event.mode.clone()).or_default() += 1;
+    }
+    modes.permissions = permission_counts.into_iter().collect();
+    modes
+        .permissions
         .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     modes
 }
