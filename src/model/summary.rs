@@ -102,11 +102,14 @@ pub struct ModesSummary {
     pub fast_turns: usize,
     /// (effort label, turns), sorted by turns descending.
     pub efforts: Vec<(String, usize)>,
+    /// (permission-mode label, turns), sorted by turns descending — Claude's
+    /// `permissionMode`, Codex's `approval_policy`.
+    pub permissions: Vec<(String, usize)>,
 }
 
 impl ModesSummary {
     pub fn is_empty(&self) -> bool {
-        self.assistant_turns == 0 && self.efforts.is_empty()
+        self.assistant_turns == 0 && self.efforts.is_empty() && self.permissions.is_empty()
     }
 }
 

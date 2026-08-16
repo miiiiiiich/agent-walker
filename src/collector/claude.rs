@@ -8,12 +8,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedModeEvent, KeyedToolEvent,
-    KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedModeEvent, KeyedPermissionEvent,
+    KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, ModeEvent, Provider, SessionTouch, SourceKind,
-    TokenUsage, ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, ModeEvent, PermissionEvent, Provider, SessionTouch,
+    SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 /// Background/observer harnesses (e.g. the claude-mem observer) keep
@@ -267,6 +267,7 @@ fn parse_line(
 
     collect_mode_event(value, message, timestamp, events);
     collect_effort_event(value, message, timestamp, events);
+    collect_permission_event(value, timestamp, events);
 
     let usage_value = message.get("usage").or_else(|| value.get("usage"));
     let message_id = string_field(message, "id");
@@ -375,6 +376,32 @@ fn collect_mode_event(
             has_thinking,
             fast,
         },
+    });
+}
+
+/// One permission event per human turn (keyed by the row uuid, which resume /
+/// fork copies share), from the top-level `permissionMode` field. Gated on
+/// `is_human_turn`: cross-session agent-message rows (`isMeta`) also carry
+/// the field and would let orchestration-heavy windows swamp the mix. The
+/// `type:"permission-mode"` change-stream rows are deliberately not used —
+/// per-turn values give the distribution, not just the switch points.
+fn collect_permission_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    events: &mut FileEvents,
+) {
+    if !is_human_turn(value) {
+        return;
+    }
+    let Some(mode) = string_field(value, "permissionMode") else {
+        return;
+    };
+    let Some(uuid) = string_field(value, "uuid") else {
+        return;
+    };
+    events.permission_events.push(KeyedPermissionEvent {
+        key: Some(format!("claude-permission:{uuid}")),
+        event: PermissionEvent { timestamp, mode },
     });
 }
 
@@ -666,6 +693,40 @@ mod tests {
         assert!(collection.mode_events[0].fast);
         assert!(!collection.mode_events[1].has_thinking);
         assert!(!collection.mode_events[1].fast);
+    }
+
+    /// The top-level `permissionMode` field on user rows becomes one
+    /// permission event per turn; resume/fork copies share the row uuid and
+    /// dedupe, and rows without the field contribute nothing.
+    #[test]
+    fn collects_permission_events_deduped_by_uuid() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"u1","permissionMode":"dontAsk","message":{"role":"user","content":"do it"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"u1","permissionMode":"dontAsk","message":{"role":"user","content":"do it"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"user","uuid":"u2","permissionMode":"auto","message":{"role":"user","content":"next"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"user","uuid":"u3","message":{"role":"user","content":"no mode field"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:03:00Z","sessionId":"s1","type":"user","uuid":"u4","isMeta":true,"permissionMode":"bypassPermissions","message":{"role":"user","content":"agent-message injection"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut modes: Vec<&str> = collection
+            .permission_events
+            .iter()
+            .map(|event| event.mode.as_str())
+            .collect();
+        modes.sort_unstable();
+        assert_eq!(modes, ["auto", "dontAsk"]);
     }
 
     /// The top-level `effort` field (present since CLI v2.1.212) becomes one
