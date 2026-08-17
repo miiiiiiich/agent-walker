@@ -127,16 +127,21 @@ mod tests {
     }
 
     /// An interrupt-only window's summary carries no duration stats — the
-    /// snapshot must not emit a zero-valued `completion_duration:` record.
+    /// snapshot must not emit a zero-valued `completion_duration:` record,
+    /// but the interruption count must survive on its own record.
     #[test]
     fn snapshot_suppresses_interrupt_only_completion() {
         let mut summary = crate::share::fixtures::sample_summary();
-        assert!(snapshot(&summary).contains("completion_duration:"));
+        let text = snapshot(&summary);
+        assert!(text.contains("completion_duration:"));
+        assert!(text.contains("completion_interrupted: 0"));
         if let Some(duration) = summary.completion_duration.as_mut() {
             duration.count = 0;
             duration.interrupted = 3;
         }
-        assert!(!snapshot(&summary).contains("completion_duration:"));
+        let text = snapshot(&summary);
+        assert!(!text.contains("completion_duration:"));
+        assert!(text.contains("completion_interrupted: 3"));
     }
 
     #[test]

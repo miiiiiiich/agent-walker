@@ -23,7 +23,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
     lines.push("providers:".to_owned());
     for provider in &report.providers {
         lines.push(format!(
-            "- {} volume:{} sessions:{} tools:{} durations:{} files:{} lines:{} parse_errors:{}",
+            "- {} volume:{} sessions:{} tools:{} durations:{} interrupted:{} files:{} lines:{} parse_errors:{}",
             provider.provider.label(),
             format_tokens(provider.total_usage.token_volume()),
             provider.sessions,
@@ -32,6 +32,10 @@ pub fn snapshot_app(report: &AppSummary) -> String {
                 .completion_duration
                 .as_ref()
                 .map_or(0, |duration| duration.count),
+            provider
+                .completion_duration
+                .as_ref()
+                .map_or(0, |duration| duration.interrupted),
             provider.scan_stats.files_seen,
             provider.scan_stats.lines_seen,
             provider.scan_stats.parse_errors,
@@ -120,23 +124,7 @@ pub fn snapshot(summary: &Summary) -> String {
             format_tokens(usage)
         ));
     }
-    // An interrupt-only summary (count == 0) has no duration stats —
-    // suppress the zero-valued record here too, matching the provider
-    // subsection in `snapshot_app`.
-    if let Some(duration) = summary
-        .completion_duration
-        .as_ref()
-        .filter(|duration| duration.count > 0)
-    {
-        lines.push(format!(
-            "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
-            duration.count,
-            format_duration_ms(duration.p50_ms),
-            format_duration_ms(duration.p90_ms),
-            format_duration_ms(duration.p95_ms),
-            format_duration_ms(duration.max_ms)
-        ));
-    }
+    lines.extend(completion_lines(summary));
 
     lines.push("models:".to_owned());
     for model in summary.models.iter().take(5) {
@@ -166,6 +154,32 @@ pub fn snapshot(summary: &Summary) -> String {
     }
 
     lines.join("\n")
+}
+
+/// The completion records: duration stats only when a turn completed (an
+/// interrupt-only summary's zero-valued record would mislead, matching the
+/// provider subsection in `snapshot_app`), while the interruption count
+/// rides its own record so it survives interrupt-only windows.
+fn completion_lines(summary: &Summary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(duration) = summary
+        .completion_duration
+        .as_ref()
+        .filter(|duration| duration.count > 0)
+    {
+        lines.push(format!(
+            "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
+            duration.count,
+            format_duration_ms(duration.p50_ms),
+            format_duration_ms(duration.p90_ms),
+            format_duration_ms(duration.p95_ms),
+            format_duration_ms(duration.max_ms)
+        ));
+    }
+    if let Some(duration) = &summary.completion_duration {
+        lines.push(format!("completion_interrupted: {}", duration.interrupted));
+    }
+    lines
 }
 
 fn indent_lines(value: &str, indent: &str) -> Vec<String> {
