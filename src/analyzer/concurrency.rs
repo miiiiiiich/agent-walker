@@ -115,7 +115,7 @@ mod tests {
     use time::OffsetDateTime;
     use time::macros::datetime;
 
-    use crate::model::{Collection, Provider, ScanStats, SessionTouch};
+    use crate::model::{Collection, Provider, SessionTouch};
 
     fn touch(session: &str, at: OffsetDateTime) -> SessionTouch {
         SessionTouch {
@@ -126,19 +126,8 @@ mod tests {
 
     fn collection(touches: Vec<SessionTouch>) -> Collection {
         Collection {
-            provider: Provider::Claude,
-            root: "/tmp".into(),
-            usage_events: Vec::new(),
-            tool_events: Vec::new(),
             session_touches: touches,
-            duration_events: Vec::new(),
-            rate_limit_samples: Vec::new(),
-            credit_samples: Vec::new(),
-            effort_events: Vec::new(),
-            mode_events: Vec::new(),
-            permission_events: Vec::new(),
-            interrupt_events: Vec::new(),
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Claude, "/tmp".into())
         }
     }
 

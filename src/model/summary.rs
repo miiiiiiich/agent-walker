@@ -137,12 +137,12 @@ impl SessionSpan {
     }
 }
 
+/// Completed-turn duration statistics. `Some` on a `Summary` guarantees at
+/// least one completed turn — interruptions live on `Summary::interrupted`,
+/// not here.
 #[derive(Debug, Clone)]
 pub struct DurationSummary {
     pub count: usize,
-    /// User-initiated interruptions (esc / `turn_aborted`) in the window —
-    /// not part of `count`, which is completed turns only.
-    pub interrupted: usize,
     pub p50_ms: u64,
     pub p90_ms: u64,
     pub p95_ms: u64,
@@ -214,6 +214,11 @@ pub struct Summary {
     pub favorite_model: Option<String>,
     pub longest_session: Option<SessionSpan>,
     pub completion_duration: Option<DurationSummary>,
+    /// User-initiated interruptions (Claude esc markers, Codex
+    /// `turn_aborted`) dated inside the window. Independent of
+    /// `completion_duration`: a window can hold interruptions and no
+    /// completed turn.
+    pub interrupted: usize,
     pub orchestration: Orchestration,
 }
 

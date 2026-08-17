@@ -212,17 +212,18 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
 }
 
 /// A provider earns a tab only if it has real activity. Token volume catches
-/// most agents; sessions, tools, completions, and the fixed-window credit
-/// ledger are the fallback for a session that logged activity but no usage
-/// tokens (Copilot credits cut on the fixed 30-day window, so they can exist
-/// even when a short `--days` display window is empty). Everything false ⇒
-/// the directory was missing or empty, so the tab is dropped instead of
-/// showing a blank tab.
+/// most agents; sessions, tools, completions, interruptions, and the
+/// fixed-window credit ledger are the fallback for a session that logged
+/// activity but no usage tokens (Copilot credits cut on the fixed 30-day
+/// window, so they can exist even when a short `--days` display window is
+/// empty). Everything false ⇒ the directory was missing or empty, so the tab
+/// is dropped instead of showing a blank tab.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
         || !summary.tools.is_empty()
         || summary.completion_duration.is_some()
+        || summary.interrupted > 0
         || summary.credits.is_some()
 }
 
@@ -332,6 +333,7 @@ mod tests {
             favorite_model: None,
             longest_session: None,
             completion_duration: None,
+            interrupted: 0,
             orchestration: Orchestration::default(),
         }
     }
@@ -358,12 +360,17 @@ mod tests {
 
     #[test]
     fn empty_provider_has_no_tab() {
-        // A provider with no tokens, sessions, tools, or completions (a missing
-        // or empty log dir) must not earn a tab.
+        // A provider with no tokens, sessions, tools, completions, or
+        // interruptions (a missing or empty log dir) must not earn a tab.
         let empty = provider_summary(Provider::Codex, "gpt-5.5", 0);
         assert!(!provider_has_data(&empty));
 
         let used = provider_summary(Provider::Claude, "claude-opus-4-8", 1);
         assert!(provider_has_data(&used));
+
+        // Interruptions alone are activity: an all-aborted window keeps the tab.
+        let mut interrupted_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
+        interrupted_only.interrupted = 2;
+        assert!(provider_has_data(&interrupted_only));
     }
 }

@@ -32,10 +32,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
                 .completion_duration
                 .as_ref()
                 .map_or(0, |duration| duration.count),
-            provider
-                .completion_duration
-                .as_ref()
-                .map_or(0, |duration| duration.interrupted),
+            provider.interrupted,
             provider.scan_stats.files_seen,
             provider.scan_stats.lines_seen,
             provider.scan_stats.parse_errors,
@@ -43,13 +40,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
         if let Some(model) = &provider.favorite_model {
             lines.push(format!("  favorite_model: {}", short_model_name(model)));
         }
-        // An interrupt-only summary (count == 0) has no duration stats —
-        // suppress the zero-valued completion record.
-        if let Some(duration) = provider
-            .completion_duration
-            .as_ref()
-            .filter(|duration| duration.count > 0)
-        {
+        if let Some(duration) = &provider.completion_duration {
             lines.push(format!(
                 "  completion: p50:{} p90:{} p95:{} max:{}",
                 format_duration_ms(duration.p50_ms),
@@ -156,17 +147,16 @@ pub fn snapshot(summary: &Summary) -> String {
     lines.join("\n")
 }
 
-/// The completion records: duration stats only when a turn completed (an
-/// interrupt-only summary's zero-valued record would mislead, matching the
-/// provider subsection in `snapshot_app`), while the interruption count
-/// rides its own record so it survives interrupt-only windows.
+/// The completion records: duration stats when a turn completed, and the
+/// interruption count on its own line (independent metrics — a window can
+/// hold one without the other). A summary with neither emits nothing, so
+/// the stable snapshot shape for silent windows is unchanged.
 fn completion_lines(summary: &Summary) -> Vec<String> {
     let mut lines = Vec::new();
-    if let Some(duration) = summary
-        .completion_duration
-        .as_ref()
-        .filter(|duration| duration.count > 0)
-    {
+    if summary.completion_duration.is_none() && summary.interrupted == 0 {
+        return lines;
+    }
+    if let Some(duration) = &summary.completion_duration {
         lines.push(format!(
             "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
             duration.count,
@@ -176,9 +166,7 @@ fn completion_lines(summary: &Summary) -> Vec<String> {
             format_duration_ms(duration.max_ms)
         ));
     }
-    if let Some(duration) = &summary.completion_duration {
-        lines.push(format!("completion_interrupted: {}", duration.interrupted));
-    }
+    lines.push(format!("completion_interrupted: {}", summary.interrupted));
     lines
 }
 

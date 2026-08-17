@@ -119,7 +119,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     // Decided chart priority: activity → token/day → by-hour → completion →
     // PARALLEL AGENTS → models → (cost/signal/projects/tools/agents).
     if width < TWO_COLUMN_MIN_WIDTH {
-        if summary.completion_duration.is_some() {
+        if summary.completion_duration.is_some() || summary.interrupted > 0 {
             lines.extend(sections::duration_lines(summary, width));
             lines.push(Line::default());
         }
@@ -159,7 +159,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         .time_by_level
         .iter()
         .any(|secs| *secs > 0);
-    if summary.completion_duration.is_some() || has_parallel {
+    if summary.completion_duration.is_some() || summary.interrupted > 0 || has_parallel {
         let completion = sections::duration_lines(summary, left_u16);
         let parallel = sections::parallel_lines(summary, right_u16);
         lines.extend(join_columns(&completion, &parallel, left_width + 2));

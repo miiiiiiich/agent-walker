@@ -150,6 +150,8 @@ pub fn summarize(
         duration::longest_session_span(collection, period_start, period_end, local_offset);
     let completion_duration =
         duration::completion_duration_summary(collection, period_start, period_end, local_offset);
+    let interrupted =
+        duration::interrupted_count(collection, period_start, period_end, local_offset);
     let orchestration =
         concurrency::orchestration(collection, period_start, period_end, local_offset);
     let (longest_streak_days, current_streak_days) =
@@ -243,6 +245,7 @@ pub fn summarize(
         favorite_model,
         longest_session,
         completion_duration,
+        interrupted,
         orchestration,
     }
 }
@@ -300,28 +303,16 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Collection, InterruptEvent, Provider, ScanStats, SessionTouch, SourceKind, TokenUsage,
-        UsageEvent,
+        Collection, InterruptEvent, Provider, SessionTouch, SourceKind, TokenUsage, UsageEvent,
     };
 
-    /// A window with interruptions but no completed turn still yields a
-    /// summary (all-zero duration stats) so the count stays visible under a
-    /// short `--days`; undated or out-of-window interrupts are excluded.
+    /// Interruptions are independent of completed-turn stats: a window with
+    /// interruptions but no completed turn reports the count and no duration
+    /// summary; undated or out-of-window interrupts are excluded.
     #[test]
-    fn interrupt_only_window_still_summarizes() {
+    fn interruptions_are_counted_independently_of_durations() {
         let now = datetime!(2026-06-08 12:00 UTC);
         let collection = Collection {
-            provider: Provider::Claude,
-            root: "/tmp".into(),
-            usage_events: Vec::new(),
-            tool_events: Vec::new(),
-            session_touches: Vec::new(),
-            duration_events: Vec::new(),
-            rate_limit_samples: Vec::new(),
-            credit_samples: Vec::new(),
-            effort_events: Vec::new(),
-            mode_events: Vec::new(),
-            permission_events: Vec::new(),
             interrupt_events: vec![
                 InterruptEvent {
                     timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
@@ -331,25 +322,21 @@ mod tests {
                 },
                 InterruptEvent { timestamp: None },
             ],
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Claude, "/tmp".into())
         };
 
         let summary = summarize(&collection, now, 7, UtcOffset::UTC);
 
-        let duration = summary
-            .completion_duration
-            .expect("interrupt-only window should keep the count visible");
-        assert_eq!(duration.count, 0);
-        assert_eq!(duration.interrupted, 1);
-        assert_eq!(duration.p50_ms, 0);
+        // No completed turn → no duration stats; the interruption count is
+        // its own metric and stays visible regardless.
+        assert!(summary.completion_duration.is_none());
+        assert_eq!(summary.interrupted, 1);
     }
 
     #[test]
     fn aggregates_models_agents_tools_and_streaks() {
         let now = datetime!(2026-06-08 12:00 UTC);
         let collection = Collection {
-            provider: Provider::Claude,
-            root: "/tmp/claude".into(),
             usage_events: vec![
                 UsageEvent {
                     timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
@@ -415,14 +402,7 @@ mod tests {
                     session_id: "s1".to_owned(),
                 },
             ],
-            duration_events: Vec::new(),
-            rate_limit_samples: Vec::new(),
-            credit_samples: Vec::new(),
-            effort_events: Vec::new(),
-            mode_events: Vec::new(),
-            permission_events: Vec::new(),
-            interrupt_events: Vec::new(),
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Claude, "/tmp/claude".into())
         };
 
         let summary = summarize(&collection, now, 7, UtcOffset::UTC);
@@ -469,19 +449,8 @@ mod tests {
             event(datetime!(2026-05-21 10:00 UTC), 4_000_000), // only the 90d display
         ];
         let collection = |events: Vec<UsageEvent>| Collection {
-            provider: Provider::Claude,
-            root: "/tmp".into(),
             usage_events: events,
-            tool_events: Vec::new(),
-            session_touches: Vec::new(),
-            duration_events: Vec::new(),
-            rate_limit_samples: Vec::new(),
-            credit_samples: Vec::new(),
-            effort_events: Vec::new(),
-            mode_events: Vec::new(),
-            permission_events: Vec::new(),
-            interrupt_events: Vec::new(),
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Claude, "/tmp".into())
         };
 
         let week = summarize(&collection(events.clone()), now, 7, UtcOffset::UTC);
@@ -518,19 +487,8 @@ mod tests {
             reported_cost_usd: reported,
         };
         let collection = Collection {
-            provider: Provider::Combined,
-            root: "/tmp".into(),
             usage_events: vec![event(Some(0.5), 100), event(None, 300)],
-            tool_events: Vec::new(),
-            session_touches: Vec::new(),
-            duration_events: Vec::new(),
-            rate_limit_samples: Vec::new(),
-            credit_samples: Vec::new(),
-            effort_events: Vec::new(),
-            mode_events: Vec::new(),
-            permission_events: Vec::new(),
-            interrupt_events: Vec::new(),
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Combined, "/tmp".into())
         };
 
         let summary = summarize(&collection, now, 7, UtcOffset::UTC);
@@ -561,8 +519,8 @@ mod v09_tests {
     use super::*;
     use crate::model::LimitDay;
     use crate::model::{
-        Collection, EffortEvent, ModeEvent, PermissionEvent, Provider, RateLimitSample, ScanStats,
-        SourceKind, UsageEvent,
+        Collection, EffortEvent, ModeEvent, PermissionEvent, Provider, RateLimitSample, SourceKind,
+        UsageEvent,
     };
 
     fn skill_event(at: OffsetDateTime, skill: Option<&str>, tokens: u64) -> UsageEvent {
@@ -589,8 +547,6 @@ mod v09_tests {
     fn v09_sections_use_fixed_window_and_tristate_days() {
         let now = datetime!(2026-06-30 12:00 UTC);
         let collection = Collection {
-            provider: Provider::Combined,
-            root: "/tmp".into(),
             usage_events: vec![
                 // In the 30d window (06-01..06-30) with a skill.
                 skill_event(
@@ -608,10 +564,6 @@ mod v09_tests {
                 // Active day without any rate-limit sample -> NoSample.
                 skill_event(datetime!(2026-06-22 09:00 UTC), None, 500),
             ],
-            tool_events: Vec::new(),
-            session_touches: Vec::new(),
-            duration_events: Vec::new(),
-            credit_samples: Vec::new(),
             rate_limit_samples: vec![
                 RateLimitSample {
                     timestamp: datetime!(2026-06-22 08:00 UTC),
@@ -679,8 +631,7 @@ mod v09_tests {
                     mode: "default".to_owned(),
                 },
             ],
-            interrupt_events: Vec::new(),
-            stats: ScanStats::default(),
+            ..Collection::new(Provider::Combined, "/tmp".into())
         };
 
         let summary = summarize(&collection, now, 90, UtcOffset::UTC);

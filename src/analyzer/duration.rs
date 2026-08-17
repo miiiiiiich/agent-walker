@@ -36,12 +36,8 @@ pub(super) fn longest_session_span(
         .max_by_key(SessionSpan::duration_secs)
 }
 
-/// Summarize completed-turn durations plus the window's interruption count.
-/// A window holding interruptions but no completed turn (realistic under a
-/// short `--days`) still yields a summary — all-zero duration stats — so
-/// the count stays visible. Interrupts count only when dated inside the
-/// window (the same `is_some_and` ruling as the mode summaries): an
-/// undated event would otherwise appear in every requested window.
+/// Summarize completed-turn durations; `None` when no turn completed in the
+/// window. Interruptions are a separate metric — see `interrupted_count`.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -60,23 +56,12 @@ pub(super) fn completion_duration_summary(
         .map(|event| event.duration_ms)
         .filter(|duration_ms| *duration_ms > 0)
         .collect::<Vec<_>>();
-    let interrupted = collection
-        .interrupt_events
-        .iter()
-        .filter(|event| {
-            event
-                .timestamp
-                .map(|timestamp| timestamp.to_offset(local_offset).date())
-                .is_some_and(|date| date >= period_start && date <= period_end)
-        })
-        .count();
-    if values.is_empty() && interrupted == 0 {
+    if values.is_empty() {
         return None;
     }
     values.sort_unstable();
     Some(DurationSummary {
         count: values.len(),
-        interrupted,
         p50_ms: percentile_ms(&values, 50),
         p90_ms: percentile_ms(&values, 90),
         p95_ms: percentile_ms(&values, 95),
@@ -85,10 +70,28 @@ pub(super) fn completion_duration_summary(
     })
 }
 
+/// User interruptions dated inside the window. Only dated events count
+/// (the same `is_some_and` ruling as the mode summaries): an undated event
+/// would otherwise appear in every requested window.
+pub(super) fn interrupted_count(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> usize {
+    collection
+        .interrupt_events
+        .iter()
+        .filter(|event| {
+            event
+                .timestamp
+                .map(|timestamp| timestamp.to_offset(local_offset).date())
+                .is_some_and(|date| date >= period_start && date <= period_end)
+        })
+        .count()
+}
+
 fn percentile_ms(sorted_values: &[u64], percentile: usize) -> u64 {
-    if sorted_values.is_empty() {
-        return 0;
-    }
     let rank = sorted_values.len().saturating_mul(percentile).div_ceil(100);
     let index = rank.saturating_sub(1).min(sorted_values.len() - 1);
     sorted_values[index]

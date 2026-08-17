@@ -63,7 +63,6 @@ pub(crate) fn sample_summary() -> Summary {
         longest_session: None,
         completion_duration: Some(DurationSummary {
             count: 100,
-            interrupted: 0,
             p50_ms: 120_000,
             p90_ms: 600_000,
             p95_ms: 900_000,
@@ -95,6 +94,7 @@ pub(crate) fn sample_summary() -> Summary {
                 },
             ],
         }),
+        interrupted: 0,
         orchestration: Orchestration {
             avg_concurrency: 2.5,
             peak_concurrency: 4,

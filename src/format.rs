@@ -126,22 +126,22 @@ mod tests {
         assert!(snapshot(&crate::share::fixtures::sample_summary()).contains("rank: unranked"));
     }
 
-    /// An interrupt-only window's summary carries no duration stats — the
-    /// snapshot must not emit a zero-valued `completion_duration:` record,
-    /// but the interruption count must survive on its own record.
+    /// Duration stats and the interruption count are independent records:
+    /// an interrupt-only window emits the count and no duration record.
     #[test]
-    fn snapshot_suppresses_interrupt_only_completion() {
+    fn snapshot_reports_interruptions_independently() {
         let mut summary = crate::share::fixtures::sample_summary();
         let text = snapshot(&summary);
         assert!(text.contains("completion_duration:"));
         assert!(text.contains("completion_interrupted: 0"));
-        if let Some(duration) = summary.completion_duration.as_mut() {
-            duration.count = 0;
-            duration.interrupted = 3;
-        }
+        summary.completion_duration = None;
+        summary.interrupted = 3;
         let text = snapshot(&summary);
         assert!(!text.contains("completion_duration:"));
         assert!(text.contains("completion_interrupted: 3"));
+        // Neither → neither record (the silent-window shape is unchanged).
+        summary.interrupted = 0;
+        assert!(!snapshot(&summary).contains("completion_"));
     }
 
     #[test]

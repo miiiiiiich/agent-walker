@@ -1,11 +1,23 @@
 use crate::format::{format_count, format_duration_ms};
-use crate::model::Summary;
+use crate::model::{DurationSummary, Summary};
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
+/// The COMPLETION section: duration stats when a turn completed, plus the
+/// window's interruption count in the title. A window with interruptions
+/// but no completed turn renders the title alone — the count stays visible
+/// without zero percentiles or empty bars.
 pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
-    let Some(duration) = &summary.completion_duration else {
+    let duration = summary.completion_duration.as_ref();
+    if duration.is_none() && summary.interrupted == 0 {
         return Vec::new();
+    }
+    let title = utils::section_title(
+        "COMPLETION",
+        &completion_annotation(duration, summary.interrupted, width),
+    );
+    let Some(duration) = duration else {
+        return vec![title];
     };
     let max = duration
         .buckets
@@ -13,12 +25,6 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
         .map(|bucket| bucket.count)
         .max()
         .unwrap_or(0);
-    let title = utils::section_title("COMPLETION", &completion_annotation(duration, width));
-    // An interrupt-only window (no completed turn) keeps the count visible
-    // but has no percentiles or buckets worth drawing.
-    if duration.count == 0 {
-        return vec![title];
-    }
     let mut lines = vec![
         title,
         Line::from(vec![
@@ -58,7 +64,11 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
 /// its long form when the rail has room, falls back to a compact "esc"
 /// label, and drops entirely on rails too narrow for either — never
 /// clipped mid-word. The prefix budget covers "▍ COMPLETION  ".
-fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -> String {
+fn completion_annotation(
+    duration: Option<&DurationSummary>,
+    interrupted: usize,
+    width: u16,
+) -> String {
     let budget = usize::from(width).saturating_sub("▍ COMPLETION  ".chars().count());
     let fitted = |candidates: [String; 2], fallback: String| {
         candidates
@@ -66,16 +76,16 @@ fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -
             .find(|text| text.chars().count() <= budget)
             .unwrap_or(fallback)
     };
-    let interrupted = format_count(duration.interrupted);
-    if duration.count == 0 {
+    let interrupted_label = format_count(interrupted);
+    let Some(duration) = duration else {
         return fitted(
             [
-                format!("{interrupted} interrupted"),
-                format!("{interrupted} esc"),
+                format!("{interrupted_label} interrupted"),
+                format!("{interrupted_label} esc"),
             ],
             String::new(),
         );
-    }
+    };
     let autonomous: usize = duration
         .buckets
         .iter()
@@ -87,13 +97,13 @@ fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -
         format_count(duration.count),
         format_count(autonomous)
     );
-    if duration.interrupted == 0 {
+    if interrupted == 0 {
         return base;
     }
     fitted(
         [
-            format!("{base} · {interrupted} interrupted"),
-            format!("{base} · {interrupted} esc"),
+            format!("{base} · {interrupted_label} interrupted"),
+            format!("{base} · {interrupted_label} esc"),
         ],
         base,
     )
@@ -105,9 +115,7 @@ mod tests {
 
     fn summary_with_interrupts(interrupted: usize) -> Summary {
         let mut summary = crate::share::fixtures::sample_summary();
-        if let Some(duration) = summary.completion_duration.as_mut() {
-            duration.interrupted = interrupted;
-        }
+        summary.interrupted = interrupted;
         summary
     }
 
@@ -143,10 +151,7 @@ mod tests {
     #[test]
     fn interrupt_only_window_renders_title_only() {
         let mut summary = summary_with_interrupts(3);
-        if let Some(duration) = summary.completion_duration.as_mut() {
-            duration.count = 0;
-            duration.buckets.iter_mut().for_each(|b| b.count = 0);
-        }
+        summary.completion_duration = None;
 
         let lines = duration_lines(&summary, 100);
 
@@ -161,5 +166,10 @@ mod tests {
         let title = rendered(&narrow[0]);
         assert!(title.chars().count() <= 20, "{title:?}");
         assert!(!title.contains("interrupted"), "{title:?}");
+
+        // Nothing at all to say → no section.
+        let mut silent = summary_with_interrupts(0);
+        silent.completion_duration = None;
+        assert!(duration_lines(&silent, 100).is_empty());
     }
 }
