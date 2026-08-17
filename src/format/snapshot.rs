@@ -120,7 +120,14 @@ pub fn snapshot(summary: &Summary) -> String {
             format_tokens(usage)
         ));
     }
-    if let Some(duration) = &summary.completion_duration {
+    // An interrupt-only summary (count == 0) has no duration stats —
+    // suppress the zero-valued record here too, matching the provider
+    // subsection in `snapshot_app`.
+    if let Some(duration) = summary
+        .completion_duration
+        .as_ref()
+        .filter(|duration| duration.count > 0)
+    {
         lines.push(format!(
             "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
             duration.count,

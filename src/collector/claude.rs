@@ -123,30 +123,33 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         {
             project = Some(project_from_cwd(&cwd));
         }
-        if source_kind == SourceKind::Main
-            && let Some(timestamp) = parse_timestamp(value.get("timestamp"))
-        {
+        if source_kind == SourceKind::Main {
             if is_interrupt_marker(&value) {
                 // The active turn was aborted: discard it (completion stats
                 // count completed turns only, matching Codex where
                 // `turn_aborted` never reaches the durations) and don't
-                // start a bogus turn from the marker row itself.
+                // start a bogus turn from the marker row itself. Recognized
+                // before requiring a timestamp — an undated marker must
+                // still clear the turn, or the abort would flush as a
+                // completed duration at the next prompt or EOF.
                 turn_start = None;
                 last_activity = None;
-            } else if is_human_turn(&value) {
-                push_turn_duration(turn_start, last_activity, &mut events);
-                turn_start = Some(timestamp);
-                last_activity = Some(timestamp);
-            } else if let Some(previous) = last_activity {
-                // A long silence means the turn ended and the session was
-                // resumed later (compaction, scheduled appends); close the
-                // turn at the last real activity instead of spanning days.
-                if timestamp - previous > Duration::minutes(30) {
+            } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
+                if is_human_turn(&value) {
                     push_turn_duration(turn_start, last_activity, &mut events);
-                    turn_start = None;
-                    last_activity = None;
-                } else {
-                    last_activity = Some(previous.max(timestamp));
+                    turn_start = Some(timestamp);
+                    last_activity = Some(timestamp);
+                } else if let Some(previous) = last_activity {
+                    // A long silence means the turn ended and the session was
+                    // resumed later (compaction, scheduled appends); close the
+                    // turn at the last real activity instead of spanning days.
+                    if timestamp - previous > Duration::minutes(30) {
+                        push_turn_duration(turn_start, last_activity, &mut events);
+                        turn_start = None;
+                        last_activity = None;
+                    } else {
+                        last_activity = Some(previous.max(timestamp));
+                    }
                 }
             }
         }
@@ -857,6 +860,33 @@ mod tests {
         // marker row contribute no durations.
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 60_000);
+    }
+
+    /// A marker without a timestamp still clears the active turn: the abort
+    /// must not flush as a completed duration at the next prompt or EOF.
+    #[test]
+    fn undated_marker_still_discards_the_aborted_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do the thing"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+                "\n",
+                r#"{"sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // The undated marker yields an event the analyzer will exclude by
+        // date, and no duration: EOF must not flush the aborted turn.
+        assert_eq!(collection.interrupt_events.len(), 1);
+        assert!(collection.interrupt_events[0].timestamp.is_none());
+        assert_eq!(collection.duration_events.len(), 0);
     }
 
     /// The top-level `permissionMode` field on user rows becomes one

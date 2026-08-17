@@ -126,6 +126,19 @@ mod tests {
         assert!(snapshot(&crate::share::fixtures::sample_summary()).contains("rank: unranked"));
     }
 
+    /// An interrupt-only window's summary carries no duration stats — the
+    /// snapshot must not emit a zero-valued `completion_duration:` record.
+    #[test]
+    fn snapshot_suppresses_interrupt_only_completion() {
+        let mut summary = crate::share::fixtures::sample_summary();
+        assert!(snapshot(&summary).contains("completion_duration:"));
+        if let Some(duration) = summary.completion_duration.as_mut() {
+            duration.count = 0;
+            duration.interrupted = 3;
+        }
+        assert!(!snapshot(&summary).contains("completion_duration:"));
+    }
+
     #[test]
     fn formats_tokens_with_compact_units() {
         assert_eq!(format_tokens(900), "900");
