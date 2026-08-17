@@ -164,13 +164,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             &mut events,
         );
         collect_duration_event(&value, timestamp, current_session_id.as_ref(), &mut events);
-        collect_interrupt_event(
-            &value,
-            timestamp,
-            current_session_id.as_ref(),
-            line_index,
-            &mut events,
-        );
+        collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
         collect_tool_event(
             &value,
             timestamp,
@@ -332,14 +326,16 @@ fn collect_effort_event(
     });
 }
 
-/// One interrupt event per `turn_aborted` (reason is always "interrupted").
-/// The same `turn_id` repeats across rollout re-emissions, so events key by
-/// turn id with the positional fallback older rollouts need.
+/// One interrupt event per user-caused `turn_aborted`. Other abort reasons
+/// (`replaced`, `review_ended`) are not user escs and never count; every
+/// observed rollout carries the reason field. Events without a `turn_id`
+/// (legacy rollouts only, all predating any 30-day window) are skipped —
+/// a positional fallback is not replay-stable across forks and would
+/// double-count copies, which matters for a counted metric.
 fn collect_interrupt_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
-    line_index: usize,
     events: &mut FileEvents,
 ) {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
@@ -348,13 +344,15 @@ fn collect_interrupt_event(
     if string_path(value, &["payload", "type"]).as_deref() != Some("turn_aborted") {
         return;
     }
-    let key = match (session_id, string_path(value, &["payload", "turn_id"])) {
-        (Some(sid), Some(turn_id)) => Some(format!("codex-interrupt:v2:{sid}:{turn_id}")),
-        (Some(sid), None) => positional_key("codex-interrupt", sid, timestamp, line_index),
-        _ => None,
+    if string_path(value, &["payload", "reason"]).as_deref() != Some("interrupted") {
+        return;
+    }
+    let (Some(sid), Some(turn_id)) = (session_id, string_path(value, &["payload", "turn_id"]))
+    else {
+        return;
     };
     events.interrupt_events.push(KeyedInterruptEvent {
-        key,
+        key: Some(format!("codex-interrupt:v2:{sid}:{turn_id}")),
         event: InterruptEvent { timestamp },
     });
 }
@@ -768,6 +766,12 @@ mod tests {
                 r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:06Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
+                "\n",
+                // A non-user abort reason and a legacy abort without turn_id
+                // are both discarded, not counted as escs.
+                r#"{"timestamp":"2026-06-01T00:00:07Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"replaced","turn_id":"t8","duration_ms":100}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:08Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","duration_ms":200}}"#,
                 "\n"
             ),
         )

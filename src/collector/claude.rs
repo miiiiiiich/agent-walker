@@ -276,7 +276,7 @@ fn parse_line(
     collect_mode_event(value, message, timestamp, events);
     collect_effort_event(value, message, timestamp, events);
     collect_permission_event(value, timestamp, events);
-    collect_interrupt_event(value, timestamp, events);
+    collect_interrupt_event(value, timestamp, source_kind, events);
 
     let usage_value = message.get("usage").or_else(|| value.get("usage"));
     let message_id = string_field(message, "id");
@@ -415,7 +415,9 @@ fn collect_permission_event(
 }
 
 /// A main-thread row the harness writes when the user hits esc: a user row
-/// whose content starts with a `[Request interrupted by user …]` marker.
+/// whose content IS one of the two complete marker forms the harness
+/// emits (the only variants across real logs) — a prompt that merely
+/// quotes or starts with the marker text must not count or clear a turn.
 /// `isMeta` rows are excluded because agent messages QUOTING the marker
 /// would otherwise count. `isSidechain` rows are excluded because one esc
 /// against a parallel team fans out as marker echoes into every subagent
@@ -433,8 +435,10 @@ fn is_interrupt_marker(value: &Value) -> bool {
         return false;
     }
     let is_marker = |text: &str| {
-        text.trim_start()
-            .starts_with("[Request interrupted by user")
+        matches!(
+            text.trim(),
+            "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+        )
     };
     match value
         .get("message")
@@ -453,12 +457,18 @@ fn is_interrupt_marker(value: &Value) -> bool {
 
 /// One interrupt event per main-thread esc (`interruptedMessageId` rows are
 /// a strict subset of marker rows, so the marker alone carries the count).
-/// Keyed by the row uuid, which resume/fork copies share.
+/// Subagent-file rows are excluded by file provenance too, not only by the
+/// row's `isSidechain` flag. Keyed by the row uuid, which resume/fork
+/// copies share.
 fn collect_interrupt_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
+    source_kind: SourceKind,
     events: &mut FileEvents,
 ) {
+    if source_kind != SourceKind::Main {
+        return;
+    }
     if !is_interrupt_marker(value) {
         return;
     }
@@ -784,10 +794,24 @@ mod tests {
                 r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"user","uuid":"i5","message":{"role":"user","content":"the log said [Request interrupted by user] mid-sentence"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"i6","isSidechain":true,"message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"user","uuid":"i7","message":{"role":"user","content":"[Request interrupted by user] what does this marker mean?"}}"#,
                 "\n"
             ),
         )
         .expect("fixture should be written");
+        let subagent_dir = temp.path().join("project").join("subagents");
+        fs::create_dir_all(&subagent_dir).expect("test dirs should be created");
+        // A subagent-file echo that omits the redundant `isSidechain` flag:
+        // file provenance alone must exclude it.
+        fs::write(
+            subagent_dir.join("agent-abc.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"i8","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n"
+            ),
+        )
+        .expect("subagent fixture should be written");
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
