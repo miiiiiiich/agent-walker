@@ -59,8 +59,22 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
 /// label, and drops entirely on rails too narrow for either — never
 /// clipped mid-word. The prefix budget covers "▍ COMPLETION  ".
 fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -> String {
+    let budget = usize::from(width).saturating_sub("▍ COMPLETION  ".chars().count());
+    let fitted = |candidates: [String; 2], fallback: String| {
+        candidates
+            .into_iter()
+            .find(|text| text.chars().count() <= budget)
+            .unwrap_or(fallback)
+    };
+    let interrupted = format_count(duration.interrupted);
     if duration.count == 0 {
-        return format!("{} interrupted", format_count(duration.interrupted));
+        return fitted(
+            [
+                format!("{interrupted} interrupted"),
+                format!("{interrupted} esc"),
+            ],
+            String::new(),
+        );
     }
     let autonomous: usize = duration
         .buckets
@@ -76,19 +90,13 @@ fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -
     if duration.interrupted == 0 {
         return base;
     }
-    let budget = usize::from(width).saturating_sub("▍ COMPLETION  ".chars().count());
-    let long = format!(
-        "{base} · {} interrupted",
-        format_count(duration.interrupted)
-    );
-    if long.chars().count() <= budget {
-        return long;
-    }
-    let compact = format!("{base} · {} esc", format_count(duration.interrupted));
-    if compact.chars().count() <= budget {
-        return compact;
-    }
-    base
+    fitted(
+        [
+            format!("{base} · {interrupted} interrupted"),
+            format!("{base} · {interrupted} esc"),
+        ],
+        base,
+    )
 }
 
 #[cfg(test)]
@@ -146,5 +154,12 @@ mod tests {
         let title = rendered(&lines[0]);
         assert!(title.contains("3 interrupted"), "{title:?}");
         assert!(!title.contains("turns"), "{title:?}");
+
+        // The width ladder applies here too — no mid-word clipping on
+        // rails narrower than the long form.
+        let narrow = duration_lines(&summary, 20);
+        let title = rendered(&narrow[0]);
+        assert!(title.chars().count() <= 20, "{title:?}");
+        assert!(!title.contains("interrupted"), "{title:?}");
     }
 }

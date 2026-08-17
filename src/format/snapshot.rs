@@ -39,7 +39,13 @@ pub fn snapshot_app(report: &AppSummary) -> String {
         if let Some(model) = &provider.favorite_model {
             lines.push(format!("  favorite_model: {}", short_model_name(model)));
         }
-        if let Some(duration) = &provider.completion_duration {
+        // An interrupt-only summary (count == 0) has no duration stats —
+        // suppress the zero-valued completion record.
+        if let Some(duration) = provider
+            .completion_duration
+            .as_ref()
+            .filter(|duration| duration.count > 0)
+        {
             lines.push(format!(
                 "  completion: p50:{} p90:{} p95:{} max:{}",
                 format_duration_ms(duration.p50_ms),

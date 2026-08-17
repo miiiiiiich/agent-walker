@@ -132,18 +132,24 @@ impl ShareCard {
             )
         });
 
-        let completion = summary.completion_duration.as_ref().map(|duration| {
-            let counts: Vec<usize> = duration.buckets.iter().map(|b| b.count).collect();
-            let unattended: usize = counts.iter().skip(3).sum();
-            (
-                counts,
-                unattended,
-                duration.count,
-                format_duration_ms(duration.p50_ms),
-                format_duration_ms(duration.p90_ms),
-                format_duration_ms(duration.max_ms),
-            )
-        });
+        // An interrupt-only summary (count == 0) carries no duration stats
+        // worth exporting — the card keeps its em-dash absent state.
+        let completion = summary
+            .completion_duration
+            .as_ref()
+            .filter(|duration| duration.count > 0)
+            .map(|duration| {
+                let counts: Vec<usize> = duration.buckets.iter().map(|b| b.count).collect();
+                let unattended: usize = counts.iter().skip(3).sum();
+                (
+                    counts,
+                    unattended,
+                    duration.count,
+                    format_duration_ms(duration.p50_ms),
+                    format_duration_ms(duration.p90_ms),
+                    format_duration_ms(duration.max_ms),
+                )
+            });
 
         let codename = crate::codename::for_summary(summary);
         Self {
