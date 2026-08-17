@@ -137,6 +137,7 @@ mod tests {
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             permission_events: Vec::new(),
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }

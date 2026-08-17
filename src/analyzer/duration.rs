@@ -36,6 +36,11 @@ pub(super) fn longest_session_span(
         .max_by_key(SessionSpan::duration_secs)
 }
 
+/// Summarize completed-turn durations plus the window's interruption count.
+/// A window with zero completed turns returns `None` even if interruptions
+/// exist — the COMPLETION section disappears with them, which is accepted:
+/// a fixed 30-day window without a single completed turn does not occur in
+/// real use.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -58,8 +63,19 @@ pub(super) fn completion_duration_summary(
         return None;
     }
     values.sort_unstable();
+    let interrupted = collection
+        .interrupt_events
+        .iter()
+        .filter(|event| {
+            event.timestamp.is_none_or(|timestamp| {
+                let date = timestamp.to_offset(local_offset).date();
+                date >= period_start && date <= period_end
+            })
+        })
+        .count();
     Some(DurationSummary {
         count: values.len(),
+        interrupted,
         p50_ms: percentile_ms(&values, 50),
         p90_ms: percentile_ms(&values, 90),
         p95_ms: percentile_ms(&values, 95),

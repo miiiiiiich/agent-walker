@@ -9,12 +9,13 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedPermissionEvent, KeyedRateLimitSample,
-    KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedPermissionEvent,
+    KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
+    parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, PermissionEvent, Provider, RateLimitSample,
-    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, InterruptEvent, PermissionEvent, Provider,
+    RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 pub fn collect(
@@ -163,6 +164,13 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             &mut events,
         );
         collect_duration_event(&value, timestamp, current_session_id.as_ref(), &mut events);
+        collect_interrupt_event(
+            &value,
+            timestamp,
+            current_session_id.as_ref(),
+            line_index,
+            &mut events,
+        );
         collect_tool_event(
             &value,
             timestamp,
@@ -321,6 +329,33 @@ fn collect_effort_event(
     events.effort_events.push(KeyedEffortEvent {
         key,
         event: EffortEvent { timestamp, effort },
+    });
+}
+
+/// One interrupt event per `turn_aborted` (reason is always "interrupted").
+/// The same `turn_id` repeats across rollout re-emissions, so events key by
+/// turn id with the positional fallback older rollouts need.
+fn collect_interrupt_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    line_index: usize,
+    events: &mut FileEvents,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return;
+    }
+    if string_path(value, &["payload", "type"]).as_deref() != Some("turn_aborted") {
+        return;
+    }
+    let key = match (session_id, string_path(value, &["payload", "turn_id"])) {
+        (Some(sid), Some(turn_id)) => Some(format!("codex-interrupt:v2:{sid}:{turn_id}")),
+        (Some(sid), None) => positional_key("codex-interrupt", sid, timestamp, line_index),
+        _ => None,
+    };
+    events.interrupt_events.push(KeyedInterruptEvent {
+        key,
+        event: InterruptEvent { timestamp },
     });
 }
 
@@ -728,6 +763,11 @@ mod tests {
                 "\n",
                 // A turn_context without effort contributes no effort event.
                 r#"{"timestamp":"2026-06-01T00:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                // The same aborted turn re-emitted twice counts once.
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:06Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
                 "\n"
             ),
         )
@@ -739,6 +779,7 @@ mod tests {
         assert_eq!(collection.effort_events[0].effort, "xhigh");
         assert_eq!(collection.permission_events.len(), 1);
         assert_eq!(collection.permission_events[0].mode, "never");
+        assert_eq!(collection.interrupt_events.len(), 1);
         // Only the PRIMARY (5h) window is sampled; the weekly window is
         // deliberately dropped from the LIMITS history.
         assert_eq!(collection.rate_limit_samples.len(), 1);
@@ -794,6 +835,8 @@ mod tests {
             r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T00:00:10Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:11Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t2","duration_ms":5000}}"#,
             "\n"
         )
     }
@@ -815,6 +858,8 @@ mod tests {
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":20,"total_tokens":140},"total_token_usage":{"input_tokens":220,"cached_input_tokens":40,"output_tokens":30,"total_tokens":250}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1750000000}}}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":111}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T01:00:00Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t2","duration_ms":5000}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T01:00:05Z","type":"turn_context","payload":{"model":"gpt-5.5","effort":"xhigh","approval_policy":"never","turn_id":"t9"}}"#,
             "\n",
@@ -839,6 +884,8 @@ mod tests {
         // Replayed task_complete lines are skipped with the burst, so the
         // (unkeyed) duration events cannot double-count.
         assert_eq!(collection.duration_events.len(), 2);
+        // The parent's aborted turn replays in the burst too — one event.
+        assert_eq!(collection.interrupt_events.len(), 1);
 
         // Replayed events keep the parent's ORIGINAL timestamps — day/hour
         // attribution must not shift to the fork instant, whatever the file

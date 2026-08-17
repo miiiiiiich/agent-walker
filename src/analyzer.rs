@@ -380,6 +380,7 @@ mod tests {
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             permission_events: Vec::new(),
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -438,6 +439,7 @@ mod tests {
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             permission_events: Vec::new(),
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -486,6 +488,7 @@ mod tests {
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             permission_events: Vec::new(),
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         };
 
@@ -635,6 +638,7 @@ mod v09_tests {
                     mode: "default".to_owned(),
                 },
             ],
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         };
 

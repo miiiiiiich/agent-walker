@@ -140,6 +140,9 @@ impl SessionSpan {
 #[derive(Debug, Clone)]
 pub struct DurationSummary {
     pub count: usize,
+    /// User-initiated interruptions (esc / `turn_aborted`) in the window —
+    /// not part of `count`, which is completed turns only.
+    pub interrupted: usize,
     pub p50_ms: u64,
     pub p90_ms: u64,
     pub p95_ms: u64,

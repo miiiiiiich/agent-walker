@@ -35,9 +35,11 @@ use super::events::FileEvents;
 ///   but carry empty effort events for already-parsed sessions.
 /// - 15: `FileEvents` gained `permission_events` (autonomy mix), changing
 ///   its bincode layout.
+/// - 16: `FileEvents` gained `interrupt_events` (esc / `turn_aborted` counts),
+///   changing its bincode layout.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 15;
+const CACHE_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

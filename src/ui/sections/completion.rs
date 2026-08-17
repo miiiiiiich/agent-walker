@@ -13,22 +13,8 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
         .map(|bucket| bucket.count)
         .max()
         .unwrap_or(0);
-    // Autonomy signal: how often a turn ran 20+ minutes unattended.
-    let autonomous: usize = duration
-        .buckets
-        .iter()
-        .skip(3)
-        .map(|bucket| bucket.count)
-        .sum();
     let mut lines = vec![
-        utils::section_title(
-            "COMPLETION",
-            &format!(
-                "{} turns · {} ran ≥20m",
-                format_count(duration.count),
-                format_count(autonomous)
-            ),
-        ),
+        utils::section_title("COMPLETION", &completion_annotation(duration, width)),
         Line::from(vec![
             Span::styled("p50 ", Style::default().fg(theme::MUTED)),
             Span::styled(
@@ -60,4 +46,78 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
         ));
     }
     lines
+}
+
+/// The section annotation, width-fitted: the interruption count appends in
+/// its long form when the rail has room, falls back to a compact "esc"
+/// label, and drops entirely on rails too narrow for either — never
+/// clipped mid-word. The prefix budget covers "▍ COMPLETION  ".
+fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -> String {
+    let autonomous: usize = duration
+        .buckets
+        .iter()
+        .skip(3)
+        .map(|bucket| bucket.count)
+        .sum();
+    let base = format!(
+        "{} turns · {} ran ≥20m",
+        format_count(duration.count),
+        format_count(autonomous)
+    );
+    if duration.interrupted == 0 {
+        return base;
+    }
+    let budget = usize::from(width).saturating_sub("▍ COMPLETION  ".chars().count());
+    let long = format!(
+        "{base} · {} interrupted",
+        format_count(duration.interrupted)
+    );
+    if long.chars().count() <= budget {
+        return long;
+    }
+    let compact = format!("{base} · {} esc", format_count(duration.interrupted));
+    if compact.chars().count() <= budget {
+        return compact;
+    }
+    base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_with_interrupts(interrupted: usize) -> Summary {
+        let mut summary = crate::share::fixtures::sample_summary();
+        if let Some(duration) = summary.completion_duration.as_mut() {
+            duration.interrupted = interrupted;
+        }
+        summary
+    }
+
+    fn rendered(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The 80-column layout's rail must not clip the title mid-word: the
+    /// interruption count falls back to "esc" and then drops entirely.
+    #[test]
+    fn completion_title_fits_narrow_rails() {
+        let summary = summary_with_interrupts(12);
+
+        let wide = duration_lines(&summary, 100);
+        let title = rendered(&wide[0]);
+        assert!(title.contains("12 interrupted"), "{title:?}");
+
+        let narrow = duration_lines(&summary, 44);
+        let title = rendered(&narrow[0]);
+        assert!(title.chars().count() <= 44, "{title:?}");
+        assert!(!title.contains("interrupted"), "{title:?}");
+
+        let zero = duration_lines(&summary_with_interrupts(0), 100);
+        let title = rendered(&zero[0]);
+        assert!(!title.contains("esc") && !title.contains("interrupted"));
+    }
 }
