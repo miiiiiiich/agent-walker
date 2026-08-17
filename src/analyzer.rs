@@ -300,8 +300,49 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Collection, Provider, ScanStats, SessionTouch, SourceKind, TokenUsage, UsageEvent,
+        Collection, InterruptEvent, Provider, ScanStats, SessionTouch, SourceKind, TokenUsage,
+        UsageEvent,
     };
+
+    /// A window with interruptions but no completed turn still yields a
+    /// summary (all-zero duration stats) so the count stays visible under a
+    /// short `--days`; undated or out-of-window interrupts are excluded.
+    #[test]
+    fn interrupt_only_window_still_summarizes() {
+        let now = datetime!(2026-06-08 12:00 UTC);
+        let collection = Collection {
+            provider: Provider::Claude,
+            root: "/tmp".into(),
+            usage_events: Vec::new(),
+            tool_events: Vec::new(),
+            session_touches: Vec::new(),
+            duration_events: Vec::new(),
+            rate_limit_samples: Vec::new(),
+            credit_samples: Vec::new(),
+            effort_events: Vec::new(),
+            mode_events: Vec::new(),
+            permission_events: Vec::new(),
+            interrupt_events: vec![
+                InterruptEvent {
+                    timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
+                },
+                InterruptEvent {
+                    timestamp: Some(datetime!(2026-01-01 10:00 UTC)),
+                },
+                InterruptEvent { timestamp: None },
+            ],
+            stats: ScanStats::default(),
+        };
+
+        let summary = summarize(&collection, now, 7, UtcOffset::UTC);
+
+        let duration = summary
+            .completion_duration
+            .expect("interrupt-only window should keep the count visible");
+        assert_eq!(duration.count, 0);
+        assert_eq!(duration.interrupted, 1);
+        assert_eq!(duration.p50_ms, 0);
+    }
 
     #[test]
     fn aggregates_models_agents_tools_and_streaks() {

@@ -13,8 +13,14 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
         .map(|bucket| bucket.count)
         .max()
         .unwrap_or(0);
+    let title = utils::section_title("COMPLETION", &completion_annotation(duration, width));
+    // An interrupt-only window (no completed turn) keeps the count visible
+    // but has no percentiles or buckets worth drawing.
+    if duration.count == 0 {
+        return vec![title];
+    }
     let mut lines = vec![
-        utils::section_title("COMPLETION", &completion_annotation(duration, width)),
+        title,
         Line::from(vec![
             Span::styled("p50 ", Style::default().fg(theme::MUTED)),
             Span::styled(
@@ -53,6 +59,9 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
 /// label, and drops entirely on rails too narrow for either — never
 /// clipped mid-word. The prefix budget covers "▍ COMPLETION  ".
 fn completion_annotation(duration: &crate::model::DurationSummary, width: u16) -> String {
+    if duration.count == 0 {
+        return format!("{} interrupted", format_count(duration.interrupted));
+    }
     let autonomous: usize = duration
         .buckets
         .iter()
@@ -119,5 +128,23 @@ mod tests {
         let zero = duration_lines(&summary_with_interrupts(0), 100);
         let title = rendered(&zero[0]);
         assert!(!title.contains("esc") && !title.contains("interrupted"));
+    }
+
+    /// An interrupt-only window (every turn aborted, none completed) keeps
+    /// the count visible as a bare title — no zero percentiles or empty bars.
+    #[test]
+    fn interrupt_only_window_renders_title_only() {
+        let mut summary = summary_with_interrupts(3);
+        if let Some(duration) = summary.completion_duration.as_mut() {
+            duration.count = 0;
+            duration.buckets.iter_mut().for_each(|b| b.count = 0);
+        }
+
+        let lines = duration_lines(&summary, 100);
+
+        assert_eq!(lines.len(), 1);
+        let title = rendered(&lines[0]);
+        assert!(title.contains("3 interrupted"), "{title:?}");
+        assert!(!title.contains("turns"), "{title:?}");
     }
 }

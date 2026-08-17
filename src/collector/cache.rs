@@ -37,9 +37,10 @@ use super::events::FileEvents;
 ///   its bincode layout.
 /// - 16: `FileEvents` gained `interrupt_events` (esc / `turn_aborted` counts),
 ///   changing its bincode layout.
-/// - 17: interrupt admission tightened (exact Claude marker forms, subagent
-///   file provenance, Codex `reason == "interrupted"` + required `turn_id`)
-///   — v16 caches carry over-counted interrupt events.
+/// - 17: interrupt admission tightened (exact Claude marker forms as the
+///   sole content block, subagent file provenance, Codex
+///   `reason == "interrupted"` + required `turn_id`) — v16 caches carry
+///   over-counted interrupt events.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
 const CACHE_VERSION: u32 = 17;

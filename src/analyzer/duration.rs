@@ -37,10 +37,11 @@ pub(super) fn longest_session_span(
 }
 
 /// Summarize completed-turn durations plus the window's interruption count.
-/// A window with zero completed turns returns `None` even if interruptions
-/// exist — the COMPLETION section disappears with them, which is accepted:
-/// a fixed 30-day window without a single completed turn does not occur in
-/// real use.
+/// A window holding interruptions but no completed turn (realistic under a
+/// short `--days`) still yields a summary — all-zero duration stats — so
+/// the count stays visible. Interrupts count only when dated inside the
+/// window (the same `is_some_and` ruling as the mode summaries): an
+/// undated event would otherwise appear in every requested window.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -59,20 +60,20 @@ pub(super) fn completion_duration_summary(
         .map(|event| event.duration_ms)
         .filter(|duration_ms| *duration_ms > 0)
         .collect::<Vec<_>>();
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
     let interrupted = collection
         .interrupt_events
         .iter()
         .filter(|event| {
-            event.timestamp.is_none_or(|timestamp| {
-                let date = timestamp.to_offset(local_offset).date();
-                date >= period_start && date <= period_end
-            })
+            event
+                .timestamp
+                .map(|timestamp| timestamp.to_offset(local_offset).date())
+                .is_some_and(|date| date >= period_start && date <= period_end)
         })
         .count();
+    if values.is_empty() && interrupted == 0 {
+        return None;
+    }
+    values.sort_unstable();
     Some(DurationSummary {
         count: values.len(),
         interrupted,
@@ -85,6 +86,9 @@ pub(super) fn completion_duration_summary(
 }
 
 fn percentile_ms(sorted_values: &[u64], percentile: usize) -> u64 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
     let rank = sorted_values.len().saturating_mul(percentile).div_ceil(100);
     let index = rank.saturating_sub(1).min(sorted_values.len() - 1);
     sorted_values[index]

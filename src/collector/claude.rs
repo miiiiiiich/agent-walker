@@ -440,17 +440,21 @@ fn is_interrupt_marker(value: &Value) -> bool {
             "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
         )
     };
+    // Array content must be SOLELY the marker block (every real marker row
+    // is a single-text array) — a prompt attaching an image alongside a
+    // quoted marker is a real message, not an esc.
     match value
         .get("message")
         .and_then(|message| message.get("content"))
     {
         Some(Value::String(text)) => is_marker(text),
-        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
-            block
+        Some(Value::Array(blocks)) => match blocks.as_slice() {
+            [block] => block
                 .get("text")
                 .and_then(Value::as_str)
-                .is_some_and(is_marker)
-        }),
+                .is_some_and(is_marker),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -796,6 +800,8 @@ mod tests {
                 r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"i6","isSidechain":true,"message":{"role":"user","content":"[Request interrupted by user]"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"user","uuid":"i7","message":{"role":"user","content":"[Request interrupted by user] what does this marker mean?"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"i9","message":{"role":"user","content":[{"type":"image","source":{"type":"base64"}},{"type":"text","text":"[Request interrupted by user]"}]}}"#,
                 "\n"
             ),
         )
