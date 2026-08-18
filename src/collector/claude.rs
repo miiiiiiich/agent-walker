@@ -8,12 +8,13 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedModeEvent, KeyedPermissionEvent,
-    KeyedToolEvent, KeyedUsageEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedModeEvent,
+    KeyedPermissionEvent, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
+    parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, ModeEvent, PermissionEvent, Provider, SessionTouch,
-    SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, Provider,
+    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 /// Background/observer harnesses (e.g. the claude-mem observer) keep
@@ -122,23 +123,33 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         {
             project = Some(project_from_cwd(&cwd));
         }
-        if source_kind == SourceKind::Main
-            && let Some(timestamp) = parse_timestamp(value.get("timestamp"))
-        {
-            if is_human_turn(&value) {
-                push_turn_duration(turn_start, last_activity, &mut events);
-                turn_start = Some(timestamp);
-                last_activity = Some(timestamp);
-            } else if let Some(previous) = last_activity {
-                // A long silence means the turn ended and the session was
-                // resumed later (compaction, scheduled appends); close the
-                // turn at the last real activity instead of spanning days.
-                if timestamp - previous > Duration::minutes(30) {
+        if source_kind == SourceKind::Main {
+            if is_interrupt_marker(&value) {
+                // The active turn was aborted: discard it (completion stats
+                // count completed turns only, matching Codex where
+                // `turn_aborted` never reaches the durations) and don't
+                // start a bogus turn from the marker row itself. Recognized
+                // before requiring a timestamp — an undated marker must
+                // still clear the turn, or the abort would flush as a
+                // completed duration at the next prompt or EOF.
+                turn_start = None;
+                last_activity = None;
+            } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
+                if is_human_turn(&value) {
                     push_turn_duration(turn_start, last_activity, &mut events);
-                    turn_start = None;
-                    last_activity = None;
-                } else {
-                    last_activity = Some(previous.max(timestamp));
+                    turn_start = Some(timestamp);
+                    last_activity = Some(timestamp);
+                } else if let Some(previous) = last_activity {
+                    // A long silence means the turn ended and the session was
+                    // resumed later (compaction, scheduled appends); close the
+                    // turn at the last real activity instead of spanning days.
+                    if timestamp - previous > Duration::minutes(30) {
+                        push_turn_duration(turn_start, last_activity, &mut events);
+                        turn_start = None;
+                        last_activity = None;
+                    } else {
+                        last_activity = Some(previous.max(timestamp));
+                    }
                 }
             }
         }
@@ -268,6 +279,7 @@ fn parse_line(
     collect_mode_event(value, message, timestamp, events);
     collect_effort_event(value, message, timestamp, events);
     collect_permission_event(value, timestamp, events);
+    collect_interrupt_event(value, timestamp, source_kind, events);
 
     let usage_value = message.get("usage").or_else(|| value.get("usage"));
     let message_id = string_field(message, "id");
@@ -402,6 +414,77 @@ fn collect_permission_event(
     events.permission_events.push(KeyedPermissionEvent {
         key: Some(format!("claude-permission:{uuid}")),
         event: PermissionEvent { timestamp, mode },
+    });
+}
+
+/// A main-thread row the harness writes when the user hits esc: a user row
+/// whose content IS one of the two complete marker forms the harness
+/// emits (the only variants across real logs) — a prompt that merely
+/// quotes or starts with the marker text must not count or clear a turn.
+/// `isMeta` rows are excluded because agent messages QUOTING the marker
+/// would otherwise count. `isSidechain` rows are excluded because one esc
+/// against a parallel team fans out as marker echoes into every subagent
+/// transcript (bursts of 10-16 observed — counting them would overstate
+/// interruptions ~1.8x, load-dependently). The trade-off: an esc recorded
+/// only in sidechain files (~14% of esc moments) is deliberately not
+/// counted — the same turn-level ruling as Codex, where `turn_aborted`
+/// is used and `sub_agent_activity: interrupted` is discarded.
+fn is_interrupt_marker(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let flagged = |field: &str| value.get(field).and_then(Value::as_bool).unwrap_or(false);
+    if flagged("isMeta") || flagged("isSidechain") {
+        return false;
+    }
+    let is_marker = |text: &str| {
+        matches!(
+            text.trim(),
+            "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+        )
+    };
+    // Array content must be SOLELY the marker block (every real marker row
+    // is a single-text array) — a prompt attaching an image alongside a
+    // quoted marker is a real message, not an esc.
+    match value
+        .get("message")
+        .and_then(|message| message.get("content"))
+    {
+        Some(Value::String(text)) => is_marker(text),
+        Some(Value::Array(blocks)) => match blocks.as_slice() {
+            [block] => block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(is_marker),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// One interrupt event per main-thread esc (`interruptedMessageId` rows are
+/// a strict subset of marker rows, so the marker alone carries the count).
+/// Subagent-file rows are excluded by file provenance too, not only by the
+/// row's `isSidechain` flag. Keyed by the row uuid, which resume/fork
+/// copies share.
+fn collect_interrupt_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    source_kind: SourceKind,
+    events: &mut FileEvents,
+) {
+    if source_kind != SourceKind::Main {
+        return;
+    }
+    if !is_interrupt_marker(value) {
+        return;
+    }
+    let Some(uuid) = string_field(value, "uuid") else {
+        return;
+    };
+    events.interrupt_events.push(KeyedInterruptEvent {
+        key: Some(format!("claude-interrupt:{uuid}")),
+        event: InterruptEvent { timestamp },
     });
 }
 
@@ -693,6 +776,117 @@ mod tests {
         assert!(collection.mode_events[0].fast);
         assert!(!collection.mode_events[1].has_thinking);
         assert!(!collection.mode_events[1].fast);
+    }
+
+    /// Interrupt markers count once per esc: duplicate uuids (resume/fork
+    /// copies) dedupe, block-content markers count, and a row carrying only
+    /// `interruptedMessageId` without the marker does not count (real logs
+    /// show such rows always carry the marker too).
+    #[test]
+    fn collects_interrupt_events_from_marker_rows() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"user","uuid":"i2","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"user","uuid":"i3","interruptedMessageId":"m9","message":{"role":"user","content":"a plain follow-up"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:03:00Z","sessionId":"s1","type":"user","uuid":"i4","isMeta":true,"message":{"role":"user","content":"[Request interrupted by user] quoted in an agent report"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"user","uuid":"i5","message":{"role":"user","content":"the log said [Request interrupted by user] mid-sentence"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"i6","isSidechain":true,"message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"user","uuid":"i7","message":{"role":"user","content":"[Request interrupted by user] what does this marker mean?"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"i9","message":{"role":"user","content":[{"type":"image","source":{"type":"base64"}},{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+        let subagent_dir = temp.path().join("project").join("subagents");
+        fs::create_dir_all(&subagent_dir).expect("test dirs should be created");
+        // A subagent-file echo that omits the redundant `isSidechain` flag:
+        // file provenance alone must exclude it.
+        fs::write(
+            subagent_dir.join("agent-abc.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"i8","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n"
+            ),
+        )
+        .expect("subagent fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.interrupt_events.len(), 2);
+    }
+
+    /// An interrupted turn is discarded from completion durations (matching
+    /// Codex, where `turn_aborted` never reaches the durations), and the
+    /// marker row does not start a bogus turn of its own.
+    #[test]
+    fn interrupted_turns_are_excluded_from_durations() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do the thing"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"try again"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"h3","message":{"role":"user","content":"thanks"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.interrupt_events.len(), 1);
+        // Only the completed turn survives ("try again" 00:05 -> last
+        // activity "done" 00:06 = 60s); the aborted first turn and the
+        // marker row contribute no durations.
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 60_000);
+    }
+
+    /// A marker without a timestamp still clears the active turn: the abort
+    /// must not flush as a completed duration at the next prompt or EOF.
+    #[test]
+    fn undated_marker_still_discards_the_aborted_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do the thing"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+                "\n",
+                r#"{"sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // The undated marker yields an event the analyzer will exclude by
+        // date, and no duration: EOF must not flush the aborted turn.
+        assert_eq!(collection.interrupt_events.len(), 1);
+        assert!(collection.interrupt_events[0].timestamp.is_none());
+        assert_eq!(collection.duration_events.len(), 0);
     }
 
     /// The top-level `permissionMode` field on user rows becomes one

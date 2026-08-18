@@ -88,6 +88,13 @@ pub struct PermissionEvent {
     pub mode: String,
 }
 
+/// One user-initiated interruption: Claude's `[Request interrupted …]`
+/// marker rows (esc during a turn), Codex's `turn_aborted` events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptEvent {
+    pub timestamp: Option<OffsetDateTime>,
+}
+
 /// Per-assistant-message mode flags for Claude: whether extended thinking
 /// fired (a `thinking` content block exists — block presence only, text is
 /// never read) and whether fast mode served it (`usage.speed == "fast"`).
@@ -136,6 +143,7 @@ pub struct Collection {
     pub effort_events: Vec<EffortEvent>,
     pub mode_events: Vec<ModeEvent>,
     pub permission_events: Vec<PermissionEvent>,
+    pub interrupt_events: Vec<InterruptEvent>,
     pub stats: ScanStats,
 }
 
@@ -153,6 +161,7 @@ impl Collection {
             effort_events: Vec::new(),
             mode_events: Vec::new(),
             permission_events: Vec::new(),
+            interrupt_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }
@@ -187,6 +196,9 @@ impl Collection {
             combined
                 .permission_events
                 .extend(collection.permission_events.iter().cloned());
+            combined
+                .interrupt_events
+                .extend(collection.interrupt_events.iter().cloned());
             combined.stats.add_assign(&collection.stats);
         }
         combined.stats.usage_events = combined.usage_events.len();

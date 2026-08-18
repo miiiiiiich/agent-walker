@@ -21,8 +21,8 @@ mod walk;
 
 pub use cache::parse_files_cached;
 pub use events::{
-    FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedEffortEvent, KeyedModeEvent,
-    KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent,
+    FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent,
+    KeyedModeEvent, KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent,
 };
 pub use merge::merge_into;
 pub use project::project_from_cwd;

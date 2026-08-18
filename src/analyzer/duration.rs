@@ -36,6 +36,8 @@ pub(super) fn longest_session_span(
         .max_by_key(SessionSpan::duration_secs)
 }
 
+/// Summarize completed-turn durations; `None` when no turn completed in the
+/// window. Interruptions are a separate metric — see `interrupted_count`.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -66,6 +68,27 @@ pub(super) fn completion_duration_summary(
         max_ms: *values.last().unwrap_or(&0),
         buckets: duration_buckets(&values),
     })
+}
+
+/// User interruptions dated inside the window. Only dated events count
+/// (the same `is_some_and` ruling as the mode summaries): an undated event
+/// would otherwise appear in every requested window.
+pub(super) fn interrupted_count(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> usize {
+    collection
+        .interrupt_events
+        .iter()
+        .filter(|event| {
+            event
+                .timestamp
+                .map(|timestamp| timestamp.to_offset(local_offset).date())
+                .is_some_and(|date| date >= period_start && date <= period_end)
+        })
+        .count()
 }
 
 fn percentile_ms(sorted_values: &[u64], percentile: usize) -> u64 {

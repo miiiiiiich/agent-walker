@@ -23,7 +23,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
     lines.push("providers:".to_owned());
     for provider in &report.providers {
         lines.push(format!(
-            "- {} volume:{} sessions:{} tools:{} durations:{} files:{} lines:{} parse_errors:{}",
+            "- {} volume:{} sessions:{} tools:{} durations:{} interrupted:{} files:{} lines:{} parse_errors:{}",
             provider.provider.label(),
             format_tokens(provider.total_usage.token_volume()),
             provider.sessions,
@@ -32,6 +32,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
                 .completion_duration
                 .as_ref()
                 .map_or(0, |duration| duration.count),
+            provider.interrupted,
             provider.scan_stats.files_seen,
             provider.scan_stats.lines_seen,
             provider.scan_stats.parse_errors,
@@ -114,16 +115,7 @@ pub fn snapshot(summary: &Summary) -> String {
             format_tokens(usage)
         ));
     }
-    if let Some(duration) = &summary.completion_duration {
-        lines.push(format!(
-            "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
-            duration.count,
-            format_duration_ms(duration.p50_ms),
-            format_duration_ms(duration.p90_ms),
-            format_duration_ms(duration.p95_ms),
-            format_duration_ms(duration.max_ms)
-        ));
-    }
+    lines.extend(completion_lines(summary));
 
     lines.push("models:".to_owned());
     for model in summary.models.iter().take(5) {
@@ -153,6 +145,29 @@ pub fn snapshot(summary: &Summary) -> String {
     }
 
     lines.join("\n")
+}
+
+/// The completion records: duration stats when a turn completed, and the
+/// interruption count on its own line (independent metrics — a window can
+/// hold one without the other). A summary with neither emits nothing, so
+/// the stable snapshot shape for silent windows is unchanged.
+fn completion_lines(summary: &Summary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if summary.completion_duration.is_none() && summary.interrupted == 0 {
+        return lines;
+    }
+    if let Some(duration) = &summary.completion_duration {
+        lines.push(format!(
+            "completion_duration: count:{} p50:{} p90:{} p95:{} max:{}",
+            duration.count,
+            format_duration_ms(duration.p50_ms),
+            format_duration_ms(duration.p90_ms),
+            format_duration_ms(duration.p95_ms),
+            format_duration_ms(duration.max_ms)
+        ));
+    }
+    lines.push(format!("completion_interrupted: {}", summary.interrupted));
+    lines
 }
 
 fn indent_lines(value: &str, indent: &str) -> Vec<String> {

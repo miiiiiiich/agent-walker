@@ -94,6 +94,7 @@ pub(crate) fn sample_summary() -> Summary {
                 },
             ],
         }),
+        interrupted: 0,
         orchestration: Orchestration {
             avg_concurrency: 2.5,
             peak_concurrency: 4,

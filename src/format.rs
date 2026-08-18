@@ -126,6 +126,24 @@ mod tests {
         assert!(snapshot(&crate::share::fixtures::sample_summary()).contains("rank: unranked"));
     }
 
+    /// Duration stats and the interruption count are independent records:
+    /// an interrupt-only window emits the count and no duration record.
+    #[test]
+    fn snapshot_reports_interruptions_independently() {
+        let mut summary = crate::share::fixtures::sample_summary();
+        let text = snapshot(&summary);
+        assert!(text.contains("completion_duration:"));
+        assert!(text.contains("completion_interrupted: 0"));
+        summary.completion_duration = None;
+        summary.interrupted = 3;
+        let text = snapshot(&summary);
+        assert!(!text.contains("completion_duration:"));
+        assert!(text.contains("completion_interrupted: 3"));
+        // Neither → neither record (the silent-window shape is unchanged).
+        summary.interrupted = 0;
+        assert!(!snapshot(&summary).contains("completion_"));
+    }
+
     #[test]
     fn formats_tokens_with_compact_units() {
         assert_eq!(format_tokens(900), "900");
