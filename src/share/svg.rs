@@ -132,15 +132,17 @@ fn draw_header(s: &mut String, card: &ShareCard) {
         card.active_days, card.period_days, card.sessions
     );
     // Cursor's reported cost is an actual charge, not an API-equivalent estimate.
+    // An unknown cost renders as "—" — never "$0", which would misread as free.
     let cost_label = if card.has_reported_cost {
         "cost"
     } else {
         "api-equiv"
     };
+    let cost = card.cost.as_deref().unwrap_or("—");
     let _ = write!(
         s,
-        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{} tokens   ·   {} {}</text>"#,
-        card.tokens, card.cost, cost_label
+        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{} tokens   ·   {cost} {cost_label}</text>"#,
+        card.tokens
     );
 
     let _ = write!(

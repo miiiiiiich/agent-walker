@@ -176,6 +176,53 @@ pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
     )
 }
 
+/// A cost sum that keeps "no price known" distinct from "$0". Token volume
+/// whose model has no pricing (the LiteLLM table unreachable and uncached,
+/// or an id the table lacks) is tallied as `unpriced_volume` — never folded
+/// into `priced_usd` as zero, which is what made an offline run render
+/// "$0.00 API-equivalent" on the share card.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostTally {
+    /// USD over the entries that could be priced (provider-reported cost is
+    /// always priced — it is an actual charge).
+    pub priced_usd: f64,
+    /// Token volume that had no price and is therefore missing from
+    /// `priced_usd`.
+    pub unpriced_volume: u64,
+}
+
+impl CostTally {
+    /// Add one model's block: its provider-reported cost (if any) plus the
+    /// priced or unpriced share of the tokens that had no reported cost.
+    pub fn add(
+        &mut self,
+        model_name: &str,
+        unreported: &TokenUsage,
+        reported_cost_usd: Option<f64>,
+    ) {
+        self.priced_usd += reported_cost_usd.unwrap_or(0.0);
+        let volume = unreported.token_volume();
+        if volume == 0 {
+            return;
+        }
+        match usage_cost_usd(model_name, unreported) {
+            Some(cost) => self.priced_usd += cost,
+            None => self.unpriced_volume = self.unpriced_volume.saturating_add(volume),
+        }
+    }
+
+    /// True when every token that needed a price got one.
+    pub fn is_complete(&self) -> bool {
+        self.unpriced_volume == 0
+    }
+
+    /// The total, only when it is the whole picture — a partial sum is not
+    /// a total.
+    pub fn complete_usd(&self) -> Option<f64> {
+        self.is_complete().then_some(self.priced_usd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -382,5 +429,35 @@ mod tests {
         assert!((cost - 10.5).abs() < 1e-9);
         // Versionless fallback id stays unpriced — too ambiguous to map.
         assert!(usage_cost_usd("gemini-pro-default", &usage).is_none());
+    }
+
+    /// An unpriced model's volume never lands in the sum as $0: the tally
+    /// records the gap and refuses to call the partial sum a total.
+    #[test]
+    fn tally_keeps_unpriced_volume_out_of_the_sum() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+
+        let mut priced = CostTally::default();
+        priced.add("claude-opus-4-8", &usage, None);
+        assert!(priced.is_complete());
+        assert!((priced.complete_usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
+
+        let mut mixed = CostTally::default();
+        mixed.add("claude-opus-4-8", &usage, None);
+        mixed.add("model-nobody-priced", &usage, Some(0.25));
+        // The reported charge is real and counts; the unpriced tokens do not
+        // become $0 — they make the total unknowable.
+        assert!((mixed.priced_usd - 5.25).abs() < 1e-9);
+        assert_eq!(mixed.unpriced_volume, 1_000_000);
+        assert_eq!(mixed.complete_usd(), None);
+
+        // Zero tokens need no price and leave the tally complete.
+        let mut empty = CostTally::default();
+        empty.add("model-nobody-priced", &TokenUsage::default(), None);
+        assert!(empty.is_complete());
     }
 }
