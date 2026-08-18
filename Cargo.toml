@@ -37,7 +37,7 @@ ureq = "2.12.1"
 time = { version = "0.3.44", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-resvg = "0.47"
+resvg = "0.48"
 arboard = "3.6.1"
 
 [dev-dependencies]
