@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 
 use time::{Date, Duration};
 
-use crate::cost::usage_cost_usd;
+use crate::cost::CostTally;
 use crate::format::{
     format_duration_ms, format_percent, format_tokens, format_usd, short_model_name,
 };
@@ -25,10 +25,15 @@ pub struct ShareCard {
     pub(crate) period_days: u16,
     pub(crate) active_days: usize,
     pub(crate) tokens: String,
-    pub(crate) cost: String,
-    /// True when `cost` includes a provider-reported figure (Cursor), which is an
-    /// actual charge fetched over the network — not an API-equivalent estimate
-    /// from local logs. Softens the caption's "API-equivalent / 100% local" copy.
+    /// Formatted API-equivalent cost, or `None` when some of the window's
+    /// tokens had no known price (LiteLLM table unreachable / model id
+    /// missing) — the card then shows "—" rather than an undercounted figure.
+    pub(crate) cost: Option<String>,
+    /// True when the window contains a provider-reported cost (Cursor) — an
+    /// actual charge fetched over the network, not an API-equivalent estimate
+    /// from local logs. Independent of whether `cost` could be shown (other
+    /// usage may be unpriced); softens the caption's "API-equivalent / 100%
+    /// local" copy either way.
     pub(crate) has_reported_cost: bool,
     pub(crate) sessions: usize,
     /// Top models: (short name, share%, ratio-to-largest, `formatted_tokens`).
@@ -63,14 +68,14 @@ impl ShareCard {
     )]
     pub fn from_summary(summary: &Summary) -> Self {
         let total = summary.total_usage.token_volume();
-        let cost: f64 = summary
-            .model_daily
-            .iter()
-            .map(|entry| {
-                entry.reported_cost_usd.unwrap_or(0.0)
-                    + usage_cost_usd(&entry.model, &entry.unreported_usage).unwrap_or(0.0)
-            })
-            .sum();
+        let mut tally = CostTally::default();
+        for entry in &summary.model_daily {
+            tally.add(
+                &entry.model,
+                &entry.unreported_usage,
+                entry.reported_cost_usd,
+            );
+        }
         let has_reported_cost = summary
             .model_daily
             .iter()
@@ -154,7 +159,7 @@ impl ShareCard {
             period_days: summary.period_days,
             active_days: summary.active_days,
             tokens: format_tokens(total),
-            cost: format_usd(cost),
+            cost: tally.complete_usd().map(format_usd),
             has_reported_cost,
             sessions: summary.sessions,
             models,
@@ -168,14 +173,17 @@ impl ShareCard {
 
     /// A ready-to-post caption (X body / clipboard text).
     pub fn caption(&self) -> String {
+        let mut stats = vec![format!("{} tokens", self.tokens)];
         // Cursor's reported cost is an actual charge, not an API-equivalent
-        // estimate, so don't label it as one.
-        let cost_label = if self.has_reported_cost {
-            format!("{} cost", self.cost)
-        } else {
-            format!("{} API-equivalent", self.cost)
-        };
-        let mut stats = vec![format!("{} tokens", self.tokens), cost_label];
+        // estimate, so don't label it as one. An unknown cost is simply
+        // absent — a "$0" would misread as free.
+        if let Some(cost) = &self.cost {
+            stats.push(if self.has_reported_cost {
+                format!("{cost} cost")
+            } else {
+                format!("{cost} API-equivalent")
+            });
+        }
         if let Some((four_plus_pct, peak)) = &self.parallel
             && *four_plus_pct > 0
         {

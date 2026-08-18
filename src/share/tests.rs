@@ -75,6 +75,32 @@ fn every_badge_rasterizes() {
     }
 }
 
+/// A card whose window holds tokens with no known price shows "—" instead of
+/// an undercounted "$0" — and its caption drops the cost stat entirely.
+#[test]
+fn unpriced_cost_renders_as_dash_not_zero() {
+    let mut summary = sample_summary();
+    let usage = crate::model::TokenUsage {
+        input_tokens: 1_000_000,
+        ..crate::model::TokenUsage::default()
+    };
+    summary.model_daily.push(crate::model::ModelDailyStat {
+        date: summary.period_end,
+        model: "model-nobody-priced".to_owned(),
+        usage: usage.clone(),
+        unreported_usage: usage,
+        reported_cost_usd: None,
+    });
+    let card = ShareCard::from_summary(&summary);
+    assert_eq!(card.cost, None);
+    let rendered = svg(&card);
+    assert!(rendered.contains("—"), "{rendered}");
+    assert!(!rendered.contains("$0"), "{rendered}");
+    let caption = card.caption();
+    assert!(!caption.contains("API-equivalent"), "{caption}");
+    assert!(!caption.contains("$0"), "{caption}");
+}
+
 #[test]
 fn caption_includes_headline_and_repo() {
     let card = ShareCard::from_summary(&sample_summary());
