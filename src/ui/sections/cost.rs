@@ -93,16 +93,26 @@ fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
         .any(|model| model.reported_cost_usd.is_some());
     if !total.is_complete() {
         // Width-fitted like the COMPLETION title: longest form that fits the
-        // rail after "▍ COST  ", falling back to the bare gap.
+        // rail after "▍ COST  ", falling back to the bare gap. The reported-
+        // cost provenance survives alongside the gap — the per-model rows
+        // still show those actual charges.
         let budget = usize::from(width).saturating_sub("▍ COST  ".chars().count());
         let unpriced = format_tokens(total.unpriced_volume);
-        return [
-            format!("{unpriced} tokens unpriced · rates unavailable"),
-            format!("{unpriced} tokens unpriced"),
-        ]
-        .into_iter()
-        .find(|text| text.chars().count() <= budget)
-        .unwrap_or_else(|| format!("{unpriced} unpriced"));
+        let candidates = if has_reported {
+            [
+                format!("{unpriced} tokens unpriced · incl. provider-reported"),
+                format!("{unpriced} unpriced · incl. reported"),
+            ]
+        } else {
+            [
+                format!("{unpriced} tokens unpriced · rates unavailable"),
+                format!("{unpriced} tokens unpriced"),
+            ]
+        };
+        return candidates
+            .into_iter()
+            .find(|text| text.chars().count() <= budget)
+            .unwrap_or_else(|| format!("{unpriced} unpriced"));
     }
     if width < 44 {
         if has_reported {
@@ -208,6 +218,28 @@ mod tests {
                 "width {width}: {title:?}"
             );
             assert!(title.contains("unpriced"), "{title:?}");
+        }
+    }
+
+    /// Provider-reported charges keep their provenance in the title even when
+    /// other usage is unpriced — the per-model rows still show real dollars.
+    #[test]
+    fn unpriced_annotation_keeps_reported_provenance() {
+        let mut summary = crate::share::fixtures::sample_summary();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        summary.models[0].name = "model-nobody-priced".to_owned();
+        summary.models[0].unreported_usage = usage.clone();
+        summary.models[0].reported_cost_usd = Some(3.5);
+
+        for width in [44_u16, 100] {
+            let lines = cost_lines(&summary, width);
+            let title = rendered(&lines[0]);
+            assert!(title.chars().count() <= usize::from(width), "{title:?}");
+            assert!(title.contains("unpriced"), "{title:?}");
+            assert!(title.contains("reported"), "{title:?}");
         }
     }
 }
