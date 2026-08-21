@@ -9,30 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **MODES**: the autonomy mix — how much of the month ran under each
-  permission mode. Claude's `permissionMode` (default / acceptEdits / plan /
-  bypass / auto) and Codex's `approval_policy` (never / on-request …), read
-  alongside the effort mix: how much rope you actually give the agent.
-- **COMPLETION**: interruption count in the title — turns you cut short.
-  Claude esc markers and Codex `turn_aborted`, deduped across resume / fork
-  copies. Interrupted turns no longer leak into the completion percentiles,
-  so p50 / p90 describe turns that actually finished. Also in `--snapshot`
-  as `completion_interrupted`.
+- MODES: how much rope you give the agent — an autonomy mix by permission
+  mode. Claude `permissionMode` and Codex `approval_policy`, next to the
+  effort mix.
+- COMPLETION: how many turns you cut short. Esc on Claude, `turn_aborted`
+  on Codex; interrupted turns no longer skew the completion percentiles.
 
 ### Fixed
 
-- Cost no longer reads `$0` when pricing is unknown. If the LiteLLM pricing
-  table can't be fetched (it lives on raw.githubusercontent.com) or a model
-  id is missing from it, the share card shows `—` and drops the cost line
-  from its caption, and the COST section shows `—` rows and names the
-  unpriced volume — instead of silently summing those tokens as free.
-- Release tweets no longer cut a sentence mid-word. Bullets that don't fit
-  are dropped whole.
+- Cost shows `—` instead of `$0` when pricing is unknown. Applies to a
+  missing model id or an unreachable LiteLLM table, on the share card and
+  in COST.
+- Release tweets no longer cut sentences mid-word.
 
 ### Changed
 
-- `resvg` 0.48: text rendering now on the fontations / harfrust stack.
-  Share-card text may differ by a sub-pixel or two.
+- resvg 0.48 moves text rendering to the fontations / harfrust stack.
+  Share-card text may shift by a sub-pixel.
 
 ## [0.13.2] - 2026-08-14
 
