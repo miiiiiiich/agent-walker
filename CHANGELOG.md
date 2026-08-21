@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-19
+
+### Added
+
+- MODES: how much rope you give the agent — an autonomy mix by permission
+  mode. Claude `permissionMode` and Codex `approval_policy`, next to the
+  effort mix.
+- COMPLETION: how many turns you cut short. Esc on Claude, `turn_aborted`
+  on Codex; interrupted turns no longer skew the completion percentiles.
+
+### Fixed
+
+- Cost shows `—` instead of `$0` when pricing is unknown. Applies to a
+  missing model id or an unreachable LiteLLM table, on the share card and
+  in COST.
+- Release tweets no longer cut sentences mid-word.
+
+### Changed
+
+- resvg 0.48 moves text rendering to the fontations / harfrust stack.
+  Share-card text may shift by a sub-pixel.
+
 ## [0.13.2] - 2026-08-14
 
 ### Added
@@ -363,6 +385,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.14.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.12.0...v0.13.0
