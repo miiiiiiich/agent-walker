@@ -137,24 +137,12 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.extend(skills);
             lines.push(Line::default());
         }
-        // CONTEXT leads the cost story when it has data; COST then follows
-        // the usage sections. Without context data COST keeps its old slot.
-        let cost = sections::cost_lines(summary, width);
-        let context_leads = !context.is_empty();
-        if context_leads {
-            lines.extend(context);
-        } else {
-            lines.extend(cost.clone());
+        // Same rule as the two-column layout: present drive panels first,
+        // then the bookkeeping pair in fixed order (below the usage sections).
+        for block in [context, modes].into_iter().filter(|b| !b.is_empty()) {
+            lines.extend(block);
+            lines.push(Line::default());
         }
-        lines.push(Line::default());
-        let signal = sections::signal_lines(summary, width);
-        let modes_lead = !modes.is_empty();
-        if modes_lead {
-            lines.extend(modes.clone());
-        } else {
-            lines.extend(signal.clone());
-        }
-        lines.push(Line::default());
         lines.extend(sections::project_lines(summary, width));
         lines.push(Line::default());
         lines.extend(sections::tool_lines(summary, width, 6));
@@ -162,14 +150,10 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.extend(sections::agent_lines(summary, width, 4));
         }
-        if context_leads {
-            lines.push(Line::default());
-            lines.extend(cost);
-        }
-        if modes_lead {
-            lines.push(Line::default());
-            lines.extend(signal);
-        }
+        lines.push(Line::default());
+        lines.extend(sections::cost_lines(summary, width));
+        lines.push(Line::default());
+        lines.extend(sections::signal_lines(summary, width));
         return lines;
     }
 
@@ -201,23 +185,18 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     }
     left_blocks.push(sections::project_lines(summary, left_u16));
     left_blocks.push(sections::tool_lines(summary, left_u16, 10));
-    let cost = sections::cost_lines(summary, right_u16);
-    let signal = sections::signal_lines(summary, right_u16);
-    let context_leads = !context.is_empty();
-    let modes_lead = !modes.is_empty();
-    let mut right_blocks = vec![
-        if context_leads { context } else { cost.clone() },
-        if modes_lead { modes } else { signal.clone() },
-    ];
+    // Whichever "drive" panels exist lead in order, then SUBAGENTS, then the
+    // bookkeeping pair in its own fixed order — so a tab without MODES still
+    // reads CONTEXT, COST, SIGNAL, and one without either keeps COST first.
+    let mut right_blocks: Vec<Vec<Line<'static>>> = [context, modes]
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .collect();
     if !summary.agents.is_empty() {
         right_blocks.push(sections::agent_lines(summary, right_u16, 5));
     }
-    if context_leads {
-        right_blocks.push(cost);
-    }
-    if modes_lead {
-        right_blocks.push(signal);
-    }
+    right_blocks.push(sections::cost_lines(summary, right_u16));
+    right_blocks.push(sections::signal_lines(summary, right_u16));
 
     lines.extend(join_section_columns(
         &left_blocks,
@@ -511,6 +490,15 @@ mod tests {
         let at = |title: &str| text.find(title).expect(title);
         assert!(at("▍ CONTEXT") < at("▍ MODES"));
         assert!(at("▍ MODES") < at("▍ COST"));
+        assert!(at("▍ COST") < at("▍ SIGNAL"));
+
+        // Without MODES (Total / other providers) COST still precedes SIGNAL.
+        let mut total = v09_summary(Provider::Combined);
+        total.modes = ModesSummary::default();
+        let text = rendered(&total, 120);
+        let at = |title: &str| text.find(title).expect(title);
+        assert!(!text.contains("▍ MODES"));
+        assert!(at("▍ CONTEXT") < at("▍ COST"));
         assert!(at("▍ COST") < at("▍ SIGNAL"));
     }
 }

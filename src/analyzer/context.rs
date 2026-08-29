@@ -45,6 +45,10 @@ struct Multipliers {
 }
 
 fn multipliers(model: Option<&str>) -> Multipliers {
+    // The fallback covers an unresolved model or a table without an input
+    // price. A resolved model keeps its table ratios as they are — a zero
+    // cache-write rate (OpenAI) is a real price, and overriding it would put
+    // this panel at odds with COST.
     let fallback = Multipliers {
         read: DEFAULT_READ_MULTIPLIER,
         write_5m: DEFAULT_WRITE_5M_MULTIPLIER,
@@ -56,17 +60,10 @@ fn multipliers(model: Option<&str>) -> Multipliers {
     if pricing.input <= 0.0 {
         return fallback;
     }
-    let ratio = |price: f64, default: f64| {
-        if price > 0.0 {
-            price / pricing.input
-        } else {
-            default
-        }
-    };
     Multipliers {
-        read: ratio(pricing.cache_read, DEFAULT_READ_MULTIPLIER),
-        write_5m: ratio(pricing.cache_write_5m, DEFAULT_WRITE_5M_MULTIPLIER),
-        write_1h: ratio(pricing.cache_write_1h, DEFAULT_WRITE_1H_MULTIPLIER),
+        read: pricing.cache_read / pricing.input,
+        write_5m: pricing.cache_write_5m / pricing.input,
+        write_1h: pricing.cache_write_1h / pricing.input,
     }
 }
 
@@ -132,7 +129,11 @@ pub(super) fn context_summary(
     period_end: Date,
     local_offset: UtcOffset,
 ) -> Option<ContextSummary> {
-    if collection.provider == Provider::Combined {
+    // Combined is summed from the providers by the caller. Copilot's usage
+    // events are per-shutdown deltas of cumulative counters, not calls —
+    // one event can cover a whole session — so call-level analysis would
+    // file a session as a single huge cold start.
+    if matches!(collection.provider, Provider::Combined | Provider::Copilot) {
         return None;
     }
     let retention = retention(collection.provider);
@@ -374,6 +375,15 @@ mod tests {
 
         assert!(
             context_summary(
+                &collection(Provider::Copilot, events.clone()),
+                date!(2026 - 06 - 01),
+                date!(2026 - 06 - 30),
+                UtcOffset::UTC,
+            )
+            .is_none()
+        );
+        assert!(
+            context_summary(
                 &collection(Provider::Combined, events),
                 date!(2026 - 06 - 01),
                 date!(2026 - 06 - 30),
@@ -428,8 +438,9 @@ mod tests {
             UtcOffset::UTC,
         )
         .expect("summary");
-        // cache_read $0.5 / $5 = 0.1× → 10,000; writes have no price → fallback 1.25× → 12,500
-        assert_eq!(summary.effective_tokens, 10_000 + 12_500);
+        // cache_read $0.5 / $5 = 0.1× → 10,000; the table prices writes at
+        // $0 for this model, so they weigh nothing — the same call COST makes.
+        assert_eq!(summary.effective_tokens, 10_000);
     }
 
     /// A poisoned row with saturated counters neither panics nor wraps.
