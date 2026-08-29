@@ -25,16 +25,33 @@ const DEFAULT_READ_MULTIPLIER: f64 = 0.1;
 const DEFAULT_WRITE_5M_MULTIPLIER: f64 = 1.25;
 const DEFAULT_WRITE_1H_MULTIPLIER: f64 = 2.0;
 
-/// How long a provider keeps a cached prefix alive after its last use. A
-/// low-reuse call after a longer silence paid for the whole prefix again.
-fn retention(provider: Provider) -> Duration {
+/// How long the serving model keeps a cached prefix alive after its last
+/// use. A low-reuse call after a longer silence paid for the whole prefix
+/// again. Providers that route arbitrary models (OpenCode, Cursor, …) infer
+/// it from the model family; an unknown family gets `None`, and no call is
+/// then labelled expired — better a missing row than a fabricated one.
+fn retention(provider: Provider, model: Option<&str>) -> Option<Duration> {
+    // Claude Code uses the 1h ttl (the 5m default would misfile calls
+    // resumed within the hour as expired); GPT-5.6+ keeps a prefix for 30
+    // minutes after the last write or reuse.
+    const CLAUDE: Duration = Duration::hours(1);
+    const OPENAI: Duration = Duration::minutes(30);
     match provider {
-        // GPT-5.6+: eligible for 30 minutes after the last write or reuse.
-        Provider::Codex => Duration::minutes(30),
-        // Claude Code uses the 1h ttl (the 5m default would misfile calls
-        // resumed within the hour as expired); other providers get the same
-        // conservative hour.
-        _ => Duration::hours(1),
+        Provider::Claude => Some(CLAUDE),
+        Provider::Codex => Some(OPENAI),
+        _ => {
+            let family = model.unwrap_or_default().to_ascii_lowercase();
+            if family.contains("claude") {
+                Some(CLAUDE)
+            } else if ["gpt", "codex", "o1", "o3", "o4"]
+                .iter()
+                .any(|prefix| family.starts_with(prefix))
+            {
+                Some(OPENAI)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -48,7 +65,10 @@ fn multipliers(model: Option<&str>) -> Multipliers {
     // The fallback covers an unresolved model or a table without an input
     // price. A resolved model keeps its table ratios as they are — a zero
     // cache-write rate (OpenAI) is a real price, and overriding it would put
-    // this panel at odds with COST.
+    // this panel at odds with COST. The ratios are in units of that model's
+    // own input tokens; summing across models with different input prices
+    // mixes units — accepted, since the panel reports volume-shaped cost,
+    // not dollars, and each provider tab is dominated by one price tier.
     let fallback = Multipliers {
         read: DEFAULT_READ_MULTIPLIER,
         write_5m: DEFAULT_WRITE_5M_MULTIPLIER,
@@ -97,10 +117,20 @@ struct CallAccount {
 fn account_call(event: &UsageEvent) -> CallAccount {
     let usage = &event.usage;
     let m = multipliers(event.model.as_deref());
-    let long_writes = usage
-        .cache_creation_ephemeral_1h_input_tokens
-        .min(usage.cache_creation_input_tokens);
-    let short_writes = usage.cache_creation_input_tokens - long_writes;
+    // The 5m/1h split comes from untrusted logs; the same validation as
+    // `usage_cost_usd`: a missing, broken, or overflowing split prices every
+    // write at the 5m rate, so this panel and COST agree on the same row.
+    let split = usage
+        .cache_creation_ephemeral_5m_input_tokens
+        .checked_add(usage.cache_creation_ephemeral_1h_input_tokens);
+    let (short_writes, long_writes) = match split {
+        Some(split) if split > 0 && split <= usage.cache_creation_input_tokens => (
+            usage.cache_creation_ephemeral_5m_input_tokens
+                + (usage.cache_creation_input_tokens - split),
+            usage.cache_creation_ephemeral_1h_input_tokens,
+        ),
+        _ => (usage.cache_creation_input_tokens, 0),
+    };
     // Counters come from untrusted logs: a poisoned row saturates instead
     // of wrapping (release) or panicking (debug).
     let uncached = usage
@@ -118,45 +148,8 @@ fn account_call(event: &UsageEvent) -> CallAccount {
     }
 }
 
-/// Summarize cache reuse over the fixed window. Only main-chain calls take
-/// part: sidechain rows share the parent's session id and would interleave
-/// parallel call chains. Predecessors are found before the window filter so
-/// the first in-window call of a running session is not a false cold start.
-/// The combined collection gets `None` — the Total tab sums the providers.
-pub(super) fn context_summary(
-    collection: &Collection,
-    window_start: Date,
-    period_end: Date,
-    local_offset: UtcOffset,
-) -> Option<ContextSummary> {
-    // Combined is summed from the providers by the caller. Copilot's usage
-    // events are per-shutdown deltas of cumulative counters, not calls —
-    // one event can cover a whole session — so call-level analysis would
-    // file a session as a single huge cold start.
-    if matches!(collection.provider, Provider::Combined | Provider::Copilot) {
-        return None;
-    }
-    let retention = retention(collection.provider);
-    let in_window = |timestamp: OffsetDateTime| {
-        let date = timestamp.to_offset(local_offset).date();
-        date >= window_start && date <= period_end
-    };
-
-    let mut by_session: HashMap<Option<&str>, Vec<&UsageEvent>> = HashMap::new();
-    for event in &collection.usage_events {
-        if event.source_kind != SourceKind::Main || event.timestamp.is_none() {
-            continue;
-        }
-        if account_call(event).context == 0 {
-            continue;
-        }
-        by_session
-            .entry(event.session_id.as_deref())
-            .or_default()
-            .push(event);
-    }
-
-    let mut summary = ContextSummary {
+fn empty_summary() -> ContextSummary {
+    ContextSummary {
         bands: BANDS
             .iter()
             .map(|(label, _)| ContextBand {
@@ -165,7 +158,76 @@ pub(super) fn context_summary(
             })
             .collect(),
         ..ContextSummary::default()
+    }
+}
+
+fn add_totals(summary: &mut ContextSummary, call: &CallAccount) {
+    summary.context_tokens = summary.context_tokens.saturating_add(call.context);
+    summary.cached_tokens = summary.cached_tokens.saturating_add(call.cached);
+    summary.effective_tokens = summary
+        .effective_tokens
+        .saturating_add(call.uncached_effective)
+        .saturating_add(call.cached_effective);
+}
+
+fn add_reason(reason: &mut ContextReason, call: &CallAccount) {
+    reason.calls += 1;
+    reason.effective = reason.effective.saturating_add(call.uncached_effective);
+}
+
+/// Summarize cache reuse over the fixed window.
+///
+/// Every dated event feeds the token totals (so the cached share matches
+/// the tab's all-token volume). Call-level rows — bands, cold starts,
+/// expiries, ordinary uncached input — use main-chain calls only: sidechain
+/// rows share the parent's session id and would interleave parallel call
+/// chains, and Copilot's events are per-shutdown deltas rather than calls.
+/// One usage event is treated as one call; the one known exception is a
+/// Claude advisor turn, whose top-level event sums its main-model
+/// iterations (a handful per corpus) — accepted rather than threaded
+/// through the collector, since splitting it would need a cache layout
+/// change for a rounding-level effect. Predecessors are found before the
+/// window filter so the first in-window call of a running session is not
+/// a false cold start. The combined collection gets `None` — the Total tab
+/// sums the providers.
+pub(super) fn context_summary(
+    collection: &Collection,
+    window_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> Option<ContextSummary> {
+    if collection.provider == Provider::Combined {
+        return None;
+    }
+    let call_level = collection.provider != Provider::Copilot;
+    let in_window = |timestamp: OffsetDateTime| {
+        let date = timestamp.to_offset(local_offset).date();
+        date >= window_start && date <= period_end
     };
+
+    let mut summary = empty_summary();
+    let mut by_session: HashMap<Option<&str>, Vec<&UsageEvent>> = HashMap::new();
+    for event in &collection.usage_events {
+        let Some(timestamp) = event.timestamp else {
+            continue;
+        };
+        let call = account_call(event);
+        if call.context == 0 {
+            continue;
+        }
+        if call_level && event.source_kind == SourceKind::Main {
+            by_session
+                .entry(event.session_id.as_deref())
+                .or_default()
+                .push(event);
+        } else if in_window(timestamp) {
+            // Totals only: the volume counts toward the cached share, but
+            // without a call chain there is nothing to classify.
+            add_totals(&mut summary, &call);
+            add_reason(&mut summary.uncached, &call);
+        }
+    }
+
     let mut expired = ContextReason::default();
     let mut cold_start = ContextReason::default();
     let mut has_sessions = false;
@@ -185,40 +247,33 @@ pub(super) fn context_summary(
             }
             let call = account_call(event);
             summary.calls += 1;
-            summary.context_tokens = summary.context_tokens.saturating_add(call.context);
-            summary.cached_tokens = summary.cached_tokens.saturating_add(call.cached);
-            summary.effective_tokens = summary
-                .effective_tokens
-                .saturating_add(call.uncached_effective)
-                .saturating_add(call.cached_effective);
+            add_totals(&mut summary, &call);
             let band = &mut summary.bands[band_index(call.context)];
             band.calls += 1;
             band.cached_effective = band.cached_effective.saturating_add(call.cached_effective);
 
-            if !sessionful {
-                continue;
-            }
             // Cold start = every session's first call, whatever the cache
             // did (a sibling session may have warmed the prefix; the
             // uncached part is still the price of starting). Expired =
             // low reuse (uncached ≥ half the context) after a silence
-            // longer than the provider keeps a prefix.
+            // longer than the serving model keeps a prefix. Everything else
+            // uncached is ordinary new input — the suffix a running session
+            // appends each call.
             let low_reuse = call.uncached.saturating_mul(2) >= call.context;
-            let reason = if first {
-                Some(&mut cold_start)
-            } else if low_reuse && gap.is_some_and(|gap| gap >= retention) {
-                Some(&mut expired)
+            let retention = retention(collection.provider, event.model.as_deref());
+            let expired_gap = retention.is_some_and(|keep| gap.is_some_and(|gap| gap >= keep));
+            let reason = if sessionful && first {
+                &mut cold_start
+            } else if sessionful && low_reuse && expired_gap {
+                &mut expired
             } else {
-                None
+                &mut summary.uncached
             };
-            if let Some(reason) = reason {
-                reason.calls += 1;
-                reason.effective = reason.effective.saturating_add(call.uncached_effective);
-            }
+            add_reason(reason, &call);
         }
     }
 
-    if summary.calls == 0 {
+    if summary.context_tokens == 0 {
         return None;
     }
     if has_sessions {
@@ -295,6 +350,11 @@ mod tests {
         assert_eq!((cold.calls, cold.effective), (1, 1_000 + 73_750));
         let expired = summary.expired.expect("expired");
         assert_eq!((expired.calls, expired.effective), (1, 87_500));
+        // The remaining uncached input — the high-reuse suffix (500 + 2,000
+        // × 1.25) and the in-window low-reuse call (65,000 × 1.25) — lands in
+        // the ordinary row, completing the partition.
+        assert_eq!(summary.uncached.calls, 2);
+        assert_eq!(summary.uncached.effective, 3_000 + 81_250);
         // Every call sits below 100K context → one band populated.
         assert_eq!(summary.bands[0].calls, 4);
         assert!(summary.bands[1..].iter().all(|band| band.calls == 0));
@@ -370,18 +430,23 @@ mod tests {
         )
         .expect("summary");
         assert_eq!(summary.calls, 1);
+        // The sidechain row feeds the totals (so the share matches the tab's
+        // volume) but not the call rows.
+        assert_eq!(summary.context_tokens, 100_000);
         assert_eq!(summary.cold_start.expect("cold start").calls, 0);
         assert_eq!(summary.expired.expect("expired").calls, 1);
 
-        assert!(
-            context_summary(
-                &collection(Provider::Copilot, events.clone()),
-                date!(2026 - 06 - 01),
-                date!(2026 - 06 - 30),
-                UtcOffset::UTC,
-            )
-            .is_none()
-        );
+        // Copilot keeps its in-window token totals for the Total share but no
+        // call-level rows: calls stays 0 so its own tab shows nothing.
+        let copilot = context_summary(
+            &collection(Provider::Copilot, events.clone()),
+            date!(2026 - 06 - 01),
+            date!(2026 - 06 - 30),
+            UtcOffset::UTC,
+        )
+        .expect("copilot totals");
+        assert_eq!((copilot.calls, copilot.context_tokens), (0, 100_000));
+        assert!(copilot.expired.is_none() && copilot.cold_start.is_none());
         assert!(
             context_summary(
                 &collection(Provider::Combined, events),
@@ -394,7 +459,8 @@ mod tests {
     }
 
     /// Cache writes split by ttl: the 1h share is weighted 2×, the rest
-    /// 1.25× (fallback multipliers); an over-reported 1h share is clamped.
+    /// 1.25× (fallback multipliers); a broken split (1h share exceeding the
+    /// total) prices every write at the 5m rate, exactly as COST does.
     #[test]
     fn long_ttl_writes_weigh_more() {
         let mut e = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 10_000, 0);
@@ -418,7 +484,7 @@ mod tests {
             UtcOffset::UTC,
         )
         .expect("summary");
-        assert_eq!(summary.effective_tokens, 20_000);
+        assert_eq!(summary.effective_tokens, 12_500);
     }
 
     /// A priced model takes its multipliers from the pricing table instead
@@ -463,6 +529,33 @@ mod tests {
         assert_eq!(summary.context_tokens, u64::MAX);
         assert_eq!(summary.effective_tokens, u64::MAX);
         assert_eq!(summary.bands[3].calls, 1);
+    }
+
+    /// Providers that route arbitrary models take retention from the model
+    /// family; an unknown family never files a call as expired.
+    #[test]
+    fn retention_follows_the_serving_model_elsewhere() {
+        let t0 = datetime!(2026-06-08 10:00 UTC);
+        let events = |model: &str| {
+            let mut a = event("s1", t0, 50_000, 0, 0);
+            let mut b = event("s1", t0 + Duration::minutes(40), 50_000, 0, 0);
+            a.model = Some(model.to_owned());
+            b.model = Some(model.to_owned());
+            vec![a, b]
+        };
+        let run = |model: &str| {
+            context_summary(
+                &collection(Provider::OpenCode, events(model)),
+                date!(2026 - 06 - 01),
+                date!(2026 - 06 - 30),
+                UtcOffset::UTC,
+            )
+            .expect("summary")
+        };
+        assert_eq!(run("gpt-5.5").expired.expect("expired").calls, 1);
+        assert_eq!(run("claude-opus-4-8").expired.expect("expired").calls, 0);
+        assert_eq!(run("qwen3:8b").expired.expect("expired").calls, 0);
+        assert_eq!(run("qwen3:8b").uncached.calls, 1);
     }
 
     /// Session-less providers (Cursor) get bands but no reason rows.

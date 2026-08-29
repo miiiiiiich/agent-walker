@@ -40,6 +40,7 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
         .map(|band| band.cached_effective)
         .chain(context.expired.iter().map(|r| r.effective))
         .chain(context.cold_start.iter().map(|r| r.effective))
+        .chain(std::iter::once(context.uncached.effective))
         .max()
         .unwrap_or(0);
     for band in context.bands.iter().filter(|band| band.calls > 0) {
@@ -52,9 +53,11 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
             &share_label(band.cached_effective, total),
         ));
     }
+    let uncached = (context.uncached.effective > 0).then_some(context.uncached.clone());
     for (label, reason) in [
         ("expired", &context.expired),
         ("cold start", &context.cold_start),
+        ("uncached", &uncached),
     ] {
         let Some(reason) = reason else { continue };
         lines.push(utils::stat_bar_line(
@@ -140,8 +143,9 @@ mod tests {
         let text: Vec<String> = lines.iter().map(rendered).collect();
         assert!(text[0].contains("95% cached"), "{:?}", text[0]);
         assert!(text[0].contains("effective input"), "{:?}", text[0]);
-        // title + legend + 3 populated bands (500K+ is empty) + expired + cold start.
-        assert_eq!(lines.len(), 2 + 3 + 2);
+        // title + legend + 3 populated bands (500K+ is empty) + expired + cold start + uncached.
+        assert_eq!(lines.len(), 2 + 3 + 3);
+        assert!(text.iter().any(|line| line.starts_with("uncached")));
         assert!(
             text[1].trim_start().starts_with("per call"),
             "{:?}",
@@ -203,6 +207,6 @@ mod tests {
             context.cold_start = None;
         }
         let lines = context_lines(&summary, 100);
-        assert_eq!(lines.len(), 2 + 3);
+        assert_eq!(lines.len(), 2 + 3 + 1);
     }
 }

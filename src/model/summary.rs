@@ -190,6 +190,10 @@ pub struct ContextSummary {
     pub expired: Option<ContextReason>,
     /// The first call of each session — the price of starting fresh.
     pub cold_start: Option<ContextReason>,
+    /// Every other uncached input: the suffix a running session appends
+    /// each call, plus calls with no chain to classify. Completes the
+    /// partition so the rows account for the whole effective volume.
+    pub uncached: ContextReason,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -251,6 +255,11 @@ impl ContextSummary {
                 dst.calls += src.calls;
                 dst.cached_effective = dst.cached_effective.saturating_add(src.cached_effective);
             }
+            acc.uncached.calls += part.uncached.calls;
+            acc.uncached.effective = acc
+                .uncached
+                .effective
+                .saturating_add(part.uncached.effective);
             for (dst, src) in [
                 (&mut acc.expired, &part.expired),
                 (&mut acc.cold_start, &part.cold_start),
@@ -360,6 +369,10 @@ mod tests {
                 effective,
             }),
             cold_start: None,
+            uncached: ContextReason {
+                calls,
+                effective: effective / 4,
+            },
         }
     }
 
@@ -382,6 +395,7 @@ mod tests {
             .expect("expired survives a None part");
         assert_eq!((expired.calls, expired.effective), (1, 300));
         assert!(total.cold_start.is_none());
+        assert_eq!((total.uncached.calls, total.uncached.effective), (15, 375));
         assert!((total.cached_share() - 0.9).abs() < 1e-9);
 
         assert!(ContextSummary::merged([]).is_none());

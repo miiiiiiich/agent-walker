@@ -142,5 +142,9 @@ fn sample_context() -> ContextSummary {
             calls: 60,
             effective: 3_000_000,
         }),
+        uncached: ContextReason {
+            calls: 1_100,
+            effective: 5_000_000,
+        },
     }
 }
