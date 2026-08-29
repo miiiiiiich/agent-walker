@@ -169,6 +169,103 @@ pub struct Orchestration {
     pub time_by_level: [u64; 6],
 }
 
+/// CONTEXT panel data: how much of each call's input the prompt cache served,
+/// where the input-equivalent cost went by context size, and how much of the
+/// uncached volume came from starting sessions or resuming them after the
+/// cache expired. Fixed 30-day window, main-chain calls only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextSummary {
+    pub calls: usize,
+    /// Σ (input + cache writes + cache reads) over the window.
+    pub context_tokens: u64,
+    /// Σ cache reads.
+    pub cached_tokens: u64,
+    /// Σ input-equivalent tokens: input × 1, cache writes × their price
+    /// multiplier, cache reads × theirs — the "what it actually cost" volume.
+    pub effective_tokens: u64,
+    /// Fixed context-size bands; a band with zero calls is not rendered.
+    pub bands: Vec<ContextBand>,
+    /// Low-reuse calls that resumed a session after the cache retention
+    /// window. `None` when the provider has no session notion.
+    pub expired: Option<ContextReason>,
+    /// The first call of each session — the price of starting fresh.
+    pub cold_start: Option<ContextReason>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextBand {
+    pub label: String,
+    pub calls: usize,
+    /// Input-equivalent tokens spent on cache reads by calls in this band.
+    pub cached_effective: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextReason {
+    pub calls: usize,
+    /// Input-equivalent tokens of the uncached part of these calls — the
+    /// same scale as the band rows, so per-call figures compare directly.
+    pub effective: u64,
+}
+
+impl ContextSummary {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "Display-only ratio of u64 token counts."
+    )]
+    pub fn cached_share(&self) -> f64 {
+        if self.context_tokens == 0 {
+            0.0
+        } else {
+            self.cached_tokens as f64 / self.context_tokens as f64
+        }
+    }
+
+    /// Element-wise sum — the Total tab adds provider summaries because the
+    /// expiry threshold is per provider and the bands are shared.
+    pub fn merged<'a>(
+        parts: impl IntoIterator<Item = &'a ContextSummary>,
+    ) -> Option<ContextSummary> {
+        let mut out: Option<ContextSummary> = None;
+        for part in parts {
+            let acc = out.get_or_insert_with(|| ContextSummary {
+                bands: part
+                    .bands
+                    .iter()
+                    .map(|band| ContextBand {
+                        label: band.label.clone(),
+                        ..ContextBand::default()
+                    })
+                    .collect(),
+                ..ContextSummary::default()
+            });
+            acc.calls += part.calls;
+            acc.context_tokens = acc.context_tokens.saturating_add(part.context_tokens);
+            acc.cached_tokens = acc.cached_tokens.saturating_add(part.cached_tokens);
+            acc.effective_tokens = acc.effective_tokens.saturating_add(part.effective_tokens);
+            for (dst, src) in acc.bands.iter_mut().zip(&part.bands) {
+                debug_assert_eq!(
+                    dst.label, src.label,
+                    "context bands are one shared constant"
+                );
+                dst.calls += src.calls;
+                dst.cached_effective = dst.cached_effective.saturating_add(src.cached_effective);
+            }
+            for (dst, src) in [
+                (&mut acc.expired, &part.expired),
+                (&mut acc.cold_start, &part.cold_start),
+            ] {
+                if let Some(src) = src {
+                    let dst = dst.get_or_insert_with(ContextReason::default);
+                    dst.calls += src.calls;
+                    dst.effective = dst.effective.saturating_add(src.effective);
+                }
+            }
+        }
+        out.filter(|summary| summary.calls > 0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub provider: Provider,
@@ -219,6 +316,9 @@ pub struct Summary {
     /// `completion_duration`: a window can hold interruptions and no
     /// completed turn.
     pub interrupted: usize,
+    /// Cache reuse over the fixed 30-day window; `None` when no call carried
+    /// usage. The Total tab holds the sum of the provider summaries.
+    pub context: Option<ContextSummary>,
     pub orchestration: Orchestration,
 }
 
@@ -229,4 +329,60 @@ pub struct AppSummary {
     pub load_duration_ms: u64,
     pub combined: Summary,
     pub providers: Vec<Summary>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context(calls: usize, effective: u64, expired: Option<u64>) -> ContextSummary {
+        ContextSummary {
+            calls,
+            context_tokens: effective * 10,
+            cached_tokens: effective * 9,
+            effective_tokens: effective,
+            bands: vec![
+                ContextBand {
+                    label: "<100K".into(),
+                    calls,
+                    cached_effective: effective / 2,
+                },
+                ContextBand {
+                    label: "100-200K".into(),
+                    calls: 0,
+                    cached_effective: 0,
+                },
+            ],
+            expired: expired.map(|effective| ContextReason {
+                calls: 1,
+                effective,
+            }),
+            cold_start: None,
+        }
+    }
+
+    /// The Total tab's summary is the element-wise sum: bands by position,
+    /// reason rows present if any part has them, empty input → None.
+    #[test]
+    fn merged_context_adds_parts_element_wise() {
+        let a = context(10, 1_000, Some(300));
+        let b = context(5, 500, None);
+        let total = ContextSummary::merged([&a, &b]).expect("merged");
+        assert_eq!(total.calls, 15);
+        assert_eq!(total.effective_tokens, 1_500);
+        assert_eq!(total.cached_tokens, 13_500);
+        assert_eq!(total.bands[0].calls, 15);
+        assert_eq!(total.bands[0].cached_effective, 750);
+        assert_eq!(total.bands[1].calls, 0);
+        let expired = total
+            .expired
+            .as_ref()
+            .expect("expired survives a None part");
+        assert_eq!((expired.calls, expired.effective), (1, 300));
+        assert!(total.cold_start.is_none());
+        assert!((total.cached_share() - 0.9).abs() < 1e-9);
+
+        assert!(ContextSummary::merged([]).is_none());
+        assert!(ContextSummary::merged([&context(0, 0, None)]).is_none());
+    }
 }

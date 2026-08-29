@@ -49,6 +49,9 @@ pub fn snapshot_app(report: &AppSummary) -> String {
                 format_duration_ms(duration.max_ms)
             ));
         }
+        // Per-provider cache reuse: the retention rule differs by provider,
+        // so the combined record alone would hide which side paid.
+        lines.extend(context_line(provider).map(|line| format!("  {line}")));
     }
     lines.join("\n")
 }
@@ -116,6 +119,7 @@ pub fn snapshot(summary: &Summary) -> String {
         ));
     }
     lines.extend(completion_lines(summary));
+    lines.extend(context_line(summary));
 
     lines.push("models:".to_owned());
     for model in summary.models.iter().take(5) {
@@ -168,6 +172,26 @@ fn completion_lines(summary: &Summary) -> Vec<String> {
     }
     lines.push(format!("completion_interrupted: {}", summary.interrupted));
     lines
+}
+
+/// The cache-reuse record: cached share, input-equivalent volume, and the
+/// two behaviours that pay full price for a prefix. `-` when the provider
+/// has no session notion.
+fn context_line(summary: &Summary) -> Option<String> {
+    let context = summary.context.as_ref()?;
+    let reason = |reason: &Option<crate::model::ContextReason>| {
+        reason
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |r| format_tokens(r.effective))
+    };
+    Some(format!(
+        "context: cached:{:.1}% effective:{} calls:{} expired:{} cold_start:{}",
+        context.cached_share() * 100.0,
+        format_tokens(context.effective_tokens),
+        context.calls,
+        reason(&context.expired),
+        reason(&context.cold_start),
+    ))
 }
 
 fn indent_lines(value: &str, indent: &str) -> Vec<String> {

@@ -1,5 +1,6 @@
 mod aggregates;
 mod concurrency;
+mod context;
 mod duration;
 mod projects;
 mod streak;
@@ -211,6 +212,8 @@ pub fn summarize(
         credits::credits_history(collection, codename_window_start, period_end, local_offset);
     let mode_usage =
         modes::modes_summary(collection, codename_window_start, period_end, local_offset);
+    let context =
+        context::context_summary(collection, codename_window_start, period_end, local_offset);
     let recent_window_active_days = recent_active_days.len();
 
     Summary {
@@ -246,6 +249,7 @@ pub fn summarize(
         longest_session,
         completion_duration,
         interrupted,
+        context,
         orchestration,
     }
 }

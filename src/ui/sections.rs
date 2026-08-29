@@ -5,6 +5,7 @@
 //! there is a deliberate cross-panel signal.
 mod agents;
 mod completion;
+mod context;
 mod cost;
 mod models;
 mod modes;
@@ -16,6 +17,7 @@ mod tools;
 
 pub(super) use agents::agent_lines;
 pub(super) use completion::duration_lines;
+pub(super) use context::context_lines;
 pub(super) use cost::cost_lines;
 pub(super) use models::model_lines;
 pub(super) use modes::modes_lines;

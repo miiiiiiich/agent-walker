@@ -224,7 +224,7 @@ impl CostTally {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
@@ -253,7 +253,7 @@ mod tests {
         assert!((real_dot.input - 0.5 / 1e6).abs() < f64::EPSILON);
     }
 
-    fn install_test_pricing() {
+    pub(crate) fn install_test_pricing() {
         let per_mtok =
             |input: f64, output: f64, cache_write_5m: f64, cache_write_1h: f64| Pricing {
                 input: input / 1e6,
