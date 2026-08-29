@@ -148,6 +148,16 @@ fn account_call(event: &UsageEvent) -> CallAccount {
     }
 }
 
+/// Whether a provider's usage events are individual model calls. Where a
+/// collector emits aggregates — Copilot's per-shutdown deltas of cumulative
+/// counters, Grok's per-turn sums over `modelCalls` — the events still feed
+/// the token totals (and so the cached share) but never the call-level
+/// rows, whose per-call figures would otherwise divide a session's volume
+/// by its record count. This is the one place that ruling lives.
+fn call_level(provider: Provider) -> bool {
+    !matches!(provider, Provider::Copilot | Provider::Grok)
+}
+
 fn empty_summary() -> ContextSummary {
     ContextSummary {
         bands: BANDS
@@ -179,9 +189,13 @@ fn add_reason(reason: &mut ContextReason, call: &CallAccount) {
 ///
 /// Every dated event feeds the token totals (so the cached share matches
 /// the tab's all-token volume). Call-level rows — bands, cold starts,
-/// expiries, ordinary uncached input — use main-chain calls only: sidechain
-/// rows share the parent's session id and would interleave parallel call
-/// chains, and Copilot's events are per-shutdown deltas rather than calls.
+/// expiries, ordinary uncached input — use main-chain calls of providers
+/// whose events are calls (`call_level`): sidechain rows share the parent's
+/// session id and would interleave parallel call chains. A session whose
+/// previous call predates the collection history floor (≥ 31 days idle)
+/// files its in-window call as a cold start rather than an expiry — both
+/// are "paid for the whole prefix" rows, and the floor sits a day beyond
+/// the window, so nothing inside the window is misfiled.
 /// One usage event is treated as one call; the one known exception is a
 /// Claude advisor turn, whose top-level event sums its main-model
 /// iterations (a handful per corpus) — accepted rather than threaded
@@ -199,7 +213,7 @@ pub(super) fn context_summary(
     if collection.provider == Provider::Combined {
         return None;
     }
-    let call_level = collection.provider != Provider::Copilot;
+    let call_level = call_level(collection.provider);
     let in_window = |timestamp: OffsetDateTime| {
         let date = timestamp.to_offset(local_offset).date();
         date >= window_start && date <= period_end
@@ -221,10 +235,15 @@ pub(super) fn context_summary(
                 .or_default()
                 .push(event);
         } else if in_window(timestamp) {
-            // Totals only: the volume counts toward the cached share, but
-            // without a call chain there is nothing to classify.
+            // Totals only: the volume counts toward the cached share and the
+            // uncached row's volume, but not toward any call count — an
+            // aggregate record is not a call, so per-call figures must not
+            // divide by it.
             add_totals(&mut summary, &call);
-            add_reason(&mut summary.uncached, &call);
+            summary.uncached.effective = summary
+                .uncached
+                .effective
+                .saturating_add(call.uncached_effective);
         }
     }
 
@@ -447,6 +466,21 @@ mod tests {
         .expect("copilot totals");
         assert_eq!((copilot.calls, copilot.context_tokens), (0, 100_000));
         assert!(copilot.expired.is_none() && copilot.cold_start.is_none());
+        // Volume, not calls: nothing for a per-call figure to divide by.
+        assert_eq!(copilot.uncached.calls, 0);
+        assert_eq!(copilot.uncached.effective, 100_000);
+        // Grok's per-turn sums over several model calls get the same ruling.
+        let grok = context_summary(
+            &collection(Provider::Grok, events.clone()),
+            date!(2026 - 06 - 01),
+            date!(2026 - 06 - 30),
+            UtcOffset::UTC,
+        )
+        .expect("grok totals");
+        assert_eq!(
+            (grok.calls, grok.uncached.calls, grok.context_tokens),
+            (0, 0, 100_000)
+        );
         assert!(
             context_summary(
                 &collection(Provider::Combined, events),
