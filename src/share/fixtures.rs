@@ -146,5 +146,6 @@ fn sample_context() -> ContextSummary {
             calls: 1_100,
             effective: 5_000_000,
         },
+        unclassified_effective: 2_000_000,
     }
 }

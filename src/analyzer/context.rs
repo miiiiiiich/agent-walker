@@ -240,10 +240,10 @@ pub(super) fn context_summary(
             // aggregate record is not a call, so per-call figures must not
             // divide by it.
             add_totals(&mut summary, &call);
-            summary.uncached.effective = summary
-                .uncached
-                .effective
-                .saturating_add(call.uncached_effective);
+            summary.unclassified_effective = summary
+                .unclassified_effective
+                .saturating_add(call.uncached_effective)
+                .saturating_add(call.cached_effective);
         }
     }
 
@@ -255,12 +255,18 @@ pub(super) fn context_summary(
         events.sort_by_key(|event| event.timestamp);
         let sessionful = session.is_some();
         has_sessions |= sessionful;
-        let mut previous: Option<OffsetDateTime> = None;
+        // Cold start is per session; the expiry gap is per serving model —
+        // a session that alternates models keeps one prefix per model, and a
+        // call in between on another model neither refreshes nor expires it.
+        let mut first_seen = false;
+        let mut previous_by_model: HashMap<Option<&str>, OffsetDateTime> = HashMap::new();
         for event in events {
             let timestamp = event.timestamp.expect("filtered to dated events");
-            let first = previous.is_none();
-            let gap = previous.map(|prev| timestamp - prev);
-            previous = Some(timestamp);
+            let first = !first_seen;
+            first_seen = true;
+            let gap = previous_by_model
+                .insert(event.model.as_deref(), timestamp)
+                .map(|prev| timestamp - prev);
             if !in_window(timestamp) {
                 continue;
             }
@@ -467,8 +473,8 @@ mod tests {
         assert_eq!((copilot.calls, copilot.context_tokens), (0, 100_000));
         assert!(copilot.expired.is_none() && copilot.cold_start.is_none());
         // Volume, not calls: nothing for a per-call figure to divide by.
-        assert_eq!(copilot.uncached.calls, 0);
-        assert_eq!(copilot.uncached.effective, 100_000);
+        assert_eq!((copilot.uncached.calls, copilot.uncached.effective), (0, 0));
+        assert_eq!(copilot.unclassified_effective, 100_000);
         // Grok's per-turn sums over several model calls get the same ruling.
         let grok = context_summary(
             &collection(Provider::Grok, events.clone()),
@@ -590,6 +596,30 @@ mod tests {
         assert_eq!(run("claude-opus-4-8").expired.expect("expired").calls, 0);
         assert_eq!(run("qwen3:8b").expired.expect("expired").calls, 0);
         assert_eq!(run("qwen3:8b").uncached.calls, 1);
+    }
+
+    /// The expiry gap is tracked per serving model inside a session: a call
+    /// on another model in between neither refreshes nor expires a prefix.
+    #[test]
+    fn expiry_gap_is_per_serving_model() {
+        let t0 = datetime!(2026-06-08 10:00 UTC);
+        let mut gpt_a = event("s1", t0, 50_000, 0, 0);
+        let mut qwen = event("s1", t0 + Duration::minutes(59), 50_000, 0, 0);
+        let mut gpt_b = event("s1", t0 + Duration::minutes(60), 50_000, 0, 0);
+        gpt_a.model = Some("gpt-5.5".to_owned());
+        qwen.model = Some("qwen3:8b".to_owned());
+        gpt_b.model = Some("gpt-5.5".to_owned());
+        let summary = context_summary(
+            &collection(Provider::OpenCode, vec![gpt_a, qwen, gpt_b]),
+            date!(2026 - 06 - 01),
+            date!(2026 - 06 - 30),
+            UtcOffset::UTC,
+        )
+        .expect("summary");
+        // gpt_b's gap to the previous GPT call is 60m ≥ 30m → expired, even
+        // though a Qwen call happened one minute earlier.
+        assert_eq!(summary.expired.expect("expired").calls, 1);
+        assert_eq!(summary.cold_start.expect("cold start").calls, 1);
     }
 
     /// Session-less providers (Cursor) get bands but no reason rows.

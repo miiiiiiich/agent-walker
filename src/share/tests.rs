@@ -136,6 +136,8 @@ fn x_weight_counts_whitespace_and_flat_urls() {
         4 + 23
     );
     assert_eq!(super::card::x_weight("日本"), 4);
+    // EM DASH sits above U+10FF but is in X's weight-1 range.
+    assert_eq!(super::card::x_weight("a — b"), 5);
 }
 
 /// The caption fits X's 280-weight limit by dropping optional stats in

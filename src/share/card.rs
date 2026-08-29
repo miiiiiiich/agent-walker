@@ -332,9 +332,18 @@ fn heat_level(value: u64, thresholds: &[u64; 3]) -> usize {
 /// whitespace included, and each URL counts a flat 23 whatever its length.
 pub(super) fn x_weight(text: &str) -> usize {
     const URL_WEIGHT: usize = 23;
+    // X's configured weight-1 ranges (twitter-text config v3); everything
+    // else weighs 2. Notably U+2014 EM DASH weighs 1.
+    let single = |c: char| {
+        let cp = u32::from(c);
+        (0..=4351).contains(&cp)
+            || (8192..=8205).contains(&cp)
+            || (8208..=8223).contains(&cp)
+            || (8242..=8247).contains(&cp)
+    };
     let per_char = |t: &str| {
         t.chars()
-            .map(|c| if u32::from(c) > 0x10FF { 2 } else { 1 })
+            .map(|c| if single(c) { 1 } else { 2 })
             .sum::<usize>()
     };
     let mut weight = per_char(text);

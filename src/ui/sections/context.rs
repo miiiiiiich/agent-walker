@@ -41,6 +41,7 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
         .chain(context.expired.iter().map(|r| r.effective))
         .chain(context.cold_start.iter().map(|r| r.effective))
         .chain(std::iter::once(context.uncached.effective))
+        .chain(std::iter::once(context.unclassified_effective))
         .max()
         .unwrap_or(0);
     for band in context.bands.iter().filter(|band| band.calls > 0) {
@@ -54,10 +55,17 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
         ));
     }
     let uncached = (context.uncached.effective > 0).then_some(context.uncached.clone());
+    // Volume from non-call events (sidechains, aggregate providers): part of
+    // the share, no call to divide by.
+    let unclassified = (context.unclassified_effective > 0).then_some(ContextReason {
+        calls: 0,
+        effective: context.unclassified_effective,
+    });
     for (label, reason) in [
         ("expired", &context.expired),
         ("cold start", &context.cold_start),
         ("uncached", &uncached),
+        ("other", &unclassified),
     ] {
         let Some(reason) = reason else { continue };
         lines.push(utils::stat_bar_line(
@@ -102,21 +110,19 @@ fn per_call_reason(reason: &ContextReason) -> String {
     per_call(reason.effective, reason.calls)
 }
 
-/// Width-fitted title annotation: cached share plus the effective volume,
-/// falling back to the cached share alone, then nothing.
+/// Width-fitted title annotation: the fixed window, the cached share, and
+/// the effective volume, dropping from the right until it fits.
 fn context_annotation(context: &ContextSummary, width: u16) -> String {
     let budget = usize::from(width).saturating_sub("▍ CONTEXT  ".chars().count());
     let cached = format!("{:.0}% cached", context.cached_share() * 100.0);
+    // Fixed 30-day window, labelled like SKILLS / MODES so the page header's
+    // `--days` is never mistaken for this panel's period.
+    let effective = format_tokens(context.effective_tokens);
     [
-        format!(
-            "{cached} · {} effective input",
-            format_tokens(context.effective_tokens)
-        ),
-        format!(
-            "{cached} · {} effective",
-            format_tokens(context.effective_tokens)
-        ),
-        cached,
+        format!("30d · {cached} · {effective} effective input"),
+        format!("30d · {cached} · {effective} effective"),
+        format!("30d · {cached}"),
+        "30d".to_owned(),
     ]
     .into_iter()
     .find(|text| text.chars().count() <= budget)
@@ -141,10 +147,14 @@ mod tests {
         let summary = crate::share::fixtures::sample_summary();
         let lines = context_lines(&summary, 100);
         let text: Vec<String> = lines.iter().map(rendered).collect();
-        assert!(text[0].contains("95% cached"), "{:?}", text[0]);
+        assert!(text[0].contains("30d · 95% cached"), "{:?}", text[0]);
         assert!(text[0].contains("effective input"), "{:?}", text[0]);
-        // title + legend + 3 populated bands (500K+ is empty) + expired + cold start + uncached.
-        assert_eq!(lines.len(), 2 + 3 + 3);
+        // title + legend + 3 populated bands (500K+ is empty) + expired + cold start + uncached + other.
+        assert_eq!(lines.len(), 2 + 3 + 4);
+        assert!(
+            text.iter()
+                .any(|line| line.starts_with("other") && line.trim_end().ends_with('%'))
+        );
         assert!(text.iter().any(|line| line.starts_with("uncached")));
         assert!(
             text[1].trim_start().starts_with("per call"),
@@ -165,7 +175,7 @@ mod tests {
                     "{width}: {text:?}"
                 );
             }
-            assert!(rendered(&lines[0]).contains("cached"));
+            assert!(rendered(&lines[0]).contains("30d"));
         }
     }
 
@@ -207,6 +217,6 @@ mod tests {
             context.cold_start = None;
         }
         let lines = context_lines(&summary, 100);
-        assert_eq!(lines.len(), 2 + 3 + 1);
+        assert_eq!(lines.len(), 2 + 3 + 2);
     }
 }

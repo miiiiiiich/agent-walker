@@ -194,6 +194,11 @@ pub struct ContextSummary {
     /// each call, plus calls with no chain to classify. Completes the
     /// partition so the rows account for the whole effective volume.
     pub uncached: ContextReason,
+    /// Input-equivalent volume from events that are not calls (sidechain
+    /// rows, Copilot / Grok aggregates): counted in the totals and the cached
+    /// share, shown as its own row with no per-call figure, never mixed
+    /// into a row that has a call denominator.
+    pub unclassified_effective: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -255,6 +260,9 @@ impl ContextSummary {
                 dst.calls += src.calls;
                 dst.cached_effective = dst.cached_effective.saturating_add(src.cached_effective);
             }
+            acc.unclassified_effective = acc
+                .unclassified_effective
+                .saturating_add(part.unclassified_effective);
             acc.uncached.calls += part.uncached.calls;
             acc.uncached.effective = acc
                 .uncached
@@ -373,6 +381,7 @@ mod tests {
                 calls,
                 effective: effective / 4,
             },
+            unclassified_effective: effective / 10,
         }
     }
 
@@ -396,6 +405,7 @@ mod tests {
         assert_eq!((expired.calls, expired.effective), (1, 300));
         assert!(total.cold_start.is_none());
         assert_eq!((total.uncached.calls, total.uncached.effective), (15, 375));
+        assert_eq!(total.unclassified_effective, 150);
         assert!((total.cached_share() - 0.9).abs() < 1e-9);
 
         assert!(ContextSummary::merged([]).is_none());
