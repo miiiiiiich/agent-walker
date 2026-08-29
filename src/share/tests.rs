@@ -101,6 +101,56 @@ fn unpriced_cost_renders_as_dash_not_zero() {
     assert!(!caption.contains("$0"), "{caption}");
 }
 
+/// The cache-reuse share rides the header stat line and the caption as one
+/// number; a summary without context data leaves both untouched.
+#[test]
+fn cached_share_rides_header_and_caption() {
+    let card = ShareCard::from_summary(&sample_summary());
+    assert_eq!(card.cached.as_deref(), Some("95% cached"));
+    assert!(svg(&card).contains("api-equiv   ·   95% cached"));
+    assert!(card.caption().contains("· 95% cached"));
+
+    let mut summary = sample_summary();
+    summary.context = None;
+    let card = ShareCard::from_summary(&summary);
+    assert_eq!(card.cached, None);
+    assert!(!svg(&card).contains("cached"));
+    assert!(!card.caption().contains("cached"));
+}
+
+/// The caption fits X's 280-weight limit by dropping optional stats in
+/// priority order; a saturated stat line on the SVG yields the cache share
+/// before it can reach the codename.
+#[test]
+fn caption_and_header_fit_their_budgets() {
+    let mut summary = sample_summary();
+    summary.total_usage.input_tokens = u64::MAX;
+    // A provider-reported cost this large makes the stat line overrun its
+    // budget on its own, so the cache share has to yield.
+    summary.model_daily.push(crate::model::ModelDailyStat {
+        date: summary.period_end,
+        model: "claude-opus-4-8".to_owned(),
+        usage: crate::model::TokenUsage::default(),
+        unreported_usage: crate::model::TokenUsage::default(),
+        reported_cost_usd: Some(1.0e18),
+    });
+    let card = ShareCard::from_summary(&summary);
+    let caption = card.caption();
+    assert!(super::card::x_weight(&caption) <= 280, "{caption}");
+    // The share was dropped from the SVG stat line, the line itself stays.
+    let rendered = svg(&card);
+    assert!(rendered.contains("tokens   ·"), "{rendered}");
+    assert!(
+        !rendered.contains("api-equiv   ·   95% cached"),
+        "stat line should yield the share"
+    );
+
+    // The everyday fixture keeps everything.
+    let card = ShareCard::from_summary(&sample_summary());
+    assert!(card.caption().contains("95% cached"));
+    assert!(super::card::x_weight(&card.caption()) <= 280);
+}
+
 #[test]
 fn caption_includes_headline_and_repo() {
     let card = ShareCard::from_summary(&sample_summary());

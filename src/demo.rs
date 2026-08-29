@@ -489,11 +489,14 @@ pub fn demo_report(config: &Config) -> AppSummary {
         .iter()
         .map(|collection| summarize(collection, now, config.days, config.local_offset))
         .collect::<Vec<_>>();
-    let combined = summarize(
-        &Collection::combined(PathBuf::from("demo data"), &collections),
-        now,
-        config.days,
-        config.local_offset,
+    let combined = crate::app::finish_combined(
+        summarize(
+            &Collection::combined(PathBuf::from("demo data"), &collections),
+            now,
+            config.days,
+            config.local_offset,
+        ),
+        &providers,
     );
 
     AppSummary {

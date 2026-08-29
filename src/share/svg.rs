@@ -46,6 +46,10 @@ const BODY_TOP: u32 = 196;
 const BODY_BOT: u32 = 486;
 const BODY_H: u32 = BODY_BOT - BODY_TOP;
 
+/// Header stat line budget in characters: past this the right-anchored
+/// line would reach the codename on the left.
+const STAT_LINE_BUDGET: usize = 60;
+
 /// Build the share card SVG at 1200x675.
 #[allow(
     clippy::too_many_lines,
@@ -139,10 +143,19 @@ fn draw_header(s: &mut String, card: &ShareCard) {
         "api-equiv"
     };
     let cost = card.cost.as_deref().unwrap_or("—");
+    // The stat line grows leftward from RX; with saturated (poisoned) token
+    // or cost values it could reach the codename, so the cache share — the
+    // optional part — yields first.
+    let base = format!("{} tokens   ·   {cost} {cost_label}", card.tokens);
+    let cached = card
+        .cached
+        .as_deref()
+        .map(|cached| format!("   ·   {cached}"))
+        .filter(|extra| base.chars().count() + extra.chars().count() <= STAT_LINE_BUDGET)
+        .unwrap_or_default();
     let _ = write!(
         s,
-        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{} tokens   ·   {cost} {cost_label}</text>"#,
-        card.tokens
+        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{base}{cached}</text>"#
     );
 
     let _ = write!(
