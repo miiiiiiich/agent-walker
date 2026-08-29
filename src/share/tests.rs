@@ -116,6 +116,26 @@ fn cached_share_rides_header_and_caption() {
     assert_eq!(card.cached, None);
     assert!(!svg(&card).contains("cached"));
     assert!(!card.caption().contains("cached"));
+
+    // The ratio is a fixed-30-day metric: a 7-day card leaves it out rather
+    // than quoting a window its other stats don't cover.
+    let mut summary = sample_summary();
+    summary.period_days = 7;
+    assert_eq!(ShareCard::from_summary(&summary).cached, None);
+}
+
+/// X counts every character (whitespace included) and each URL as 23.
+#[test]
+fn x_weight_counts_whitespace_and_flat_urls() {
+    assert_eq!(super::card::x_weight("a b"), 3);
+    assert_eq!(super::card::x_weight("a\n\nb"), 4);
+    assert_eq!(
+        super::card::x_weight(
+            "see https://github.com/miiiiiiich/agent-walker/releases/tag/v0.14.0"
+        ),
+        4 + 23
+    );
+    assert_eq!(super::card::x_weight("日本"), 4);
 }
 
 /// The caption fits X's 280-weight limit by dropping optional stats in

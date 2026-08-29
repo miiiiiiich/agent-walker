@@ -165,10 +165,17 @@ impl ShareCard {
             tokens: format_tokens(total),
             cost: tally.complete_usd().map(format_usd),
             has_reported_cost,
+            // The cache share is a fixed-30-day metric (like SKILLS / MODES);
+            // the card's other stats follow `--days`, so it rides along only
+            // when the two windows coincide — a 7-day card must not quote a
+            // 30-day ratio.
             cached: summary
                 .context
                 .as_ref()
-                .filter(|context| context.context_tokens > 0)
+                .filter(|context| {
+                    context.context_tokens > 0
+                        && i64::from(summary.period_days) == crate::codename::CODENAME_WINDOW_DAYS
+                })
                 .map(|context| format!("{:.0}% cached", context.cached_share() * 100.0)),
             sessions: summary.sessions,
             models,
@@ -321,21 +328,20 @@ fn heat_level(value: u64, thresholds: &[u64; 3]) -> usize {
     1 + thresholds.iter().filter(|t| value > **t).count()
 }
 
-/// X's character accounting: every URL counts 23 regardless of length,
-/// and code points above U+10FF count 2.
+/// X's character accounting: every code point counts 1 (2 above U+10FF),
+/// whitespace included, and each URL counts a flat 23 whatever its length.
 pub(super) fn x_weight(text: &str) -> usize {
     const URL_WEIGHT: usize = 23;
-    let mut weight = 0;
+    let per_char = |t: &str| {
+        t.chars()
+            .map(|c| if u32::from(c) > 0x10FF { 2 } else { 1 })
+            .sum::<usize>()
+    };
+    let mut weight = per_char(text);
     for word in text.split_whitespace() {
         if word.starts_with("https://") || word.starts_with("http://") {
-            weight += URL_WEIGHT;
-        } else {
-            weight += word
-                .chars()
-                .map(|c| if u32::from(c) > 0x10FF { 2 } else { 1 })
-                .sum::<usize>();
+            weight = weight - per_char(word) + URL_WEIGHT;
         }
     }
-    // whitespace between words counts one each
-    weight + text.split_whitespace().count().saturating_sub(1)
+    weight
 }

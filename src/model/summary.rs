@@ -262,7 +262,9 @@ impl ContextSummary {
                 }
             }
         }
-        out.filter(|summary| summary.calls > 0)
+        // A part with totals but no calls (Copilot) still counts toward the
+        // Total share; only an all-empty merge is None.
+        out.filter(|summary| summary.calls > 0 || summary.context_tokens > 0)
     }
 }
 
@@ -384,5 +386,8 @@ mod tests {
 
         assert!(ContextSummary::merged([]).is_none());
         assert!(ContextSummary::merged([&context(0, 0, None)]).is_none());
+        // Totals without calls (an aggregate-only provider) still merge.
+        let totals_only = context(0, 400, None);
+        assert!(ContextSummary::merged([&totals_only]).is_some());
     }
 }
