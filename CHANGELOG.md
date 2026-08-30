@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-30
+
+### Added
+
+- CONTEXT: where your input-equivalent cost actually goes. Cached share in
+  the title, then cache re-reads by context size, resumes after the cache
+  expired, session cold starts, and ordinary new input — each per call, so
+  "keep going at 500K" and "start a fresh session" compare on one scale.
+  Fixed 30-day window, every tab including Total.
+- The share card shows the cached share next to the API-equivalent cost
+  on 30-day reports. The caption now fits X's 280-character limit.
+
+### Changed
+
+- Right column now reads CONTEXT, MODES, then COST, SIGNAL. How you drive
+  the agent sits above the bookkeeping.
+- `--snapshot` gains `context_30d` records for the combined report and
+  each provider.
+
 ## [0.14.0] - 2026-08-19
 
 ### Added
@@ -385,6 +404,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.15.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.0...v0.13.1
