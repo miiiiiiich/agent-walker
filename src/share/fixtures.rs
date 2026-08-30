@@ -1,6 +1,6 @@
 use crate::model::{
-    DurationBucket, DurationSummary, ModelStat, Orchestration, Provider, ScanStats, Summary,
-    TokenUsage,
+    ContextBand, ContextReason, ContextSummary, DurationBucket, DurationSummary, ModelStat,
+    Orchestration, Provider, ScanStats, Summary, TokenUsage,
 };
 
 pub(crate) fn sample_summary() -> Summary {
@@ -95,10 +95,57 @@ pub(crate) fn sample_summary() -> Summary {
             ],
         }),
         interrupted: 0,
+        context: Some(sample_context()),
         orchestration: Orchestration {
             avg_concurrency: 2.5,
             peak_concurrency: 4,
             time_by_level: [144_000, 108_000, 54_000, 36_000, 18_000, 6_000],
         },
+    }
+}
+
+/// Cache-reuse fixture: three populated bands (500K+ empty), one expiry
+/// row and one cold-start row.
+fn sample_context() -> ContextSummary {
+    ContextSummary {
+        calls: 1_200,
+        context_tokens: 300_000_000,
+        cached_tokens: 285_000_000,
+        effective_tokens: 45_000_000,
+        bands: vec![
+            ContextBand {
+                label: "<100K".into(),
+                calls: 400,
+                cached_effective: 2_000_000,
+            },
+            ContextBand {
+                label: "100-200K".into(),
+                calls: 500,
+                cached_effective: 9_000_000,
+            },
+            ContextBand {
+                label: "200-500K".into(),
+                calls: 300,
+                cached_effective: 17_000_000,
+            },
+            ContextBand {
+                label: "500K+".into(),
+                calls: 0,
+                cached_effective: 0,
+            },
+        ],
+        expired: Some(ContextReason {
+            calls: 20,
+            effective: 9_000_000,
+        }),
+        cold_start: Some(ContextReason {
+            calls: 60,
+            effective: 3_000_000,
+        }),
+        uncached: ContextReason {
+            calls: 1_100,
+            effective: 5_000_000,
+        },
+        unclassified_effective: 2_000_000,
     }
 }

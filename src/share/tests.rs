@@ -101,6 +101,78 @@ fn unpriced_cost_renders_as_dash_not_zero() {
     assert!(!caption.contains("$0"), "{caption}");
 }
 
+/// The cache-reuse share rides the header stat line and the caption as one
+/// number; a summary without context data leaves both untouched.
+#[test]
+fn cached_share_rides_header_and_caption() {
+    let card = ShareCard::from_summary(&sample_summary());
+    assert_eq!(card.cached.as_deref(), Some("95% cached"));
+    assert!(svg(&card).contains("api-equiv   ·   95% cached"));
+    assert!(card.caption().contains("· 95% cached"));
+
+    let mut summary = sample_summary();
+    summary.context = None;
+    let card = ShareCard::from_summary(&summary);
+    assert_eq!(card.cached, None);
+    assert!(!svg(&card).contains("cached"));
+    assert!(!card.caption().contains("cached"));
+
+    // The ratio is a fixed-30-day metric: a 7-day card leaves it out rather
+    // than quoting a window its other stats don't cover.
+    let mut summary = sample_summary();
+    summary.period_days = 7;
+    assert_eq!(ShareCard::from_summary(&summary).cached, None);
+}
+
+/// X counts every character (whitespace included) and each URL as 23.
+#[test]
+fn x_weight_counts_whitespace_and_flat_urls() {
+    assert_eq!(super::card::x_weight("a b"), 3);
+    assert_eq!(super::card::x_weight("a\n\nb"), 4);
+    assert_eq!(
+        super::card::x_weight(
+            "see https://github.com/miiiiiiich/agent-walker/releases/tag/v0.14.0"
+        ),
+        4 + 23
+    );
+    assert_eq!(super::card::x_weight("日本"), 4);
+    // EM DASH sits above U+10FF but is in X's weight-1 range.
+    assert_eq!(super::card::x_weight("a — b"), 5);
+}
+
+/// The caption fits X's 280-weight limit by dropping optional stats in
+/// priority order; a saturated stat line on the SVG yields the cache share
+/// before it can reach the codename.
+#[test]
+fn caption_and_header_fit_their_budgets() {
+    let mut summary = sample_summary();
+    summary.total_usage.input_tokens = u64::MAX;
+    // A provider-reported cost this large makes the stat line overrun its
+    // budget on its own, so the cache share has to yield.
+    summary.model_daily.push(crate::model::ModelDailyStat {
+        date: summary.period_end,
+        model: "claude-opus-4-8".to_owned(),
+        usage: crate::model::TokenUsage::default(),
+        unreported_usage: crate::model::TokenUsage::default(),
+        reported_cost_usd: Some(1.0e18),
+    });
+    let card = ShareCard::from_summary(&summary);
+    let caption = card.caption();
+    assert!(super::card::x_weight(&caption) <= 280, "{caption}");
+    // The share was dropped from the SVG stat line, the line itself stays.
+    let rendered = svg(&card);
+    assert!(rendered.contains("tokens   ·"), "{rendered}");
+    assert!(
+        !rendered.contains("api-equiv   ·   95% cached"),
+        "stat line should yield the share"
+    );
+
+    // The everyday fixture keeps everything.
+    let card = ShareCard::from_summary(&sample_summary());
+    assert!(card.caption().contains("95% cached"));
+    assert!(super::card::x_weight(&card.caption()) <= 280);
+}
+
 #[test]
 fn caption_includes_headline_and_repo() {
     let card = ShareCard::from_summary(&sample_summary());

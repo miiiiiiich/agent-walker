@@ -98,11 +98,12 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 pub fn load_report(config: &Config) -> Result<AppSummary> {
-    // Pricing feeds the COST panels the UI renders later, so finish the refresh
-    // before handing back the report.
+    // Pricing overlaps log collection, but must be loaded before the
+    // analyzer runs: CONTEXT bakes price multipliers into the summary, so
+    // summarizing under a half-finished refresh would make the same logs
+    // yield different numbers run to run.
     let pricing_refresh = crate::cost::spawn_pricing_refresh();
-    let result = load_report_inner(config);
-    let _ = pricing_refresh.join();
+    let result = load_report_inner(config, pricing_refresh);
     result.map(|mut report| {
         // Only surface a provider tab when that provider actually has data, then
         // order what's left by how much it's used (heaviest first).
@@ -211,9 +212,25 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
     Ok(collections)
 }
 
+/// Fill in the Total-tab fields that are sums over the provider summaries
+/// rather than re-derivations from the combined collection. Cache reuse is
+/// one: the expiry threshold differs per provider, so the combined
+/// collection cannot classify calls itself.
+pub(crate) fn finish_combined(
+    mut combined: crate::model::Summary,
+    providers: &[crate::model::Summary],
+) -> crate::model::Summary {
+    combined.context = crate::model::ContextSummary::merged(
+        providers
+            .iter()
+            .filter_map(|summary| summary.context.as_ref()),
+    );
+    combined
+}
+
 /// A provider earns a tab only if it has real activity. Token volume catches
-/// most agents; sessions, tools, completions, interruptions, and the
-/// fixed-window credit ledger are the fallback for a session that logged
+/// most agents; sessions, tools, completions, interruptions, fixed-window
+/// context volume, and the fixed-window credit ledger are the fallback for a session that logged
 /// activity but no usage tokens (Copilot credits cut on the fixed 30-day
 /// window, so they can exist even when a short `--days` display window is
 /// empty). Everything false ⇒ the directory was missing or empty, so the tab
@@ -224,6 +241,10 @@ fn provider_has_data(summary: &crate::model::Summary) -> bool {
         || !summary.tools.is_empty()
         || summary.completion_duration.is_some()
         || summary.interrupted > 0
+        || summary
+            .context
+            .as_ref()
+            .is_some_and(|context| context.context_tokens > 0)
         || summary.credits.is_some()
 }
 
@@ -242,8 +263,12 @@ fn sort_providers_by_usage(providers: &mut [crate::model::Summary]) {
     });
 }
 
-fn load_report_inner(config: &Config) -> Result<AppSummary> {
+fn load_report_inner(
+    config: &Config,
+    pricing_refresh: std::thread::JoinHandle<()>,
+) -> Result<AppSummary> {
     if config.demo {
+        let _ = pricing_refresh.join();
         return Ok(crate::demo::demo_report(config));
     }
 
@@ -259,16 +284,22 @@ fn load_report_inner(config: &Config) -> Result<AppSummary> {
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
     let collections = collect_all(config, mtime_floor)?;
+    // Collection is the slow half; by now the pricing fetch has usually
+    // landed. Join regardless so every summary below prices the same way.
+    let _ = pricing_refresh.join();
 
     let providers = collections
         .iter()
         .map(|collection| summarize(collection, now, config.days, config.local_offset))
         .collect::<Vec<_>>();
-    let combined = summarize(
-        &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
-        now,
-        config.days,
-        config.local_offset,
+    let combined = finish_combined(
+        summarize(
+            &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
+            now,
+            config.days,
+            config.local_offset,
+        ),
+        &providers,
     );
 
     Ok(AppSummary {
@@ -334,6 +365,7 @@ mod tests {
             longest_session: None,
             completion_duration: None,
             interrupted: 0,
+            context: None,
             orchestration: Orchestration::default(),
         }
     }
@@ -372,5 +404,15 @@ mod tests {
         let mut interrupted_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
         interrupted_only.interrupted = 2;
         assert!(provider_has_data(&interrupted_only));
+
+        // Fixed-window cache-reuse calls keep the tab even when the short
+        // display window holds no usage (the Total tab already counts them).
+        let mut context_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
+        context_only.context = Some(crate::model::ContextSummary {
+            calls: 0,
+            context_tokens: 3,
+            ..crate::model::ContextSummary::default()
+        });
+        assert!(provider_has_data(&context_only));
     }
 }

@@ -144,6 +144,23 @@ mod tests {
         assert!(!snapshot(&summary).contains("completion_"));
     }
 
+    /// Every provider block carries its own cache-reuse record — retention
+    /// differs per provider, so the combined line alone would hide who paid.
+    #[test]
+    fn snapshot_app_emits_context_per_provider() {
+        let provider = crate::share::fixtures::sample_summary();
+        let report = crate::model::AppSummary {
+            generated_at: time::macros::datetime!(2026-06-08 12:00 UTC),
+            period_days: 30,
+            load_duration_ms: 1,
+            combined: provider.clone(),
+            providers: vec![provider],
+        };
+        let text = snapshot_app(&report);
+        assert_eq!(text.matches("context_30d: cached:").count(), 2, "{text}");
+        assert!(text.contains("\n  context_30d: cached:"), "{text}");
+    }
+
     #[test]
     fn formats_tokens_with_compact_units() {
         assert_eq!(format_tokens(900), "900");

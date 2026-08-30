@@ -52,8 +52,13 @@ This is why the total can be ~20–25× what a cache-excluding counter shows.
 agent-walker counts cache-inclusive on purpose, so the total reflects everything
 the model actually processed.
 
-> cache% is intentionally **not** surfaced as a metric: it sits near 95% for
-> everyone, so it distinguishes no one.
+The **CONTEXT** section reports the cached share over the fixed 30-day window
+(the share card quotes it only on a 30-day report). On its own the share sits
+near 95% for most people; what distinguishes users is where the *rest* goes,
+so the section breaks the input-equivalent volume down by context-size band,
+expired resumes, cold starts, ordinary uncached input, and an `other` row for
+volume that is not attributable to a call (subagent rows, providers whose
+logs record aggregates) — see `src/analyzer/context.rs` for the definitions.
 
 ## Deduplication
 

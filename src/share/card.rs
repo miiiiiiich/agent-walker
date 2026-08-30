@@ -35,6 +35,10 @@ pub struct ShareCard {
     /// usage may be unpriced); softens the caption's "API-equivalent / 100%
     /// local" copy either way.
     pub(crate) has_reported_cost: bool,
+    /// Share of the window's input served from the prompt cache ("97%
+    /// cached"), when any call carried usage. The one cache-reuse number the
+    /// card shows; the breakdown stays in the TUI.
+    pub(crate) cached: Option<String>,
     pub(crate) sessions: usize,
     /// Top models: (short name, share%, ratio-to-largest, `formatted_tokens`).
     pub(crate) models: Vec<(String, String, f64, String)>,
@@ -161,6 +165,18 @@ impl ShareCard {
             tokens: format_tokens(total),
             cost: tally.complete_usd().map(format_usd),
             has_reported_cost,
+            // The cache share is a fixed-30-day metric (like SKILLS / MODES);
+            // the card's other stats follow `--days`, so it rides along only
+            // when the two windows coincide — a 7-day card must not quote a
+            // 30-day ratio.
+            cached: summary
+                .context
+                .as_ref()
+                .filter(|context| {
+                    context.context_tokens > 0
+                        && i64::from(summary.period_days) == crate::codename::CODENAME_WINDOW_DAYS
+                })
+                .map(|context| format!("{:.0}% cached", context.cached_share() * 100.0)),
             sessions: summary.sessions,
             models,
             hourly,
@@ -172,50 +188,77 @@ impl ShareCard {
     }
 
     /// A ready-to-post caption (X body / clipboard text).
+    /// A ready-to-post caption (X body / clipboard text), fitted to X's
+    /// 280-weight limit: optional stats drop in priority order (cache share,
+    /// then the parallel stat, then the 20m+ line) until it posts.
     pub fn caption(&self) -> String {
-        let mut stats = vec![format!("{} tokens", self.tokens)];
+        const MAX_WEIGHT: usize = 280;
         // Cursor's reported cost is an actual charge, not an API-equivalent
         // estimate, so don't label it as one. An unknown cost is simply
         // absent — a "$0" would misread as free.
-        if let Some(cost) = &self.cost {
-            stats.push(if self.has_reported_cost {
+        let cost = self.cost.as_ref().map(|cost| {
+            if self.has_reported_cost {
                 format!("{cost} cost")
             } else {
                 format!("{cost} API-equivalent")
+            }
+        });
+        let parallel = self
+            .parallel
+            .as_ref()
+            .filter(|(four_plus_pct, _)| *four_plus_pct > 0)
+            .map(|(four_plus_pct, peak)| {
+                format!("{four_plus_pct}% with 4+ agents in parallel (peak {peak})")
             });
-        }
-        if let Some((four_plus_pct, peak)) = &self.parallel
-            && *four_plus_pct > 0
-        {
-            stats.push(format!(
-                "{four_plus_pct}% with 4+ agents in parallel (peak {peak})"
-            ));
-        }
-        let rank_tag = self
-            .rank
-            .letters()
-            .map(|letters| format!(" — Rank {letters}"))
-            .unwrap_or_default();
-        let mut caption = format!(
-            "Codename: {}{rank_tag}\nMy last {} days with AI coding agents:\n{}.",
-            self.codename,
-            self.period_days,
-            stats.join(" · ")
-        );
-        if let Some((_, unattended, _, _, _, _)) = &self.completion
-            && *unattended > 0
-        {
-            let _ = write!(caption, "\n{unattended} turns ran 20m+.");
-        }
-        // The "100% local / logs never leave" claim only holds without Cursor,
-        // whose usage is fetched from its dashboard over the network.
-        let provenance = if self.has_reported_cost {
-            "Tracked with agent-walker (Cursor usage read from its dashboard)."
-        } else {
-            "Tracked 100% locally with agent-walker — your logs never leave your machine."
+        let unattended = self
+            .completion
+            .as_ref()
+            .map(|(_, unattended, ..)| *unattended)
+            .filter(|unattended| *unattended > 0);
+
+        let build = |cached: bool, parallel_on: bool, unattended_on: bool| {
+            let mut stats = vec![format!("{} tokens", self.tokens)];
+            stats.extend(cost.clone());
+            if cached {
+                stats.extend(self.cached.clone());
+            }
+            if parallel_on {
+                stats.extend(parallel.clone());
+            }
+            let rank_tag = self
+                .rank
+                .letters()
+                .map(|letters| format!(" — Rank {letters}"))
+                .unwrap_or_default();
+            let mut caption = format!(
+                "Codename: {}{rank_tag}\nMy last {} days with AI coding agents:\n{}.",
+                self.codename,
+                self.period_days,
+                stats.join(" · ")
+            );
+            if unattended_on && let Some(unattended) = unattended {
+                let _ = write!(caption, "\n{unattended} turns ran 20m+.");
+            }
+            // The "100% local / logs never leave" claim only holds without
+            // Cursor, whose usage is fetched from its dashboard over the network.
+            let provenance = if self.has_reported_cost {
+                "Tracked with agent-walker (Cursor usage read from its dashboard)."
+            } else {
+                "Tracked 100% locally with agent-walker — your logs never leave your machine."
+            };
+            let _ = write!(caption, "\n\n{provenance}\nhttps://{REPO_URL}");
+            caption
         };
-        let _ = write!(caption, "\n\n{provenance}\nhttps://{REPO_URL}");
-        caption
+        [
+            (true, true, true),
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ]
+        .into_iter()
+        .map(|(cached, parallel_on, unattended_on)| build(cached, parallel_on, unattended_on))
+        .find(|caption| x_weight(caption) <= MAX_WEIGHT)
+        .unwrap_or_else(|| build(false, false, false))
     }
 }
 
@@ -283,4 +326,31 @@ fn heat_level(value: u64, thresholds: &[u64; 3]) -> usize {
         return 0;
     }
     1 + thresholds.iter().filter(|t| value > **t).count()
+}
+
+/// X's character accounting: every code point counts 1 (2 above U+10FF),
+/// whitespace included, and each URL counts a flat 23 whatever its length.
+pub(super) fn x_weight(text: &str) -> usize {
+    const URL_WEIGHT: usize = 23;
+    // X's configured weight-1 ranges (twitter-text config v3); everything
+    // else weighs 2. Notably U+2014 EM DASH weighs 1.
+    let single = |c: char| {
+        let cp = u32::from(c);
+        (0..=4351).contains(&cp)
+            || (8192..=8205).contains(&cp)
+            || (8208..=8223).contains(&cp)
+            || (8242..=8247).contains(&cp)
+    };
+    let per_char = |t: &str| {
+        t.chars()
+            .map(|c| if single(c) { 1 } else { 2 })
+            .sum::<usize>()
+    };
+    let mut weight = per_char(text);
+    for word in text.split_whitespace() {
+        if word.starts_with("https://") || word.starts_with("http://") {
+            weight = weight - per_char(word) + URL_WEIGHT;
+        }
+    }
+    weight
 }

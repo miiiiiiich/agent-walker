@@ -326,6 +326,7 @@ token.json
 ### Local agent notes (never tracked — operational meta stays out of the public repo)
 AGENTS.md
 CLAUDE.md
+RELEASING.local.md
 
 ### Python release scripts (scripts/)
 scripts/.venv/

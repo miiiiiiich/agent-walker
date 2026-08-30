@@ -110,6 +110,9 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     } else {
         Vec::new()
     };
+    // CONTEXT (cache reuse) renders on every tab, Total included — the
+    // summary adds up across providers.
+    let context = sections::context_lines(summary, if two_column { right_u16 } else { width });
     let modes = if matches!(summary.provider, Provider::Claude | Provider::Codex) {
         sections::modes_lines(summary, if two_column { right_u16 } else { width })
     } else {
@@ -134,10 +137,12 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.extend(skills);
             lines.push(Line::default());
         }
-        lines.extend(sections::cost_lines(summary, width));
-        lines.push(Line::default());
-        lines.extend(sections::signal_lines(summary, width));
-        lines.push(Line::default());
+        // Same rule as the two-column layout: present drive panels first,
+        // then the bookkeeping pair in fixed order (below the usage sections).
+        for block in [context, modes].into_iter().filter(|b| !b.is_empty()) {
+            lines.extend(block);
+            lines.push(Line::default());
+        }
         lines.extend(sections::project_lines(summary, width));
         lines.push(Line::default());
         lines.extend(sections::tool_lines(summary, width, 6));
@@ -145,10 +150,10 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.extend(sections::agent_lines(summary, width, 4));
         }
-        if !modes.is_empty() {
-            lines.push(Line::default());
-            lines.extend(modes);
-        }
+        lines.push(Line::default());
+        lines.extend(sections::cost_lines(summary, width));
+        lines.push(Line::default());
+        lines.extend(sections::signal_lines(summary, width));
         return lines;
     }
 
@@ -168,25 +173,30 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
 
     // Pair sections column-wise so each row of sections starts on the same
     // line in both columns: MODELS|COST, (SKILLS), PROJECTS|SIGNAL,
-    // TOOLS|SUBAGENTS, (·|MODES). SKILLS slots directly under MODELS on the
-    // Claude tab; MODES closes the right column as a deliberately small
-    // section.
+    // line in both columns. Left: MODELS, (SKILLS), PROJECTS, TOOLS. Right:
+    // CONTEXT, MODES, (SUBAGENTS), COST, SIGNAL. The "how you drive it" panels
+    // (CONTEXT, MODES) lead the right column and the bookkeeping panels
+    // (COST, SIGNAL) close it; a tab without context or mode data keeps
+    // COST / SIGNAL in the top slots. SKILLS slots directly under MODELS on
+    // the Claude tab.
     let mut left_blocks = vec![sections::model_lines(summary, left_u16)];
     if !skills.is_empty() {
         left_blocks.push(skills);
     }
     left_blocks.push(sections::project_lines(summary, left_u16));
     left_blocks.push(sections::tool_lines(summary, left_u16, 10));
-    let mut right_blocks = vec![
-        sections::cost_lines(summary, right_u16),
-        sections::signal_lines(summary, right_u16),
-    ];
+    // Whichever "drive" panels exist lead in order, then SUBAGENTS, then the
+    // bookkeeping pair in its own fixed order — so a tab without MODES still
+    // reads CONTEXT, COST, SIGNAL, and one without either keeps COST first.
+    let mut right_blocks: Vec<Vec<Line<'static>>> = [context, modes]
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .collect();
     if !summary.agents.is_empty() {
         right_blocks.push(sections::agent_lines(summary, right_u16, 5));
     }
-    if !modes.is_empty() {
-        right_blocks.push(modes);
-    }
+    right_blocks.push(sections::cost_lines(summary, right_u16));
+    right_blocks.push(sections::signal_lines(summary, right_u16));
 
     lines.extend(join_section_columns(
         &left_blocks,
@@ -464,5 +474,31 @@ mod tests {
         assert!(!total_page.contains("LIMITS"));
         assert!(!total_page.contains("MODES"));
         assert!(!total_page.contains("CREDITS"));
+    }
+
+    /// Right-column order: the "how you drive it" panels lead (CONTEXT next
+    /// to MODELS, then MODES) and the bookkeeping panels close (COST, then
+    /// SIGNAL).
+    #[test]
+    fn right_column_leads_with_context_and_modes() {
+        let text = rendered(&v09_summary(Provider::Claude), 120);
+        let models_row = text
+            .lines()
+            .find(|line| line.contains("▍ MODELS"))
+            .expect("models row");
+        assert!(models_row.contains("▍ CONTEXT"), "{models_row}");
+        let at = |title: &str| text.find(title).expect(title);
+        assert!(at("▍ CONTEXT") < at("▍ MODES"));
+        assert!(at("▍ MODES") < at("▍ COST"));
+        assert!(at("▍ COST") < at("▍ SIGNAL"));
+
+        // Without MODES (Total / other providers) COST still precedes SIGNAL.
+        let mut total = v09_summary(Provider::Combined);
+        total.modes = ModesSummary::default();
+        let text = rendered(&total, 120);
+        let at = |title: &str| text.find(title).expect(title);
+        assert!(!text.contains("▍ MODES"));
+        assert!(at("▍ CONTEXT") < at("▍ COST"));
+        assert!(at("▍ COST") < at("▍ SIGNAL"));
     }
 }
