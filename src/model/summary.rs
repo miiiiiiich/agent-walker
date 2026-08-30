@@ -169,10 +169,13 @@ pub struct Orchestration {
     pub time_by_level: [u64; 6],
 }
 
-/// CONTEXT panel data: how much of each call's input the prompt cache served,
-/// where the input-equivalent cost went by context size, and how much of the
-/// uncached volume came from starting sessions or resuming them after the
-/// cache expired. Fixed 30-day window, main-chain calls only.
+/// CONTEXT panel data over the fixed 30-day window. The token totals (and so
+/// the cached share) cover every dated usage event; the call-level rows —
+/// bands, cold starts, expiries, ordinary uncached input — cover main-chain
+/// calls of providers whose events are calls, and everything else lands in
+/// `unclassified_effective`. `Some` whenever any event carried context;
+/// `calls` may be 0 for aggregate-only providers. The share card quotes the
+/// cached share only on a 30-day report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSummary {
     pub calls: usize,
@@ -218,6 +221,36 @@ pub struct ContextReason {
 }
 
 impl ContextSummary {
+    /// Make the rows a partition of the displayed total: `effective_tokens`
+    /// is derived from the rows, so shares add up by construction. If that
+    /// sum overflows (a poisoned counter saturated a component) the rows
+    /// cannot add up — the whole breakdown is dropped (no bands, no reason
+    /// rows) and only the headline survives. Runs after provider analysis
+    /// and again after `merged()`, which can overflow on its own.
+    pub fn finalize(&mut self) {
+        let total = self
+            .bands
+            .iter()
+            .map(|band| band.cached_effective)
+            .chain(self.expired.iter().map(|r| r.effective))
+            .chain(self.cold_start.iter().map(|r| r.effective))
+            .chain([self.uncached.effective, self.unclassified_effective])
+            .try_fold(0_u64, u64::checked_add);
+        if let Some(total) = total {
+            self.effective_tokens = total;
+        } else {
+            self.effective_tokens = u64::MAX;
+            self.bands.iter_mut().for_each(|band| {
+                band.calls = 0;
+                band.cached_effective = 0;
+            });
+            self.expired = None;
+            self.cold_start = None;
+            self.uncached = ContextReason::default();
+            self.unclassified_effective = 0;
+        }
+    }
+
     #[allow(
         clippy::cast_precision_loss,
         reason = "Display-only ratio of u64 token counts."
@@ -280,8 +313,13 @@ impl ContextSummary {
             }
         }
         // A part with totals but no calls (Copilot) still counts toward the
-        // Total share; only an all-empty merge is None.
+        // Total share; only an all-empty merge is None. The sum can overflow
+        // where no part did, so the partition is re-validated.
         out.filter(|summary| summary.calls > 0 || summary.context_tokens > 0)
+            .map(|mut summary| {
+                summary.finalize();
+                summary
+            })
     }
 }
 
@@ -335,8 +373,9 @@ pub struct Summary {
     /// `completion_duration`: a window can hold interruptions and no
     /// completed turn.
     pub interrupted: usize,
-    /// Cache reuse over the fixed 30-day window; `None` when no call carried
-    /// usage. The Total tab holds the sum of the provider summaries.
+    /// Cache reuse over the fixed 30-day window: event totals (the cached
+    /// share) plus optional call-level rows; `None` when no event carried
+    /// context. The Total tab holds the sum of the provider summaries.
     pub context: Option<ContextSummary>,
     pub orchestration: Orchestration,
 }
@@ -393,7 +432,9 @@ mod tests {
         let b = context(5, 500, None);
         let total = ContextSummary::merged([&a, &b]).expect("merged");
         assert_eq!(total.calls, 15);
-        assert_eq!(total.effective_tokens, 1_500);
+        // `merged()` re-derives the total from the rows: a = 500 + 300 + 250 +
+        // 100, b = 250 + 0 + 125 + 50.
+        assert_eq!(total.effective_tokens, 1_575);
         assert_eq!(total.cached_tokens, 13_500);
         assert_eq!(total.bands[0].calls, 15);
         assert_eq!(total.bands[0].cached_effective, 750);
@@ -413,5 +454,21 @@ mod tests {
         // Totals without calls (an aggregate-only provider) still merge.
         let totals_only = context(0, 400, None);
         assert!(ContextSummary::merged([&totals_only]).is_some());
+
+        // A merge whose row sum overflows drops the whole breakdown: no band
+        // calls, no reason rows, headline only.
+        // (Built from a small fixture: the helper's `effective * 10` would
+        // itself overflow on u64::MAX.)
+        let mut huge = context(1, 1_000, Some(1));
+        huge.bands[0].cached_effective = u64::MAX;
+        huge.expired = Some(ContextReason {
+            calls: 1,
+            effective: u64::MAX,
+        });
+        let merged = ContextSummary::merged([&huge, &huge]).expect("merged");
+        assert_eq!(merged.effective_tokens, u64::MAX);
+        assert!(merged.bands.iter().all(|band| band.calls == 0));
+        assert!(merged.expired.is_none() && merged.cold_start.is_none());
+        assert_eq!(merged.unclassified_effective, 0);
     }
 }

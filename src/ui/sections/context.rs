@@ -4,21 +4,32 @@ use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
 /// The CONTEXT section: how much of the window's input the prompt cache
-/// served, and where the input-equivalent cost went — re-reading long
-/// contexts (by size band), resuming sessions after the cache expired, and
-/// starting sessions. Each row is its share of the effective total plus the
-/// per-call average, so "keep going" and "start fresh" sit on one scale.
+/// served (event totals, every usage row), and where the input-equivalent
+/// volume went — re-reading long contexts (by size band), resuming sessions
+/// after the cache expired, starting sessions, ordinary new input, and an
+/// `other` row for volume with no call to attribute it to (subagent rows,
+/// aggregate-logging providers). Call-level rows carry a per-call average
+/// so "keep going" and "start fresh" sit on one scale; `other` shows `—`.
 pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let Some(context) = &summary.context else {
         return Vec::new();
     };
-    if context.calls == 0 || context.effective_tokens == 0 {
+    // Raw cache data is worth a title even when nothing priced (effective
+    // == 0); aggregate-only providers (calls == 0) still get their headline
+    // and the `other` row.
+    if context.context_tokens == 0 {
         return Vec::new();
     }
     let total = context.effective_tokens;
     // Rows carry a value AND a share column; the shared `bar_width_for`
     // budgets only a count column, so size the bar for label + value + share.
     let bar_width = usize::from(width).saturating_sub(14 + 9 + 7).max(4);
+    if total == 0 {
+        return vec![utils::section_title(
+            "CONTEXT",
+            &context_annotation(context, width),
+        )];
+    }
     let mut lines = vec![
         utils::section_title("CONTEXT", &context_annotation(context, width)),
         // Column legend: the value is input-equivalent tokens per call (so
@@ -201,6 +212,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An aggregate-only provider (Copilot / Grok: totals, no calls) still
+    /// shows the headline and its `other` row; nothing priced → title only.
+    #[test]
+    fn aggregate_only_and_unpriced_shapes() {
+        let mut summary = crate::share::fixtures::sample_summary();
+        if let Some(context) = summary.context.as_mut() {
+            context.calls = 0;
+            context.bands.iter_mut().for_each(|b| {
+                b.calls = 0;
+                b.cached_effective = 0;
+            });
+            context.expired = None;
+            context.cold_start = None;
+            context.uncached = ContextReason::default();
+            context.unclassified_effective = 7_000_000;
+            context.effective_tokens = 7_000_000;
+        }
+        let lines = context_lines(&summary, 100);
+        let text: Vec<String> = lines.iter().map(rendered).collect();
+        assert_eq!(lines.len(), 2 + 1, "{text:?}");
+        assert!(
+            text[2].starts_with("other") && text[2].contains('—'),
+            "{:?}",
+            text[2]
+        );
+
+        if let Some(context) = summary.context.as_mut() {
+            context.unclassified_effective = 0;
+            context.effective_tokens = 0;
+        }
+        assert_eq!(context_lines(&summary, 100).len(), 1);
     }
 
     /// No context data → no section; session-less providers keep the bands

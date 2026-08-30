@@ -157,8 +157,8 @@ mod tests {
             providers: vec![provider],
         };
         let text = snapshot_app(&report);
-        assert_eq!(text.matches("context: cached:").count(), 2, "{text}");
-        assert!(text.contains("\n  context: cached:"), "{text}");
+        assert_eq!(text.matches("context_30d: cached:").count(), 2, "{text}");
+        assert!(text.contains("\n  context_30d: cached:"), "{text}");
     }
 
     #[test]

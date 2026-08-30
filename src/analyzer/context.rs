@@ -171,13 +171,11 @@ fn empty_summary() -> ContextSummary {
     }
 }
 
+/// Raw token totals only — `effective_tokens` is derived from the rows at
+/// the end so the breakdown always partitions it.
 fn add_totals(summary: &mut ContextSummary, call: &CallAccount) {
     summary.context_tokens = summary.context_tokens.saturating_add(call.context);
     summary.cached_tokens = summary.cached_tokens.saturating_add(call.cached);
-    summary.effective_tokens = summary
-        .effective_tokens
-        .saturating_add(call.uncached_effective)
-        .saturating_add(call.cached_effective);
 }
 
 fn add_reason(reason: &mut ContextReason, call: &CallAccount) {
@@ -249,12 +247,15 @@ pub(super) fn context_summary(
 
     let mut expired = ContextReason::default();
     let mut cold_start = ContextReason::default();
-    let mut has_sessions = false;
+    // "Has sessions" and "expiry is classifiable" are different facts: a
+    // sessionful provider whose models have no known retention can count
+    // cold starts but must not show an `expired 0` that means "unknown".
+    let mut sessionful_in_window = false;
+    let mut expiry_classifiable = false;
 
     for (session, mut events) in by_session {
         events.sort_by_key(|event| event.timestamp);
         let sessionful = session.is_some();
-        has_sessions |= sessionful;
         // Cold start is per session; the expiry gap is per serving model —
         // a session that alternates models keeps one prefix per model, and a
         // call in between on another model neither refreshes nor expires it.
@@ -287,6 +288,8 @@ pub(super) fn context_summary(
             let low_reuse = call.uncached.saturating_mul(2) >= call.context;
             let retention = retention(collection.provider, event.model.as_deref());
             let expired_gap = retention.is_some_and(|keep| gap.is_some_and(|gap| gap >= keep));
+            sessionful_in_window |= sessionful;
+            expiry_classifiable |= sessionful && retention.is_some();
             let reason = if sessionful && first {
                 &mut cold_start
             } else if sessionful && low_reuse && expired_gap {
@@ -301,10 +304,13 @@ pub(super) fn context_summary(
     if summary.context_tokens == 0 {
         return None;
     }
-    if has_sessions {
-        summary.expired = Some(expired);
+    if sessionful_in_window {
         summary.cold_start = Some(cold_start);
     }
+    if expiry_classifiable {
+        summary.expired = Some(expired);
+    }
+    summary.finalize();
     Some(summary)
 }
 
@@ -568,7 +574,10 @@ mod tests {
         .expect("summary");
         assert_eq!(summary.context_tokens, u64::MAX);
         assert_eq!(summary.effective_tokens, u64::MAX);
-        assert_eq!(summary.bands[3].calls, 1);
+        // The row sum overflowed, so the whole breakdown is dropped rather
+        // than shown as shares past 100%; the headline survives.
+        assert!(summary.bands.iter().all(|band| band.calls == 0));
+        assert!(summary.cold_start.is_none() && summary.expired.is_none());
     }
 
     /// Providers that route arbitrary models take retention from the model
@@ -594,7 +603,9 @@ mod tests {
         };
         assert_eq!(run("gpt-5.5").expired.expect("expired").calls, 1);
         assert_eq!(run("claude-opus-4-8").expired.expect("expired").calls, 0);
-        assert_eq!(run("qwen3:8b").expired.expect("expired").calls, 0);
+        // Unknown retention: expiry is unavailable, not zero.
+        assert!(run("qwen3:8b").expired.is_none());
+        assert_eq!(run("qwen3:8b").cold_start.expect("cold start").calls, 1);
         assert_eq!(run("qwen3:8b").uncached.calls, 1);
     }
 

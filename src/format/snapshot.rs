@@ -174,9 +174,10 @@ fn completion_lines(summary: &Summary) -> Vec<String> {
     lines
 }
 
-/// The cache-reuse record: cached share, input-equivalent volume, and the
-/// two behaviours that pay full price for a prefix. `-` when the provider
-/// has no session notion.
+/// The cache-reuse record over the fixed 30-day window (hence the `_30d`
+/// key — the rest of the snapshot follows `--days`): cached share,
+/// input-equivalent volume, and the two behaviours that pay full price for a
+/// prefix. `-` when the provider has no session notion.
 fn context_line(summary: &Summary) -> Option<String> {
     let context = summary.context.as_ref()?;
     let reason = |reason: &Option<crate::model::ContextReason>| {
@@ -185,7 +186,7 @@ fn context_line(summary: &Summary) -> Option<String> {
             .map_or_else(|| "-".to_owned(), |r| format_tokens(r.effective))
     };
     Some(format!(
-        "context: cached:{:.1}% effective:{} calls:{} expired:{} cold_start:{}",
+        "context_30d: cached:{:.1}% effective:{} calls:{} expired:{} cold_start:{}",
         context.cached_share() * 100.0,
         format_tokens(context.effective_tokens),
         context.calls,

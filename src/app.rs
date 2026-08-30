@@ -230,7 +230,7 @@ pub(crate) fn finish_combined(
 
 /// A provider earns a tab only if it has real activity. Token volume catches
 /// most agents; sessions, tools, completions, interruptions, fixed-window
-/// cache-reuse calls, and the fixed-window credit ledger are the fallback for a session that logged
+/// context volume, and the fixed-window credit ledger are the fallback for a session that logged
 /// activity but no usage tokens (Copilot credits cut on the fixed 30-day
 /// window, so they can exist even when a short `--days` display window is
 /// empty). Everything false ⇒ the directory was missing or empty, so the tab
@@ -244,7 +244,7 @@ fn provider_has_data(summary: &crate::model::Summary) -> bool {
         || summary
             .context
             .as_ref()
-            .is_some_and(|context| context.calls > 0)
+            .is_some_and(|context| context.context_tokens > 0)
         || summary.credits.is_some()
 }
 
@@ -409,7 +409,8 @@ mod tests {
         // display window holds no usage (the Total tab already counts them).
         let mut context_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
         context_only.context = Some(crate::model::ContextSummary {
-            calls: 3,
+            calls: 0,
+            context_tokens: 3,
             ..crate::model::ContextSummary::default()
         });
         assert!(provider_has_data(&context_only));
