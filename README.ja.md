@@ -1,5 +1,7 @@
 # agent-walker
 
+[![npm](https://img.shields.io/npm/v/agent-walker)](https://www.npmjs.com/package/agent-walker)
+[![downloads](https://img.shields.io/npm/dt/agent-walker)](https://tanstack.com/stats/npm?packageGroups=%5B%7B%22packages%22%3A%5B%7B%22name%22%3A%22agent-walker%22%7D%5D%7D%5D&range=30-days)
 [![CI](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml/badge.svg)](https://github.com/miiiiiiich/agent-walker/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#ライセンス)
 [![MSRV](https://img.shields.io/badge/rustc-1.93+-blue.svg)](https://www.rust-lang.org)
