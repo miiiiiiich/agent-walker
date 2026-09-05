@@ -1,4 +1,4 @@
-# agent-walker
+<p align="center"><img src="docs/emblem.png" width="160" alt="agent-walker"></p>
 
 [![npm](https://img.shields.io/npm/v/agent-walker)](https://www.npmjs.com/package/agent-walker)
 [![downloads](https://img.shields.io/npm/dt/agent-walker)](https://tanstack.com/stats/npm?packageGroups=%5B%7B%22packages%22%3A%5B%7B%22name%22%3A%22agent-walker%22%7D%5D%7D%5D&range=30-days)
