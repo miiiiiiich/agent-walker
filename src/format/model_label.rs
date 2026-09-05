@@ -101,7 +101,7 @@ fn short_model_name_raw(name: &str) -> String {
     } else if lower.contains("gemini") {
         "Gemini"
     } else if lower.contains("gpt") {
-        return name.replace("gpt-", "GPT ");
+        return gpt_label(name);
     } else if lower == "openai" || lower == "codex" {
         return "Codex".to_owned();
     } else {
@@ -112,11 +112,60 @@ fn short_model_name_raw(name: &str) -> String {
         return name.to_owned();
     }
 
-    for version in ["4-8", "4-7", "4-6", "4-5", "4-1", "5", "4"] {
-        if lower.contains(version) {
-            return format!("{family} {}", version.replace('-', "."));
+    match claude_version(&lower, family) {
+        Some(version) => format!("{family} {version}"),
+        None => family.to_owned(),
+    }
+}
+
+/// `claude-fable-5-1` → `5.1`, `claude-opus-5` → `5`, `claude-sonnet-4-5-20250929` → `4.5`.
+/// The version is the run of short numeric segments right after the family
+/// word; a long trailing segment (a date stamp) is not part of it.
+fn claude_version(lower: &str, family: &str) -> Option<String> {
+    let is_ver = |seg: &&str| seg.len() <= 2 && seg.chars().all(|c| c.is_ascii_digit());
+    let at = lower.find(&family.to_ascii_lowercase())?;
+    let after: Vec<&str> = lower[at + family.len()..]
+        .split('-')
+        .filter(|seg| !seg.is_empty())
+        .take_while(is_ver)
+        .take(2)
+        .collect();
+    if !after.is_empty() {
+        return Some(after.join("."));
+    }
+    // Older ids put the version before the family word: `claude-3-5-sonnet-20241022`.
+    let mut before: Vec<&str> = lower[..at]
+        .rsplit('-')
+        .filter(|seg| !seg.is_empty())
+        .take_while(is_ver)
+        .take(2)
+        .collect();
+    if before.is_empty() {
+        return None;
+    }
+    before.reverse();
+    Some(before.join("."))
+}
+
+/// `gpt-5.5` → `GPT 5.5`, `gpt-5.6-sol` → `GPT 5.6 Sol`, `gpt-6-astra` → `GPT 6 Astra`.
+fn gpt_label(name: &str) -> String {
+    let Some(rest) = name.strip_prefix("gpt-") else {
+        return name.to_owned();
+    };
+    let mut out = String::from("GPT");
+    for seg in rest.split('-').filter(|seg| !seg.is_empty()) {
+        out.push(' ');
+        if seg.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            out.push_str(seg);
+        } else {
+            // ASCII-only: a Unicode uppercase could turn a disallowed character into
+            // allowed ASCII (`ß` → `SS`) and slip past `sanitize_label`.
+            let mut chars = seg.chars();
+            if let Some(first) = chars.next() {
+                out.push(first.to_ascii_uppercase());
+                out.push_str(chars.as_str());
+            }
         }
     }
-
-    family.to_owned()
+    out
 }

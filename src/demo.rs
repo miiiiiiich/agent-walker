@@ -10,9 +10,11 @@ use time::{Duration, OffsetDateTime, Time, Weekday};
 
 use crate::analyzer::summarize;
 use crate::app::Config;
+#[cfg(test)]
+use crate::model::CreditSample;
 use crate::model::{
-    AppSummary, Collection, CreditSample, DurationEvent, EffortEvent, ModeEvent, Provider,
-    RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, Provider, RateLimitSample,
+    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 struct Rng(u64);
@@ -124,25 +126,32 @@ fn pick_project(rng: &mut Rng) -> String {
     PROJECTS[index].to_owned()
 }
 
-/// Claude model mix shifts over the period: an older Opus era hands over to
-/// the newer one, with Haiku doing background work throughout.
+/// Claude model mix shifts over the period: the Opus 4.x era hands over to
+/// the Claude 5 family (Fable 5 → Fable 5.1), with Sonnet on lighter turns and
+/// Haiku doing background work throughout.
 fn pick_claude_model(rng: &mut Rng, progress: f64) -> &'static str {
-    if rng.chance(6) {
+    if rng.chance(5) {
         return "claude-haiku-4-5";
     }
-    if progress > 0.85 && rng.chance(25) {
-        return "claude-fable-5";
+    if rng.chance(4) {
+        return "claude-sonnet-5";
     }
-    if progress < 0.45 {
-        if rng.chance(92) {
+    if progress < 0.35 {
+        if rng.chance(70) {
             "claude-opus-4-7"
         } else {
-            "claude-sonnet-4-6"
+            "claude-opus-5"
         }
-    } else if rng.chance(94) {
-        "claude-opus-4-8"
+    } else if progress < 0.7 {
+        if rng.chance(55) {
+            "claude-fable-5"
+        } else {
+            "claude-opus-5"
+        }
+    } else if rng.chance(75) {
+        "claude-fable-5-1"
     } else {
-        "claude-opus-4-7"
+        "claude-opus-5"
     }
 }
 
@@ -189,7 +198,8 @@ fn daily_volume(rng: &mut Rng, progress: f64, weekday: Weekday) -> u64 {
     if progress < 0.3 && rng.chance(55) {
         return 0;
     }
-    let ramp = 4_000_000.0 + 56_000_000.0 * progress * progress;
+    // Envelope tuned so the demo Claude tab lands in the S band and Codex (at 1/2) in the A band.
+    let ramp = 160_000_000.0 + 1_450_000_000.0 * progress * progress;
     let noise = rng.range(50, 160) as f64 / 100.0;
     let weekend = matches!(weekday, Weekday::Saturday | Weekday::Sunday);
     let weekend_factor = if weekend { 0.35 } else { 1.0 };
@@ -305,6 +315,22 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
     clippy::cast_precision_loss,
     reason = "Day indices are tiny; precision is irrelevant for fake data."
 )]
+/// Codex model mix: GPT-5.6 Sol for most of the period, GPT-6 Astra taking
+/// over toward the end.
+fn pick_codex_model(rng: &mut Rng, progress: f64) -> &'static str {
+    if progress > 0.75 && rng.chance(80) {
+        "gpt-6-astra"
+    } else if rng.chance(90) {
+        "gpt-5.6-sol"
+    } else {
+        "gpt-5.6-terra"
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Day indices are tiny; precision is irrelevant for fake data."
+)]
 fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection {
     let mut collection = Collection::new(Provider::Codex, PathBuf::from("demo data"));
     let total_days = i64::from(days.max(1));
@@ -312,8 +338,8 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
     for day_index in 0..total_days {
         let date = (now - Duration::days(total_days - 1 - day_index)).date();
         let progress = day_index as f64 / total_days as f64;
-        let volume = daily_volume(rng, progress, date.weekday()) / 4;
-        if volume == 0 || rng.chance(35) {
+        let volume = daily_volume(rng, progress, date.weekday()) / 10 * 7;
+        if volume == 0 || rng.chance(10) {
             continue;
         }
 
@@ -326,7 +352,7 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
         collection.usage_events.push(UsageEvent {
             timestamp: Some(timestamp),
             session_id: Some(session_id.clone()),
-            model: Some("gpt-5.5".to_owned()),
+            model: Some(pick_codex_model(rng, progress).to_owned()),
             source_kind: SourceKind::Main,
             attribution_agent: None,
             attribution_skill: None,
@@ -394,6 +420,7 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
 /// Copilot demo: session-exit token deltas plus the AI-credit ledger the
 /// CREDITS panel renders. Kept lighter than Claude/Codex — a secondary agent
 /// in the demo persona.
+#[cfg(test)]
 #[allow(
     clippy::cast_precision_loss,
     reason = "Day indices are tiny; precision is irrelevant for fake data."
@@ -472,8 +499,12 @@ fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collecti
     collection
 }
 
-/// Build a complete synthetic report through the real analyzer, so the demo
-/// exercises exactly the rendering paths real data does.
+#[cfg(test)]
+pub(crate) fn copilot_collection_for_tests(now: OffsetDateTime, days: u16) -> Collection {
+    let mut rng = Rng(0x5EED_CAFE_F00D_0002);
+    copilot_collection(now, days, &mut rng)
+}
+
 pub fn demo_report(config: &Config) -> AppSummary {
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
@@ -481,8 +512,6 @@ pub fn demo_report(config: &Config) -> AppSummary {
     let collections = vec![
         claude_collection(now, config.days, &mut rng),
         codex_collection(now, config.days, &mut rng),
-        copilot_collection(now, config.days, &mut rng),
-        Collection::new(Provider::Agy, PathBuf::from("demo data")),
     ];
 
     let providers = collections
