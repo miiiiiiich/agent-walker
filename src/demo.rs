@@ -11,7 +11,7 @@ use time::{Duration, OffsetDateTime, Time, Weekday};
 use crate::analyzer::summarize;
 use crate::app::Config;
 use crate::model::{
-    AppSummary, Collection, CreditSample, DurationEvent, EffortEvent, ModeEvent, Provider,
+    AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, Provider,
     RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
@@ -189,7 +189,8 @@ fn daily_volume(rng: &mut Rng, progress: f64, weekday: Weekday) -> u64 {
     if progress < 0.3 && rng.chance(55) {
         return 0;
     }
-    let ramp = 4_000_000.0 + 56_000_000.0 * progress * progress;
+    // Envelope tuned so the demo Claude tab lands in the S band and Codex (at 1/2) in the A band.
+    let ramp = 160_000_000.0 + 1_450_000_000.0 * progress * progress;
     let noise = rng.range(50, 160) as f64 / 100.0;
     let weekend = matches!(weekday, Weekday::Saturday | Weekday::Sunday);
     let weekend_factor = if weekend { 0.35 } else { 1.0 };
@@ -312,8 +313,8 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
     for day_index in 0..total_days {
         let date = (now - Duration::days(total_days - 1 - day_index)).date();
         let progress = day_index as f64 / total_days as f64;
-        let volume = daily_volume(rng, progress, date.weekday()) / 4;
-        if volume == 0 || rng.chance(35) {
+        let volume = daily_volume(rng, progress, date.weekday()) / 10 * 7;
+        if volume == 0 || rng.chance(10) {
             continue;
         }
 
@@ -398,82 +399,7 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
     clippy::cast_precision_loss,
     reason = "Day indices are tiny; precision is irrelevant for fake data."
 )]
-fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection {
-    let mut collection = Collection::new(Provider::Copilot, PathBuf::from("demo data"));
-    let total_days = i64::from(days.max(1));
 
-    for day_index in 0..total_days {
-        let date = (now - Duration::days(total_days - 1 - day_index)).date();
-        let progress = day_index as f64 / total_days as f64;
-        let volume = daily_volume(rng, progress, date.weekday()) / 12;
-        if volume == 0 || rng.chance(45) {
-            continue;
-        }
-
-        let session_id = format!("demo-copilot-{day_index}");
-        let hour = pick_hour(rng);
-        let time = Time::from_hms(hour, u8::try_from(rng.range(0, 60)).unwrap_or(0), 0)
-            .unwrap_or(Time::MIDNIGHT);
-        let timestamp = date.with_time(time).assume_offset(now.offset());
-
-        collection.usage_events.push(UsageEvent {
-            timestamp: Some(timestamp),
-            session_id: Some(session_id.clone()),
-            model: Some(
-                if rng.chance(60) {
-                    "gpt-5-mini"
-                } else {
-                    "claude-sonnet-4.6"
-                }
-                .to_owned(),
-            ),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: Some(pick_project(rng)),
-            usage: usage_block(rng, volume),
-            reported_cost_usd: None,
-        });
-        // Daily AI-credit spend in nano-AIU; a mid-period spike gives the
-        // CREDITS chart a visible peak.
-        let credits = if day_index == total_days * 2 / 3 {
-            rng.range(4_000, 6_000)
-        } else {
-            rng.range(50, 1_500)
-        };
-        collection.credit_samples.push(CreditSample {
-            timestamp,
-            nano_aiu: credits * 1_000_000,
-        });
-        collection.session_touches.push(SessionTouch {
-            timestamp,
-            session_id: session_id.clone(),
-        });
-        collection.session_touches.push(SessionTouch {
-            timestamp: timestamp
-                + Duration::minutes(i64::try_from(rng.range(10, 60)).unwrap_or(20)),
-            session_id: session_id.clone(),
-        });
-        let turns = rng.range(1, 3);
-        for _ in 0..turns {
-            collection.duration_events.push(DurationEvent {
-                timestamp: Some(timestamp),
-                session_id: Some(session_id.clone()),
-                duration_ms: turn_duration_ms(rng),
-                status: Some("turn".to_owned()),
-            });
-        }
-    }
-
-    collection.stats.files_seen = 18;
-    collection.stats.lines_seen = 4_112;
-    collection.stats.usage_events = collection.usage_events.len();
-    collection.stats.duration_events = collection.duration_events.len();
-    collection
-}
-
-/// Build a complete synthetic report through the real analyzer, so the demo
-/// exercises exactly the rendering paths real data does.
 pub fn demo_report(config: &Config) -> AppSummary {
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
@@ -481,8 +407,6 @@ pub fn demo_report(config: &Config) -> AppSummary {
     let collections = vec![
         claude_collection(now, config.days, &mut rng),
         codex_collection(now, config.days, &mut rng),
-        copilot_collection(now, config.days, &mut rng),
-        Collection::new(Provider::Agy, PathBuf::from("demo data")),
     ];
 
     let providers = collections
