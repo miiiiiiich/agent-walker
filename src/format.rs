@@ -190,6 +190,14 @@ mod tests {
         assert_eq!(short_model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
         assert_eq!(short_model_name("gpt-5.5"), "GPT 5.5");
         assert_eq!(short_model_name("custom-model"), "custom-model");
+        // Claude 5 family: the point version must survive, and a date stamp must not.
+        assert_eq!(short_model_name("claude-fable-5-1"), "Fable 5.1");
+        assert_eq!(short_model_name("claude-fable-5"), "Fable 5");
+        assert_eq!(short_model_name("claude-opus-5"), "Opus 5");
+        assert_eq!(short_model_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        // Codex model ids carry a codename suffix.
+        assert_eq!(short_model_name("gpt-5.6-sol"), "GPT 5.6 Sol");
+        assert_eq!(short_model_name("gpt-6-astra"), "GPT 6 Astra");
     }
 
     #[test]

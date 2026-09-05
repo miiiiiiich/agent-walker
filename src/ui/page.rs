@@ -422,6 +422,8 @@ mod tests {
     /// sections end-to-end: synthetic collections through the real analyzer
     /// through the real page renderer. Guards against demo fixtures that
     /// compile but never fire (e.g. a skill pick rate that rounds to zero).
+    /// The demo persona runs Claude and Codex only, so CREDITS (Copilot) is
+    /// covered by the fixture tests instead.
     #[test]
     fn demo_report_renders_v09_sections() {
         let config = crate::app::Config {
@@ -458,16 +460,6 @@ mod tests {
         assert!(codex_page.contains("LIMITS"));
         assert!(codex_page.contains("peak 100%"));
         assert!(codex_page.contains("xhigh"));
-
-        let copilot = report
-            .providers
-            .iter()
-            .find(|summary| summary.provider == Provider::Copilot)
-            .expect("demo should have a Copilot provider");
-        let copilot_page = rendered(copilot, 110);
-        assert!(copilot_page.contains("CREDITS"));
-        assert!(copilot_page.contains("30d total"));
-        assert!(copilot_page.contains("COMPLETION"));
 
         let total_page = rendered(&report.combined, 110);
         assert!(!total_page.contains("SKILLS"));
