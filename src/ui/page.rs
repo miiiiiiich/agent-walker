@@ -468,6 +468,20 @@ mod tests {
         assert!(!total_page.contains("CREDITS"));
     }
 
+    /// The demo persona runs Claude and Codex only, so CREDITS (Copilot) is
+    /// exercised here through its own synthetic collection — still the real
+    /// analyzer and the real page renderer.
+    #[test]
+    fn copilot_collection_renders_credits_end_to_end() {
+        let now = time::OffsetDateTime::now_utc();
+        let collection = crate::demo::copilot_collection_for_tests(now, 30);
+        let summary = crate::analyzer::summarize(&collection, now, 30, time::UtcOffset::UTC);
+        let page = rendered(&summary, 110);
+        assert!(page.contains("CREDITS"));
+        assert!(page.contains("30d total"));
+        assert!(page.contains("COMPLETION"));
+    }
+
     /// Right-column order: the "how you drive it" panels lead (CONTEXT next
     /// to MODELS, then MODES) and the bookkeeping panels close (COST, then
     /// SIGNAL).

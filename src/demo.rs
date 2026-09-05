@@ -10,6 +10,8 @@ use time::{Duration, OffsetDateTime, Time, Weekday};
 
 use crate::analyzer::summarize;
 use crate::app::Config;
+#[cfg(test)]
+use crate::model::CreditSample;
 use crate::model::{
     AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, Provider, RateLimitSample,
     SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
@@ -413,6 +415,94 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
     collection.stats.tool_events = collection.tool_events.len();
     collection.stats.duration_events = collection.duration_events.len();
     collection
+}
+
+/// Copilot demo: session-exit token deltas plus the AI-credit ledger the
+/// CREDITS panel renders. Kept lighter than Claude/Codex — a secondary agent
+/// in the demo persona.
+#[cfg(test)]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Day indices are tiny; precision is irrelevant for fake data."
+)]
+fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection {
+    let mut collection = Collection::new(Provider::Copilot, PathBuf::from("demo data"));
+    let total_days = i64::from(days.max(1));
+
+    for day_index in 0..total_days {
+        let date = (now - Duration::days(total_days - 1 - day_index)).date();
+        let progress = day_index as f64 / total_days as f64;
+        let volume = daily_volume(rng, progress, date.weekday()) / 12;
+        if volume == 0 || rng.chance(45) {
+            continue;
+        }
+
+        let session_id = format!("demo-copilot-{day_index}");
+        let hour = pick_hour(rng);
+        let time = Time::from_hms(hour, u8::try_from(rng.range(0, 60)).unwrap_or(0), 0)
+            .unwrap_or(Time::MIDNIGHT);
+        let timestamp = date.with_time(time).assume_offset(now.offset());
+
+        collection.usage_events.push(UsageEvent {
+            timestamp: Some(timestamp),
+            session_id: Some(session_id.clone()),
+            model: Some(
+                if rng.chance(60) {
+                    "gpt-5-mini"
+                } else {
+                    "claude-sonnet-4.6"
+                }
+                .to_owned(),
+            ),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: None,
+            project: Some(pick_project(rng)),
+            usage: usage_block(rng, volume),
+            reported_cost_usd: None,
+        });
+        // Daily AI-credit spend in nano-AIU; a mid-period spike gives the
+        // CREDITS chart a visible peak.
+        let credits = if day_index == total_days * 2 / 3 {
+            rng.range(4_000, 6_000)
+        } else {
+            rng.range(50, 1_500)
+        };
+        collection.credit_samples.push(CreditSample {
+            timestamp,
+            nano_aiu: credits * 1_000_000,
+        });
+        collection.session_touches.push(SessionTouch {
+            timestamp,
+            session_id: session_id.clone(),
+        });
+        collection.session_touches.push(SessionTouch {
+            timestamp: timestamp
+                + Duration::minutes(i64::try_from(rng.range(10, 60)).unwrap_or(20)),
+            session_id: session_id.clone(),
+        });
+        let turns = rng.range(1, 3);
+        for _ in 0..turns {
+            collection.duration_events.push(DurationEvent {
+                timestamp: Some(timestamp),
+                session_id: Some(session_id.clone()),
+                duration_ms: turn_duration_ms(rng),
+                status: Some("turn".to_owned()),
+            });
+        }
+    }
+
+    collection.stats.files_seen = 18;
+    collection.stats.lines_seen = 4_112;
+    collection.stats.usage_events = collection.usage_events.len();
+    collection.stats.duration_events = collection.duration_events.len();
+    collection
+}
+
+#[cfg(test)]
+pub(crate) fn copilot_collection_for_tests(now: OffsetDateTime, days: u16) -> Collection {
+    let mut rng = Rng(0x5EED_CAFE_F00D_0002);
+    copilot_collection(now, days, &mut rng)
 }
 
 pub fn demo_report(config: &Config) -> AppSummary {

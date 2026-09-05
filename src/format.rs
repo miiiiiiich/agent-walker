@@ -198,6 +198,9 @@ mod tests {
         // Codex model ids carry a codename suffix.
         assert_eq!(short_model_name("gpt-5.6-sol"), "GPT 5.6 Sol");
         assert_eq!(short_model_name("gpt-6-astra"), "GPT 6 Astra");
+        // Older ids carry the version before the family word.
+        assert_eq!(short_model_name("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
+        assert_eq!(short_model_name("claude-opus-4-1-20250805"), "Opus 4.1");
     }
 
     #[test]
@@ -211,6 +214,9 @@ mod tests {
         );
         // The gpt-prefixed passthrough is judged the same way.
         assert_eq!(short_model_name("gpt-/etc/passwd"), "Other");
+        // Capitalising a suffix must not launder a non-ASCII character into
+        // allowed ASCII (`ß` → `SS`) before the sanitizer sees it.
+        assert_eq!(short_model_name("gpt-ßsecret"), "Other");
         // Non-ASCII / control-only names collapse rather than yielding an empty
         // chip.
         assert_eq!(short_model_name("名前/\t"), "Other");
