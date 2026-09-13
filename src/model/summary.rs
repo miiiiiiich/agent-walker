@@ -181,11 +181,24 @@ pub struct ActiveTimeSummary {
     /// Working time per local day (turn end date), ascending by date, only
     /// days with any. Feeds the peak-day row and, later, a daily chart.
     pub daily_active_ms: Vec<(Date, u64)>,
+    /// Of the turns that can tell model time from tool time: the model's
+    /// share, and the working time those turns cover (the denominator).
+    pub model_ms: u64,
+    pub measured_ms: u64,
 }
 
 impl ActiveTimeSummary {
     pub fn active_per_day_ms(&self) -> u64 {
         self.active_ms / u64::from(self.window_days.max(1))
+    }
+
+    /// What the working time is made of: the model's share (thinking and
+    /// writing) of the turns that can tell; the rest was tools running.
+    /// `None` when no turn could tell.
+    #[allow(clippy::cast_precision_loss, reason = "Display-only share.")]
+    pub fn model_share(&self) -> Option<f64> {
+        (self.measured_ms > 0)
+            .then(|| self.model_ms.min(self.measured_ms) as f64 / self.measured_ms as f64)
     }
 
     /// The day the agent worked longest.
@@ -249,6 +262,8 @@ impl ActiveTimeSummary {
             acc.human_wait_ms = acc.human_wait_ms.saturating_add(part.human_wait_ms);
             acc.context_tokens = acc.context_tokens.saturating_add(part.context_tokens);
             acc.pace_gaps_ms.extend_from_slice(&part.pace_gaps_ms);
+            acc.model_ms = acc.model_ms.saturating_add(part.model_ms);
+            acc.measured_ms = acc.measured_ms.saturating_add(part.measured_ms);
             for (date, active_ms) in &part.daily_active_ms {
                 match acc.daily_active_ms.iter_mut().find(|(d, _)| d == date) {
                     Some((_, total)) => *total = total.saturating_add(*active_ms),
@@ -298,6 +313,8 @@ mod active_time_tests {
             window_days: 30,
             pace_gaps_ms: vec![5_000, 45_000, 120_000],
             daily_active_ms: vec![(time::macros::date!(2026 - 09 - 01), 600_000)],
+            model_ms: 330_000,
+            measured_ms: 600_000,
         };
         let token_only = ActiveTimeSummary {
             context_tokens: 9_000_000,
@@ -346,6 +363,13 @@ mod active_time_tests {
         assert_eq!(summary.pace_mean_ms(), Some(5_500));
         assert!(ActiveTimeSummary::default().pace_percentiles().is_none());
         assert!(ActiveTimeSummary::default().pace_mean_ms().is_none());
+        assert!(ActiveTimeSummary::default().model_share().is_none());
+        let half = ActiveTimeSummary {
+            model_ms: 30_000,
+            measured_ms: 60_000,
+            ..ActiveTimeSummary::default()
+        };
+        assert!((half.model_share().unwrap_or(0.0) - 0.5).abs() < f64::EPSILON);
     }
 }
 

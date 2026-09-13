@@ -10,7 +10,9 @@ use ratatui::prelude::*;
 /// round-trips come out. Context per minute is the density that tracks
 /// cost: a long context dragged through many calls reads high here. Your
 /// pace is the other side: how long you take between the agent stopping
-/// and your next prompt.
+/// and your next prompt. "made of" splits the working time into the
+/// model's own share and tools running, so the headline hours read
+/// honestly — a long batch wait is time the agent spent asleep.
 /// Hours and minutes, never days: 30 days of working time reads as "87h
 /// 12m", which compares across tabs and months the way "3d 15h" doesn't.
 fn format_hours(duration_ms: u64) -> String {
@@ -77,6 +79,24 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
                 "  read per working minute",
                 Style::default().fg(theme::MUTED),
             ),
+        ]));
+    }
+    if let Some(model) = time.model_share() {
+        let pct = |share: f64| format!("{:.0}%", share * 100.0);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<label_width$}", "made of"),
+                Style::default().fg(theme::MUTED),
+            ),
+            Span::styled("model ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                pct(model),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · tools ", Style::default().fg(theme::MUTED)),
+            Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
         ]));
     }
     if let Some((date, active_ms)) = time.peak_day() {
@@ -164,14 +184,18 @@ mod tests {
         assert!(text[2].contains("6h 40m"), "{text:?}");
         assert!(text[3].contains("/min"), "{text:?}");
         assert!(
-            text[4].contains("peak day") && text[4].contains("Sep 3"),
+            text[4].contains("made of") && text[4].contains("model 55%"),
             "{text:?}"
         );
         assert!(
-            text[5].contains("your pace")
-                && text[5].contains("p50")
-                && text[5].contains("p90")
-                && text[5].contains("avg"),
+            text[5].contains("peak day") && text[5].contains("Sep 3"),
+            "{text:?}"
+        );
+        assert!(
+            text[6].contains("your pace")
+                && text[6].contains("p50")
+                && text[6].contains("p90")
+                && text[6].contains("avg"),
             "{text:?}"
         );
 

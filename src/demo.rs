@@ -280,11 +280,13 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
 
                 let turns = rng.range(2, 7);
                 for _ in 0..turns {
+                    let duration_ms = turn_duration_ms(rng);
                     collection.duration_events.push(DurationEvent {
                         timestamp: Some(timestamp),
                         session_id: Some(session_id.clone()),
-                        duration_ms: turn_duration_ms(rng),
+                        duration_ms,
                         human_wait_ms: 0,
+                        model_ms: Some(duration_ms * 11 / 20),
                         status: Some("turn".to_owned()),
                     });
                     collection.pace_events.push(PaceEvent {
@@ -405,11 +407,13 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
 
         let tasks = rng.range(1, 4);
         for _ in 0..tasks {
+            let duration_ms = turn_duration_ms(rng);
             collection.duration_events.push(DurationEvent {
                 timestamp: Some(timestamp),
                 session_id: Some(session_id.clone()),
-                duration_ms: turn_duration_ms(rng),
+                duration_ms,
                 human_wait_ms: 0,
+                model_ms: Some(duration_ms * 11 / 20),
                 status: Some("task_complete".to_owned()),
             });
         }
@@ -489,11 +493,13 @@ fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collecti
         });
         let turns = rng.range(1, 3);
         for _ in 0..turns {
+            let duration_ms = turn_duration_ms(rng);
             collection.duration_events.push(DurationEvent {
                 timestamp: Some(timestamp),
                 session_id: Some(session_id.clone()),
-                duration_ms: turn_duration_ms(rng),
+                duration_ms,
                 human_wait_ms: 0,
+                model_ms: Some(duration_ms * 11 / 20),
                 status: Some("turn".to_owned()),
             });
         }

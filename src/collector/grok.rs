@@ -376,6 +376,8 @@ fn collect_turn_usage(
                 session_id: session_id.cloned(),
                 duration_ms,
                 human_wait_ms: 0,
+                // apiDurationMs is API time end to end: all model.
+                model_ms: Some(duration_ms),
                 status: Some("turn".to_owned()),
             },
         });

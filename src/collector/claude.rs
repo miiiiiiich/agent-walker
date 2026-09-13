@@ -186,6 +186,17 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                     } else if turn.charge_answer(&value, timestamp) {
                         turn.last_activity = Some(previous.max(timestamp));
                     } else {
+                        // An assistant row while a question is still open
+                        // (a replay, or a parallel tool call answered first)
+                        // is inside the human's wait, not the model's time.
+                        if value.get("type").and_then(Value::as_str) == Some("assistant")
+                            && timestamp > previous
+                            && turn.pending_questions.is_empty()
+                        {
+                            let gap = u64::try_from((timestamp - previous).whole_milliseconds())
+                                .unwrap_or(0);
+                            turn.model_ms = turn.model_ms.saturating_add(gap);
+                        }
                         turn.note_questions(&value, timestamp, &mut seen_questions);
                         turn.last_activity = Some(previous.max(timestamp));
                     }
@@ -258,6 +269,9 @@ struct TurnState {
     key: Option<String>,
     last_activity: Option<OffsetDateTime>,
     human_wait_ms: u64,
+    /// Time the model was thinking / writing: the gaps that end in an
+    /// assistant row (the rest of a turn is tools running).
+    model_ms: u64,
     /// Pending question tool-call ids and when they were asked.
     pending_questions: HashMap<String, OffsetDateTime>,
     /// End of the last charged wait, so overlapping questions answered in
@@ -389,6 +403,7 @@ impl TurnState {
                 session_id: None,
                 duration_ms,
                 human_wait_ms: self.waited_until(end).min(duration_ms),
+                model_ms: Some(self.model_ms.min(duration_ms)),
                 status: Some("turn".to_owned()),
             },
         });
@@ -1248,6 +1263,78 @@ mod tests {
         let turn = &collection.duration_events[0];
         assert_eq!(turn.duration_ms, 12 * 60_000);
         assert_eq!(turn.human_wait_ms, 10 * 60_000);
+    }
+
+    /// The gaps that end in an assistant row are the model working; the
+    /// gap from a tool call to its result is the tool running.
+    #[test]
+    fn model_time_is_the_gaps_ending_in_assistant_rows() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"run it"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:08:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        // 5 min turn: 1 + 1 min model, 3 min Bash.
+        assert_eq!(turn.duration_ms, 5 * 60_000);
+        assert_eq!(turn.model_ms, Some(2 * 60_000));
+    }
+
+    /// Model time never overlaps a human wait: an assistant row that lands
+    /// while a question is still open adds nothing, so model + tools +
+    /// waiting stays a partition of the turn.
+    #[test]
+    fn model_time_excludes_gaps_inside_a_human_wait() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}},{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:03:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q2","content":"B"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"r3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:08:00Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:10:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        // 8 min turn: waiting 00:01→00:03 + 00:03→00:06 = 5, model 00:00→00:01
+        // + 00:07→00:08 = 2 (the 00:03→00:04 assistant row sits inside the
+        // q2 wait), tools = the remaining 1.
+        assert_eq!(turn.duration_ms, 8 * 60_000);
+        assert_eq!(turn.human_wait_ms, 5 * 60_000);
+        assert_eq!(turn.model_ms, Some(2 * 60_000));
     }
 
     /// The gap from a turn's last activity to the next prompt is the

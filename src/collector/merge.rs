@@ -278,6 +278,7 @@ mod tests {
                 session_id: None,
                 duration_ms,
                 human_wait_ms: 0,
+                model_ms: None,
                 status: Some("turn".to_owned()),
             },
         }

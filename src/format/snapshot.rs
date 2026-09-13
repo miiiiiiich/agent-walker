@@ -218,8 +218,11 @@ fn active_time_line(summary: &Summary) -> Option<String> {
         || "-".to_owned(),
         |(date, active_ms)| format!("{}@{}", format_duration_ms(active_ms), format_date(date)),
     );
+    let model = time
+        .model_share()
+        .map_or_else(|| "-".to_owned(), |share| format!("{:.0}%", share * 100.0));
     Some(format!(
-        "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90/avg:{pace} peak_day:{peak}",
+        "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90/avg:{pace} peak_day:{peak} model_share:{model}",
         format_duration_ms(time.active_ms),
         format_duration_ms(time.human_wait_ms),
         time.turns,

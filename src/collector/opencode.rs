@@ -248,6 +248,7 @@ fn parse_messages(
                 // created) falls to 0 rather than a garbage duration.
                 duration_ms: u64::try_from(completed_ms.saturating_sub(created_ms)).unwrap_or(0),
                 human_wait_ms: 0,
+                model_ms: None,
                 status: value
                     .get("finish")
                     .and_then(Value::as_str)

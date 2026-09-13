@@ -365,6 +365,7 @@ fn collect_turn_duration(
                 session_id: session_id.cloned(),
                 duration_ms: u64::try_from((end - start).whole_milliseconds()).unwrap_or(0),
                 human_wait_ms: 0,
+                model_ms: None,
                 status: Some("turn".to_owned()),
             },
         });
