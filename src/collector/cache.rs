@@ -45,9 +45,11 @@ use super::events::FileEvents;
 ///   answer time inside a turn) and `FileEvents` gained `pace_events` (the
 ///   gap before each prompt), changing the bincode layout; Claude turns are
 ///   now stamped at their end and keyed by prompt uuid for fork dedup.
+/// - 19: `DurationEvent` gained `model_ms` (the model's own share of a
+///   turn vs tool runs), changing its bincode layout.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 18;
+const CACHE_VERSION: u32 = 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

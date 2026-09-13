@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -74,11 +75,16 @@ pub fn collect(
     collection
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One pass over the rollout feeding every collector; splitting adds indirection without logic."
+)]
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let mut current_session_id = fallback_session_id(path);
     let mut pace_state = PaceState::default();
+    let mut turn_items = TurnItems::default();
     let mut current_model = None;
     let mut current_project = None;
     let mut session_meta_count = 0usize;
@@ -164,7 +170,14 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             line_index,
             &mut events,
         );
-        collect_duration_event(&value, timestamp, current_session_id.as_ref(), &mut events);
+        turn_items.note(&value, timestamp);
+        collect_duration_event(
+            &value,
+            timestamp,
+            current_session_id.as_ref(),
+            &mut turn_items,
+            &mut events,
+        );
         collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
         collect_pace_event(
             &value,
@@ -445,10 +458,129 @@ fn collect_pace_event(
     }
 }
 
+/// The turn's `item_completed` stamps (0.14x+): which items ran on the
+/// model's behalf (everything but reasoning, messages and compaction) and
+/// whether any item carried timing at all. Items dedupe by id — file-
+/// wide, so a replay of an earlier turn's item never lands in a later turn
+/// — and tool spans are unioned (parallel tools), so the turn minus the
+/// tool time is the model's own time. The per-turn part resets only when
+/// a turn ends (`task_complete` / `turn_aborted`) or a new one starts
+/// (`task_started`) — a steering `user_message` mid-turn must not drop
+/// what ran before it.
+#[derive(Default)]
+struct TurnItems {
+    seen: HashSet<String>,
+    tool_spans: Vec<(u64, u64)>,
+    timed: bool,
+    /// Newest lifecycle row (`task_started` / `turn_aborted` /
+    /// `task_complete`) seen: a replayed older one must not reset the turn.
+    newest_lifecycle: Option<OffsetDateTime>,
+}
+
+impl TurnItems {
+    /// Forget this turn's spans; keep the file-wide replay memory.
+    fn end_turn(&mut self) {
+        self.tool_spans.clear();
+        self.timed = false;
+    }
+
+    /// Whether a lifecycle row is the newest seen (and record it). Undated
+    /// rows are taken as current.
+    fn lifecycle_is_current(&mut self, timestamp: Option<OffsetDateTime>) -> bool {
+        let Some(at) = timestamp else {
+            return true;
+        };
+        if self.newest_lifecycle.is_some_and(|newest| at <= newest) {
+            return false;
+        }
+        self.newest_lifecycle = Some(at);
+        true
+    }
+
+    fn note(&mut self, value: &Value, timestamp: Option<OffsetDateTime>) {
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            return;
+        }
+        match string_path(value, &["payload", "type"]).as_deref() {
+            Some("task_started" | "turn_aborted") if self.lifecycle_is_current(timestamp) => {
+                self.end_turn();
+            }
+            Some("item_completed") => {
+                // An item row older than the newest lifecycle row is a
+                // replay leaking into the current turn (its own lifecycle
+                // rows were rejected; a skipped fork burst never taught
+                // `seen` its ids) — it belongs to no turn we are building.
+                if timestamp
+                    .zip(self.newest_lifecycle)
+                    .is_some_and(|(at, newest)| at < newest)
+                {
+                    return;
+                }
+                let (Some(started), Some(completed)) = (
+                    u64_path(value, &["payload", "started_at_ms"]),
+                    u64_path(value, &["payload", "completed_at_ms"]),
+                ) else {
+                    return;
+                };
+                let fresh = string_path(value, &["payload", "item", "id"])
+                    .is_none_or(|id| self.seen.insert(id));
+                if !fresh {
+                    return;
+                }
+                self.timed = true;
+                // The model's own items are the reasoning, its messages and
+                // context compaction; every other timed item — commands,
+                // MCP, sub-agents, web search, image tools, sleeps, whatever
+                // a newer CLI adds — is something running on its behalf.
+                let is_model = matches!(
+                    string_path(value, &["payload", "item", "type"]).as_deref(),
+                    Some("Reasoning" | "AgentMessage" | "ContextCompaction" | "UserMessage")
+                );
+                if !is_model && completed > started {
+                    self.tool_spans.push((started, completed));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Union length of the tool spans — parallel tools count once.
+    fn tool_ms(&self) -> u64 {
+        let mut spans = self.tool_spans.clone();
+        spans.sort_unstable();
+        let mut total = 0_u64;
+        let mut current: Option<(u64, u64)> = None;
+        for (start, end) in spans {
+            match current {
+                Some((cur_start, cur_end)) if start <= cur_end => {
+                    current = Some((cur_start, cur_end.max(end)));
+                }
+                Some((cur_start, cur_end)) => {
+                    total = total.saturating_add(cur_end - cur_start);
+                    current = Some((start, end));
+                }
+                None => current = Some((start, end)),
+            }
+        }
+        if let Some((cur_start, cur_end)) = current {
+            total = total.saturating_add(cur_end - cur_start);
+        }
+        total
+    }
+
+    /// The model's share of a `duration_ms` turn; `None` when no item
+    /// carried timing (older CLI), rather than pretending zero tool time.
+    fn model_ms(&self, duration_ms: u64) -> Option<u64> {
+        self.timed
+            .then(|| duration_ms.saturating_sub(self.tool_ms()))
+    }
+}
+
 fn collect_duration_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
+    turn_items: &mut TurnItems,
     events: &mut FileEvents,
 ) {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
@@ -458,6 +590,14 @@ fn collect_duration_event(
     if status.as_deref() != Some("task_complete") {
         return;
     }
+    // A replayed older completion must not close the current turn.
+    if !turn_items.lifecycle_is_current(timestamp) {
+        return;
+    }
+    // The turn is over either way: a completion without a duration must
+    // still close its items, or the next turn inherits them.
+    let model_ms = u64_path(value, &["payload", "duration_ms"]).map(|d| turn_items.model_ms(d));
+    turn_items.end_turn();
     let Some(duration_ms) = u64_path(value, &["payload", "duration_ms"]) else {
         return;
     };
@@ -468,6 +608,7 @@ fn collect_duration_event(
             session_id: session_id.cloned(),
             duration_ms,
             human_wait_ms: 0,
+            model_ms: model_ms.flatten(),
             status,
         },
     });
@@ -775,6 +916,64 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// The turn minus its tool-run items is the model's time: replayed
+    /// items count once, parallel tools union, a steering `user_message`
+    /// mid-turn keeps what ran before it, and a turn with no timed item at
+    /// all reports `None` rather than "all model".
+    #[test]
+    fn model_time_is_the_turn_minus_the_union_of_tool_items() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cmd = r#"{"timestamp":"2026-06-01T00:00:15Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":5000,"completed_at_ms":15000,"item":{"id":"i2","type":"CommandExecution"}}}"#;
+        fs::write(
+            temp.path().join("rollout.jsonl"),
+            [
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/tmp/p","cli_version":"0.149.0"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":1000,"completed_at_ms":4000,"item":{"id":"i1","type":"Reasoning"}}}"#,
+                cmd,
+                cmd,
+                r#"{"timestamp":"2026-06-01T00:00:16Z","type":"event_msg","payload":{"type":"user_message","message":"steer"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:18Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":10000,"completed_at_ms":18000,"item":{"id":"i3","type":"McpToolCall"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:20Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":18000,"completed_at_ms":19000,"item":{"id":"i4","type":"AgentMessage"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:21Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":20000}}"#,
+                r#"{"timestamp":"2026-06-01T00:01:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-06-01T00:01:05Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":5000}}"#,
+                r#"{"timestamp":"2026-06-01T00:02:00Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":120000,"completed_at_ms":123000,"item":{"id":"i5","type":"CommandExecution"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:02:04Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+                cmd,
+                r#"{"timestamp":"2026-06-01T00:03:00Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":170000,"completed_at_ms":172000,"item":{"id":"i6","type":"Reasoning"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:03:02Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":172000,"completed_at_ms":174000,"item":{"id":"i7","type":"WebSearch"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":6000,"completed_at_ms":9000,"item":{"id":"leak","type":"CommandExecution"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:03:05Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":9000}}"#,
+                r#"{"timestamp":"2026-06-01T00:04:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                cmd,
+                r#"{"timestamp":"2026-06-01T00:04:05Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":3000}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 4);
+        // 20s turn: tools = [5s,15s] ∪ [10s,18s] = 13s (the replayed command
+        // counts once, the overlap once, the steering message drops
+        // nothing) → 7s model.
+        assert_eq!(collection.duration_events[0].model_ms, Some(7_000));
+        // No timed items → the split is unknown, not 100% model.
+        assert_eq!(collection.duration_events[1].model_ms, None);
+        // The duration-less completion closed i5, the replay of the first
+        // turn's command is remembered file-wide, a replayed older
+        // task_started does not reset i7 (a web search — a tool by
+        // inversion, not by allowlist), and an old item row leaking in after
+        // it is rejected by its timestamp: 9s minus the 2s search.
+        assert_eq!(collection.duration_events[2].model_ms, Some(7_000));
+        // A turn whose only item is a replay is unmeasured, not all-model.
+        assert_eq!(collection.duration_events[3].model_ms, None);
+    }
 
     /// `task_complete` → the next `user_message` under 30 minutes is the
     /// human's pace; a prompt an hour later is not.

@@ -35,6 +35,12 @@ pub(super) fn active_time_summary(
         summary.turns += 1;
         summary.active_ms = summary.active_ms.saturating_add(event.active_ms());
         summary.human_wait_ms = summary.human_wait_ms.saturating_add(event.human_wait_ms);
+        if let Some(model_ms) = event.model_ms {
+            summary.model_ms = summary
+                .model_ms
+                .saturating_add(model_ms.min(event.active_ms()));
+            summary.measured_ms = summary.measured_ms.saturating_add(event.active_ms());
+        }
         let day = daily.entry(date).or_default();
         *day = day.saturating_add(event.active_ms());
     }

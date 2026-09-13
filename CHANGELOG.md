@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn lengths minus the time you spent answering `AskUserQuestion`. Also
   context read per working minute, the peak day, and your pace (p50 / p90 /
   average gap before your next prompt; gaps over 30 minutes are left out).
+- WORKING TIME shows what the hours are made of: the model's own share
+  (thinking and writing) versus tools running. A long batch wait is time
+  the agent spent asleep, and now reads that way. Claude and Codex can
+  tell; Copilot, OpenCode and Grok logs can't.
 - `--snapshot` gains an `active_time_30d` record.
 
 ### Changed
@@ -24,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SIGNAL.
 - Claude turns copied into a fork child no longer count twice, and are
   dated by when they ended (as Codex and Copilot turns already were).
-- Parse cache format bumped (v18); the first run after upgrading rescans.
+- Parse cache format bumped (v19); the first run after upgrading rescans.
 
 ### Fixed
 

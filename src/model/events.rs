@@ -58,6 +58,12 @@ pub struct DurationEvent {
     /// so never split the turn. Subtracted wherever the turn length stands
     /// for "the agent was working"; 0 for providers without the notion.
     pub human_wait_ms: u64,
+    /// Milliseconds of the turn the model itself was working (thinking and
+    /// writing) as opposed to a tool running — Claude: the gaps that end
+    /// in an assistant row; Codex: the turn minus its tool-run items.
+    /// `None` where the log can't tell (Copilot, OpenCode, Grok — whose
+    /// `apiDurationMs` excludes tools and logs no tool spans).
+    pub model_ms: Option<u64>,
     pub status: Option<String>,
 }
 

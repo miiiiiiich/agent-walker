@@ -120,6 +120,9 @@ fn sample_active_time() -> crate::model::ActiveTimeSummary {
             (time::macros::date!(2026 - 09 - 03), 34_560_000),
             (time::macros::date!(2026 - 09 - 04), 10_800_000),
         ],
+        // 80h of the 87h can tell model from tools; 55% of that is model.
+        model_ms: 158_400_000,
+        measured_ms: 288_000_000,
     }
 }
 
