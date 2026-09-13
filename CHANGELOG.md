@@ -5,25 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.16.0] - 2026-09-14
 
 ### Added
 
-- WORKING TIME: how long the agent actually worked over the last 30 days —
-  turn lengths minus the time you spent answering `AskUserQuestion`. Also
-  context read per working minute, the peak day, and your pace (p50 / p90 /
-  average gap before your next prompt; gaps over 30 minutes are left out).
-- WORKING TIME shows what the hours are made of: the model's own share
-  (thinking and writing) versus tools running. A long batch wait is time
-  the agent spent asleep, and now reads that way. Claude and Codex can
-  tell; Copilot, OpenCode and Grok logs can't.
+- WORKING TIME: how many hours the agent actually worked over the last 30
+  days. Turn lengths minus the time you spent answering `AskUserQuestion`,
+  plus context read per working minute, the peak day, and your pace (p50 /
+  p90 / average gap before your next prompt; gaps over 30 minutes are left
+  out).
+- WORKING TIME also says what the hours are made of, model vs tools. A
+  long batch wait is time the agent spent asleep, and now reads that way.
+  Claude and Codex can tell; Copilot, OpenCode and Grok logs can't.
 - `--snapshot` gains an `active_time_30d` record.
 
 ### Changed
 
-- COMPLETION is renamed TURN LENGTH; its numbers no longer include the
+- COMPLETION is renamed TURN LENGTH. Its numbers no longer include the
   time you spent answering a question mid-turn.
-- Sections reorder below the charts: MODELS | PARALLEL AGENTS, TURN LENGTH
+- Sections reorder below the charts. MODELS | PARALLEL AGENTS, TURN LENGTH
   | WORKING TIME, SKILLS | CONTEXT, then MODES, PROJECTS, TOOLS, COST,
   SIGNAL.
 - Claude turns copied into a fork child no longer count twice, and are
@@ -434,6 +434,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.16.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.2...v0.14.0
 [0.13.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.13.1...v0.13.2
