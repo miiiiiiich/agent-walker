@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   average gap before your next prompt; gaps over 30 minutes are left out).
 - WORKING TIME shows what the hours are made of: the model's own share
   (thinking and writing) versus tools running. A long batch wait is time
-  the agent spent asleep, and now reads that way. Claude, Codex and Grok
-  can tell; Copilot and OpenCode logs can't.
+  the agent spent asleep, and now reads that way. Claude and Codex can
+  tell; Copilot, OpenCode and Grok logs can't.
 - `--snapshot` gains an `active_time_30d` record.
 
 ### Changed

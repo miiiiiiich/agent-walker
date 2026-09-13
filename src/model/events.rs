@@ -60,9 +60,9 @@ pub struct DurationEvent {
     pub human_wait_ms: u64,
     /// Milliseconds of the turn the model itself was working (thinking and
     /// writing) as opposed to a tool running — Claude: the gaps that end
-    /// in an assistant row; Codex: the turn minus its command / MCP /
-    /// sub-agent items; Grok: the whole API duration. `None` where the log
-    /// can't tell (Copilot, OpenCode).
+    /// in an assistant row; Codex: the turn minus its tool-run items.
+    /// `None` where the log can't tell (Copilot, OpenCode, Grok — whose
+    /// `apiDurationMs` excludes tools and logs no tool spans).
     pub model_ms: Option<u64>,
     pub status: Option<String>,
 }
