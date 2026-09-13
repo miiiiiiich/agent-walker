@@ -81,24 +81,7 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
             ),
         ]));
     }
-    if let Some(model) = time.model_share() {
-        let pct = |share: f64| format!("{:.0}%", share * 100.0);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<label_width$}", "made of"),
-                Style::default().fg(theme::MUTED),
-            ),
-            Span::styled("model ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                pct(model),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" · tools ", Style::default().fg(theme::MUTED)),
-            Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
-        ]));
-    }
+    lines.extend(made_of_line(time, label_width));
     if let Some((date, active_ms)) = time.peak_day() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -120,6 +103,40 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     lines.extend(pace_line(time, label_width));
     lines.push(utils::kv("turns", &format_count(time.turns), label_width));
     lines
+}
+
+/// What the working time is made of: the model's share vs tools running,
+/// qualified with the measured hours when some provider can't tell.
+fn made_of_line(
+    time: &crate::model::ActiveTimeSummary,
+    label_width: usize,
+) -> Option<Line<'static>> {
+    let model = time.model_share()?;
+    let pct = |share: f64| format!("{:.0}%", share * 100.0);
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<label_width$}", "made of"),
+            Style::default().fg(theme::MUTED),
+        ),
+        Span::styled("model ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            pct(model),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · tools ", Style::default().fg(theme::MUTED)),
+        Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
+    ];
+    // Providers whose logs can't tell (Copilot, OpenCode) are outside
+    // the split; say how much of the total it actually covers.
+    if time.measured_ms < time.active_ms {
+        spans.push(Span::styled(
+            format!("  of {} measured", format_hours(time.measured_ms)),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    Some(Line::from(spans))
 }
 
 /// Your pace as one row: p50 / p90 / average gap before a prompt.
@@ -184,9 +201,16 @@ mod tests {
         assert!(text[2].contains("6h 40m"), "{text:?}");
         assert!(text[3].contains("/min"), "{text:?}");
         assert!(
-            text[4].contains("made of") && text[4].contains("model 55%"),
+            text[4].contains("made of")
+                && text[4].contains("model 55%")
+                && text[4].contains("of 80h 00m measured"),
             "{text:?}"
         );
+        let mut full = crate::share::fixtures::sample_summary();
+        if let Some(time) = full.active_time.as_mut() {
+            time.measured_ms = time.active_ms;
+        }
+        assert!(!rendered(&time_lines(&full, 60)[4]).contains("measured"));
         assert!(
             text[5].contains("peak day") && text[5].contains("Sep 3"),
             "{text:?}"

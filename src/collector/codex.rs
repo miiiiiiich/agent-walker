@@ -458,9 +458,9 @@ fn collect_pace_event(
     }
 }
 
-/// The turn's `item_completed` stamps (0.14x+): which items were tool
-/// runs — commands, MCP calls, sub-agent waits, extensions, file changes —
-/// and whether any item carried timing at all. Items dedupe by id — file-
+/// The turn's `item_completed` stamps (0.14x+): which items ran on the
+/// model's behalf (everything but reasoning, messages and compaction) and
+/// whether any item carried timing at all. Items dedupe by id — file-
 /// wide, so a replay of an earlier turn's item never lands in a later turn
 /// — and tool spans are unioned (parallel tools), so the turn minus the
 /// tool time is the model's own time. The per-turn part resets only when
@@ -506,6 +506,16 @@ impl TurnItems {
                 self.end_turn();
             }
             Some("item_completed") => {
+                // An item row older than the newest lifecycle row is a
+                // replay leaking into the current turn (its own lifecycle
+                // rows were rejected; a skipped fork burst never taught
+                // `seen` its ids) — it belongs to no turn we are building.
+                if timestamp
+                    .zip(self.newest_lifecycle)
+                    .is_some_and(|(at, newest)| at < newest)
+                {
+                    return;
+                }
                 let (Some(started), Some(completed)) = (
                     u64_path(value, &["payload", "started_at_ms"]),
                     u64_path(value, &["payload", "completed_at_ms"]),
@@ -518,17 +528,15 @@ impl TurnItems {
                     return;
                 }
                 self.timed = true;
-                let is_tool = matches!(
+                // The model's own items are the reasoning, its messages and
+                // context compaction; every other timed item — commands,
+                // MCP, sub-agents, web search, image tools, sleeps, whatever
+                // a newer CLI adds — is something running on its behalf.
+                let is_model = matches!(
                     string_path(value, &["payload", "item", "type"]).as_deref(),
-                    Some(
-                        "CommandExecution"
-                            | "McpToolCall"
-                            | "CollabAgentToolCall"
-                            | "Extension"
-                            | "FileChange"
-                    )
+                    Some("Reasoning" | "AgentMessage" | "ContextCompaction" | "UserMessage")
                 );
-                if is_tool && completed > started {
+                if !is_model && completed > started {
                     self.tool_spans.push((started, completed));
                 }
             }
@@ -935,8 +943,9 @@ mod tests {
                 r#"{"timestamp":"2026-06-01T00:02:04Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
                 cmd,
                 r#"{"timestamp":"2026-06-01T00:03:00Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":170000,"completed_at_ms":172000,"item":{"id":"i6","type":"Reasoning"}}}"#,
-                r#"{"timestamp":"2026-06-01T00:03:02Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":172000,"completed_at_ms":174000,"item":{"id":"i7","type":"CommandExecution"}}}"#,
+                r#"{"timestamp":"2026-06-01T00:03:02Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":172000,"completed_at_ms":174000,"item":{"id":"i7","type":"WebSearch"}}}"#,
                 r#"{"timestamp":"2026-06-01T00:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-06-01T00:00:09Z","type":"event_msg","payload":{"type":"item_completed","started_at_ms":6000,"completed_at_ms":9000,"item":{"id":"leak","type":"CommandExecution"}}}"#,
                 r#"{"timestamp":"2026-06-01T00:03:05Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":9000}}"#,
                 r#"{"timestamp":"2026-06-01T00:04:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
                 cmd,
@@ -957,8 +966,10 @@ mod tests {
         // No timed items → the split is unknown, not 100% model.
         assert_eq!(collection.duration_events[1].model_ms, None);
         // The duration-less completion closed i5, the replay of the first
-        // turn's command is remembered file-wide, and a replayed older
-        // task_started does not reset i7: 9s minus the 2s command.
+        // turn's command is remembered file-wide, a replayed older
+        // task_started does not reset i7 (a web search — a tool by
+        // inversion, not by allowlist), and an old item row leaking in after
+        // it is rejected by its timestamp: 9s minus the 2s search.
         assert_eq!(collection.duration_events[2].model_ms, Some(7_000));
         // A turn whose only item is a replay is unmeasured, not all-model.
         assert_eq!(collection.duration_events[3].model_ms, None);
