@@ -13,8 +13,8 @@ use crate::app::Config;
 #[cfg(test)]
 use crate::model::CreditSample;
 use crate::model::{
-    AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, Provider, RateLimitSample,
-    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    AppSummary, Collection, DurationEvent, EffortEvent, ModeEvent, PaceEvent, Provider,
+    RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 struct Rng(u64);
@@ -284,7 +284,12 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
                         timestamp: Some(timestamp),
                         session_id: Some(session_id.clone()),
                         duration_ms: turn_duration_ms(rng),
+                        human_wait_ms: 0,
                         status: Some("turn".to_owned()),
+                    });
+                    collection.pace_events.push(PaceEvent {
+                        timestamp: Some(timestamp),
+                        gap_ms: rng.range(8, 600) * 1_000,
                     });
                 }
             }
@@ -404,6 +409,7 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
                 timestamp: Some(timestamp),
                 session_id: Some(session_id.clone()),
                 duration_ms: turn_duration_ms(rng),
+                human_wait_ms: 0,
                 status: Some("task_complete".to_owned()),
             });
         }
@@ -487,6 +493,7 @@ fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collecti
                 timestamp: Some(timestamp),
                 session_id: Some(session_id.clone()),
                 duration_ms: turn_duration_ms(rng),
+                human_wait_ms: 0,
                 status: Some("turn".to_owned()),
             });
         }

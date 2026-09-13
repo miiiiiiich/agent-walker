@@ -3,7 +3,7 @@ use crate::model::{DurationSummary, Summary};
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// The COMPLETION section: duration stats when a turn completed, plus the
+/// The TURN LENGTH section: duration stats when a turn completed, plus the
 /// window's interruption count in the title. A window with interruptions
 /// but no completed turn renders the title alone — the count stays visible
 /// without zero percentiles or empty bars.
@@ -13,7 +13,7 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
         return Vec::new();
     }
     let title = utils::section_title(
-        "COMPLETION",
+        "TURN LENGTH",
         &completion_annotation(duration, summary.interrupted, width),
     );
     let Some(duration) = duration else {
@@ -63,13 +63,13 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
 /// The section annotation, width-fitted: the interruption count appends in
 /// its long form when the rail has room, falls back to a compact "esc"
 /// label, and drops entirely on rails too narrow for either — never
-/// clipped mid-word. The prefix budget covers "▍ COMPLETION  ".
+/// clipped mid-word. The prefix budget covers "▍ TURN LENGTH  ".
 fn completion_annotation(
     duration: Option<&DurationSummary>,
     interrupted: usize,
     width: u16,
 ) -> String {
-    let budget = usize::from(width).saturating_sub("▍ COMPLETION  ".chars().count());
+    let budget = usize::from(width).saturating_sub("▍ TURN LENGTH  ".chars().count());
     let fitted = |candidates: [String; 2], fallback: String| {
         candidates
             .into_iter()

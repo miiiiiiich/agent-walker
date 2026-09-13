@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{
-    CreditSample, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PermissionEvent,
-    RateLimitSample, SessionTouch, ToolEvent, UsageEvent,
+    CreditSample, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PaceEvent,
+    PermissionEvent, RateLimitSample, SessionTouch, ToolEvent, UsageEvent,
 };
 
 /// Events extracted from a single log file. The unit of caching: parsed once,
@@ -23,6 +23,7 @@ pub struct FileEvents {
     pub mode_events: Vec<KeyedModeEvent>,
     pub permission_events: Vec<KeyedPermissionEvent>,
     pub interrupt_events: Vec<KeyedInterruptEvent>,
+    pub pace_events: Vec<KeyedPaceEvent>,
     pub lines_seen: usize,
     pub parse_errors: usize,
 }
@@ -78,6 +79,14 @@ pub struct KeyedPermissionEvent {
 pub struct KeyedInterruptEvent {
     pub key: Option<String>,
     pub event: InterruptEvent,
+}
+
+/// Pace event keyed by the prompt (Claude uuid / Codex session + time) so
+/// replayed prompt rows don't count twice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedPaceEvent {
+    pub key: Option<String>,
+    pub event: PaceEvent,
 }
 
 /// Mode event keyed by message id. Duplicate lines for the same message can

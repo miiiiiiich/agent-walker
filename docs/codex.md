@@ -17,7 +17,7 @@ deduplicated by relative path before parsing. `--codex-dir` overrides the
   `write_stdin`, …). Shell executions (`exec_command` and friends) are
   decomposed to the real command basename (`grep`, `cargo`, …) so the tool list
   reflects what actually ran, not one undifferentiated shell bucket.
-- **Durations** from `task_complete` events (`duration_ms`) → the COMPLETION
+- **Durations** from `task_complete` events (`duration_ms`) → the TURN LENGTH
   section.
 - **Sessions / model / project** from `session_meta` and `turn_context`.
 

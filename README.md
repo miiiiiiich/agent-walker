@@ -28,7 +28,8 @@ More than each agent's `status` or `usage` command tells you.
 | Which days you use it most, and at what hours | ACTIVITY / BY HOUR |
 | Which projects, models and settings eat the tokens | PROJECTS / MODELS / MODES |
 | How many agents you run at once | PARALLEL AGENTS |
-| How long you actually let an agent work | COMPLETION |
+| How long you actually let an agent work | TURN LENGTH |
+| How many hours the agent worked, and how fast you answer it | WORKING TIME |
 | Whether you're wasting context | CONTEXT |
 
 ## Share

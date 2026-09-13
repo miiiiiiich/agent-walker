@@ -41,9 +41,13 @@ use super::events::FileEvents;
 ///   sole content block, subagent file provenance, Codex
 ///   `reason == "interrupted"` + required `turn_id`) — v16 caches carry
 ///   over-counted interrupt events.
+/// - 18: `DurationEvent` gained `human_wait_ms` (Claude `AskUserQuestion`
+///   answer time inside a turn) and `FileEvents` gained `pace_events` (the
+///   gap before each prompt), changing the bincode layout; Claude turns are
+///   now stamped at their end and keyed by prompt uuid for fork dedup.
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 17;
+const CACHE_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

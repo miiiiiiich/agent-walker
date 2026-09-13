@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- WORKING TIME: how long the agent actually worked over the last 30 days —
+  turn lengths minus the time you spent answering `AskUserQuestion`. Also
+  context read per working minute, the peak day, and your pace (median /
+  p90 gap before your next prompt; gaps over 30 minutes are left out).
+- `--snapshot` gains an `active_time_30d` record.
+
+### Changed
+
+- COMPLETION is renamed TURN LENGTH; its numbers no longer include the
+  time you spent answering a question mid-turn.
+- Sections reorder below the charts: MODELS | PARALLEL AGENTS, TURN LENGTH
+  | WORKING TIME, SKILLS | CONTEXT, then MODES, PROJECTS, TOOLS, COST,
+  SIGNAL.
+- Claude turns copied into a fork child no longer count twice, and are
+  dated by when they ended (as Codex and Copilot turns already were).
+- Parse cache format bumped (v18); the first run after upgrading rescans.
+
+### Fixed
+
+- CONTEXT bars no longer stretch wider than other sections' on a wide
+  terminal.
+
 ## [0.15.0] - 2026-08-30
 
 ### Added

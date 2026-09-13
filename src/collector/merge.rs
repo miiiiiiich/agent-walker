@@ -102,6 +102,7 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
     let mut seen_permissions: HashMap<String, usize> = HashMap::new();
     let mut seen_interrupts: HashMap<String, usize> = HashMap::new();
+    let mut seen_paces: HashMap<String, usize> = HashMap::new();
 
     for (path, events) in per_file {
         collection.stats.files_seen += 1;
@@ -119,7 +120,13 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
                 keyed.key,
                 keyed.event,
                 |existing, incoming| {
-                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                    // A fork child's copy of a turn can be a prefix of the
+                    // parent's (the fork happened mid-turn): the longer
+                    // observation is the complete one. Keep it whole so its
+                    // end stamp, length and human wait stay consistent.
+                    if incoming.duration_ms > existing.duration_ms {
+                        *existing = incoming;
+                    }
                 },
             );
         }
@@ -213,6 +220,16 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
                 |existing, incoming| {
                     existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
                 },
+            );
+        }
+
+        for keyed in events.pace_events {
+            dedupe_into(
+                &mut collection.pace_events,
+                &mut seen_paces,
+                keyed.key,
+                keyed.event,
+                |_existing, _incoming| {},
             );
         }
 

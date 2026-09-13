@@ -156,6 +156,188 @@ pub struct DurationBucket {
     pub count: usize,
 }
 
+/// TIME panel data over the fixed 30-day window: how long the agent was
+/// working (turn lengths with the human's answer time removed) and how much
+/// context it read per minute of that. `Some` whenever a turn completed in
+/// the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveTimeSummary {
+    /// Completed turns in the window.
+    pub turns: usize,
+    /// Turn lengths minus `human_wait_ms`, summed.
+    pub active_ms: u64,
+    /// Time inside those turns spent waiting on the human (`AskUserQuestion`).
+    pub human_wait_ms: u64,
+    /// Input-side tokens (uncached input + cache writes + cache reads) over
+    /// the same window — what every call re-reads, so the per-minute rate
+    /// tracks how long a context the agent was dragging.
+    pub context_tokens: u64,
+    /// Window length in days, for the per-day average.
+    pub window_days: u16,
+    /// Gaps before each human prompt (previous turn's last activity → the
+    /// prompt), sorted ascending, under the 30-minute cutoff. Kept raw so
+    /// the Total tab can take percentiles across providers.
+    pub pace_gaps_ms: Vec<u64>,
+    /// Working time per local day (turn end date), ascending by date, only
+    /// days with any. Feeds the peak-day row and, later, a daily chart.
+    pub daily_active_ms: Vec<(Date, u64)>,
+}
+
+impl ActiveTimeSummary {
+    pub fn active_per_day_ms(&self) -> u64 {
+        self.active_ms / u64::from(self.window_days.max(1))
+    }
+
+    /// The day the agent worked longest.
+    pub fn peak_day(&self) -> Option<(Date, u64)> {
+        self.daily_active_ms
+            .iter()
+            .copied()
+            .max_by_key(|(_, active_ms)| *active_ms)
+    }
+
+    /// Your pace: the median and p90 gap before a prompt; `None` without
+    /// any recorded gap.
+    pub fn pace_percentiles(&self) -> Option<(u64, u64)> {
+        if self.pace_gaps_ms.is_empty() {
+            return None;
+        }
+        let at = |percentile: usize| {
+            let rank = self
+                .pace_gaps_ms
+                .len()
+                .saturating_mul(percentile)
+                .div_ceil(100);
+            let index = rank.saturating_sub(1).min(self.pace_gaps_ms.len() - 1);
+            self.pace_gaps_ms[index]
+        };
+        Some((at(50), at(90)))
+    }
+
+    /// Context tokens per active minute; `None` under a minute of activity.
+    /// Divides in milliseconds — a 90-second window is 1.5 minutes, not 1.
+    pub fn context_per_minute(&self) -> Option<u64> {
+        if self.active_ms < 60_000 {
+            return None;
+        }
+        let rate = u128::from(self.context_tokens) * 60_000 / u128::from(self.active_ms);
+        Some(u64::try_from(rate).unwrap_or(u64::MAX))
+    }
+
+    /// The Total tab's record: a sum over the providers that measured any
+    /// working time. Providers with tokens but no turn durations (Cursor,
+    /// Antigravity) stay out — their tokens would inflate the rate without
+    /// adding a minute to divide by.
+    pub fn merged<'a>(parts: impl IntoIterator<Item = &'a ActiveTimeSummary>) -> Option<Self> {
+        let mut out: Option<Self> = None;
+        for part in parts.into_iter().filter(|part| part.turns > 0) {
+            let acc = out.get_or_insert_with(|| Self {
+                window_days: part.window_days,
+                ..Self::default()
+            });
+            acc.turns += part.turns;
+            acc.active_ms = acc.active_ms.saturating_add(part.active_ms);
+            acc.human_wait_ms = acc.human_wait_ms.saturating_add(part.human_wait_ms);
+            acc.context_tokens = acc.context_tokens.saturating_add(part.context_tokens);
+            acc.pace_gaps_ms.extend_from_slice(&part.pace_gaps_ms);
+            for (date, active_ms) in &part.daily_active_ms {
+                match acc.daily_active_ms.iter_mut().find(|(d, _)| d == date) {
+                    Some((_, total)) => *total = total.saturating_add(*active_ms),
+                    None => acc.daily_active_ms.push((*date, *active_ms)),
+                }
+            }
+        }
+        if let Some(acc) = out.as_mut() {
+            acc.pace_gaps_ms.sort_unstable();
+            acc.daily_active_ms.sort_unstable_by_key(|(date, _)| *date);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod active_time_tests {
+    use super::ActiveTimeSummary;
+
+    /// 90K tokens over 90 seconds is 60K/min, not 90K/min; under a minute
+    /// there is no rate; a saturated numerator still divides safely.
+    #[test]
+    fn context_per_minute_divides_in_milliseconds() {
+        let rate = |context_tokens, active_ms| {
+            ActiveTimeSummary {
+                turns: 1,
+                active_ms,
+                context_tokens,
+                window_days: 30,
+                ..ActiveTimeSummary::default()
+            }
+            .context_per_minute()
+        };
+        assert_eq!(rate(90_000, 90_000), Some(60_000));
+        assert_eq!(rate(90_000, 59_999), None);
+        assert_eq!(rate(u64::MAX, 60_000), Some(u64::MAX));
+    }
+
+    /// Merging skips token-only providers so they can't inflate the rate.
+    #[test]
+    fn merged_skips_providers_without_turns() {
+        let measured = ActiveTimeSummary {
+            turns: 10,
+            active_ms: 600_000,
+            human_wait_ms: 60_000,
+            context_tokens: 1_000_000,
+            window_days: 30,
+            pace_gaps_ms: vec![5_000, 45_000, 120_000],
+            daily_active_ms: vec![(time::macros::date!(2026 - 09 - 01), 600_000)],
+        };
+        let token_only = ActiveTimeSummary {
+            context_tokens: 9_000_000,
+            window_days: 30,
+            ..ActiveTimeSummary::default()
+        };
+        let merged = ActiveTimeSummary::merged([&measured, &token_only]).expect("measured part");
+        assert_eq!(merged, measured);
+        assert!(ActiveTimeSummary::merged([&token_only]).is_none());
+
+        // Two providers on the same day add up; the peak is the summed day.
+        let other = ActiveTimeSummary {
+            turns: 1,
+            active_ms: 60_000,
+            window_days: 30,
+            daily_active_ms: vec![
+                (time::macros::date!(2026 - 09 - 01), 60_000),
+                (time::macros::date!(2026 - 09 - 02), 500_000),
+            ],
+            ..ActiveTimeSummary::default()
+        };
+        let merged = ActiveTimeSummary::merged([&measured, &other]).expect("merged");
+        assert_eq!(
+            merged.daily_active_ms,
+            vec![
+                (time::macros::date!(2026 - 09 - 01), 660_000),
+                (time::macros::date!(2026 - 09 - 02), 500_000),
+            ]
+        );
+        assert_eq!(
+            merged.peak_day(),
+            Some((time::macros::date!(2026 - 09 - 01), 660_000))
+        );
+    }
+
+    /// p50 / p90 use the same rank rule as the completion percentiles.
+    #[test]
+    fn pace_percentiles_follow_the_rank_rule() {
+        let summary = ActiveTimeSummary {
+            turns: 1,
+            pace_gaps_ms: (1..=10).map(|n| n * 1_000).collect(),
+            window_days: 30,
+            ..ActiveTimeSummary::default()
+        };
+        assert_eq!(summary.pace_percentiles(), Some((5_000, 9_000)));
+        assert!(ActiveTimeSummary::default().pace_percentiles().is_none());
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
     /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
@@ -377,6 +559,9 @@ pub struct Summary {
     /// share) plus optional call-level rows; `None` when no event carried
     /// context. The Total tab holds the sum of the provider summaries.
     pub context: Option<ContextSummary>,
+    /// Working time and context-per-minute over the fixed 30-day window;
+    /// `None` when no turn completed there.
+    pub active_time: Option<ActiveTimeSummary>,
     pub orchestration: Orchestration,
 }
 

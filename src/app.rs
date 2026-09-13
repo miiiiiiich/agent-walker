@@ -215,7 +215,8 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
 /// Fill in the Total-tab fields that are sums over the provider summaries
 /// rather than re-derivations from the combined collection. Cache reuse is
 /// one: the expiry threshold differs per provider, so the combined
-/// collection cannot classify calls itself.
+/// collection cannot classify calls itself. Working time is another: only
+/// providers with turn durations may contribute tokens to the rate.
 pub(crate) fn finish_combined(
     mut combined: crate::model::Summary,
     providers: &[crate::model::Summary],
@@ -224,6 +225,14 @@ pub(crate) fn finish_combined(
         providers
             .iter()
             .filter_map(|summary| summary.context.as_ref()),
+    );
+    // Working time is likewise a provider sum: the combined collection
+    // would divide every provider's tokens by only the providers that
+    // record turn durations.
+    combined.active_time = crate::model::ActiveTimeSummary::merged(
+        providers
+            .iter()
+            .filter_map(|summary| summary.active_time.as_ref()),
     );
     combined
 }
@@ -366,6 +375,7 @@ mod tests {
             completion_duration: None,
             interrupted: 0,
             context: None,
+            active_time: None,
             orchestration: Orchestration::default(),
         }
     }

@@ -40,7 +40,7 @@ pub(in crate::ui) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'
     // Each bar carries both the concrete time and its share ("  6d 20h  30%"),
     // so reserve extra room after the track.
     let bar_width = usize::from(width).saturating_sub(30).clamp(6, 22);
-    // Title + a single avg line (mirrors COMPLETION's stat row for alignment).
+    // Title + a single avg line (mirrors TURN LENGTH's stat row for alignment).
     let mut lines = vec![
         utils::section_title(
             "PARALLEL AGENTS",

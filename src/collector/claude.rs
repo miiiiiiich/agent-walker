@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -9,12 +10,12 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
     FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedModeEvent,
-    KeyedPermissionEvent, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
+    KeyedPaceEvent, KeyedPermissionEvent, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
     parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, Provider,
-    SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
+    Collection, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PaceEvent, PermissionEvent,
+    Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 /// Background/observer harnesses (e.g. the claude-mem observer) keep
@@ -101,8 +102,13 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     let fallback_project = project_label(path, root);
     // Claude logs carry no explicit completion event; derive turn durations
     // as "human prompt -> last activity before the next human prompt".
-    let mut turn_start: Option<OffsetDateTime> = None;
-    let mut last_activity: Option<OffsetDateTime> = None;
+    let mut turn = TurnState::default();
+    // Resumes and fork prefixes replay earlier rows verbatim, sometimes
+    // in the middle of a later turn. A prompt uuid seen before must not
+    // flush and restart the turn, and a question id seen before must not
+    // reopen (its replayed answer then finds nothing pending and is inert).
+    let mut seen_prompts: HashSet<String> = HashSet::new();
+    let mut seen_questions: HashSet<String> = HashSet::new();
     let reader = BufReader::new(file);
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -132,24 +138,61 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                 // before requiring a timestamp — an undated marker must
                 // still clear the turn, or the abort would flush as a
                 // completed duration at the next prompt or EOF.
-                turn_start = None;
-                last_activity = None;
+                turn = TurnState::default();
             } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
                 if is_human_turn(&value) {
-                    push_turn_duration(turn_start, last_activity, &mut events);
-                    turn_start = Some(timestamp);
-                    last_activity = Some(timestamp);
-                } else if let Some(previous) = last_activity {
-                    // A long silence means the turn ended and the session was
-                    // resumed later (compaction, scheduled appends); close the
-                    // turn at the last real activity instead of spanning days.
-                    if timestamp - previous > Duration::minutes(30) {
-                        push_turn_duration(turn_start, last_activity, &mut events);
-                        turn_start = None;
-                        last_activity = None;
-                    } else {
-                        last_activity = Some(previous.max(timestamp));
+                    let key = string_field(&value, "uuid");
+                    let replayed = key
+                        .as_ref()
+                        .is_some_and(|uuid| !seen_prompts.insert(uuid.clone()));
+                    if !replayed {
+                        // The gap from the previous turn's last activity to
+                        // this prompt is the human's pace — only while the
+                        // turn is still open (a cutoff means they were away).
+                        if let (Some(_), Some(end)) = (turn.start, turn.last_activity)
+                            && timestamp > end
+                            && timestamp - end <= Duration::minutes(30)
+                        {
+                            let gap_ms =
+                                u64::try_from((timestamp - end).whole_milliseconds()).unwrap_or(0);
+                            events.pace_events.push(KeyedPaceEvent {
+                                key: key.as_ref().map(|uuid| format!("claude-pace:{uuid}")),
+                                event: PaceEvent {
+                                    timestamp: Some(timestamp),
+                                    gap_ms,
+                                },
+                            });
+                        }
+                        turn.flush(&mut events);
+                        turn = TurnState {
+                            start: Some(timestamp),
+                            key,
+                            last_activity: Some(timestamp),
+                            ..TurnState::default()
+                        };
                     }
+                } else if let Some(previous) = turn.last_activity {
+                    if timestamp - previous > Duration::minutes(30) {
+                        // A long silence means the turn ended and the session
+                        // was resumed later (compaction, scheduled appends);
+                        // close the turn at the last real activity instead of
+                        // spanning days. A question left open that long ended
+                        // the turn when it was asked (`flush` charges the
+                        // tail as waiting), and its late answer is a fresh
+                        // human input: the next turn starts there.
+                        turn.flush(&mut events);
+                        turn = turn.after_cutoff();
+                        turn.restart_if_answer(&value, timestamp);
+                    } else if turn.charge_answer(&value, timestamp) {
+                        turn.last_activity = Some(previous.max(timestamp));
+                    } else {
+                        turn.note_questions(&value, timestamp, &mut seen_questions);
+                        turn.last_activity = Some(previous.max(timestamp));
+                    }
+                } else {
+                    // Between turns after a cutoff: the only row that
+                    // matters is a late answer to a question still open.
+                    turn.restart_if_answer(&value, timestamp);
                 }
             }
         }
@@ -164,7 +207,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         );
     }
 
-    push_turn_duration(turn_start, last_activity, &mut events);
+    turn.flush(&mut events);
     events.compress_touches(local_offset);
     Some(events)
 }
@@ -204,27 +247,175 @@ fn is_human_turn(value: &Value) -> bool {
     }
 }
 
-fn push_turn_duration(
-    turn_start: Option<OffsetDateTime>,
+/// The turn being assembled: its prompt, the last activity seen, and the
+/// `AskUserQuestion` bookkeeping that separates the human's answer time
+/// from the agent's working time.
+#[derive(Default)]
+struct TurnState {
+    start: Option<OffsetDateTime>,
+    /// The prompt row's uuid — fork children replay the parent's history,
+    /// so a turn copied into a child file must dedupe against the original.
+    key: Option<String>,
     last_activity: Option<OffsetDateTime>,
-    events: &mut FileEvents,
-) {
-    let (Some(start), Some(end)) = (turn_start, last_activity) else {
-        return;
-    };
-    let duration_ms = u64::try_from((end - start).whole_milliseconds()).unwrap_or(0);
-    if duration_ms == 0 {
-        return;
+    human_wait_ms: u64,
+    /// Pending question tool-call ids and when they were asked.
+    pending_questions: HashMap<String, OffsetDateTime>,
+    /// End of the last charged wait, so overlapping questions answered in
+    /// sequence charge their shared interval once.
+    wait_cursor: Option<OffsetDateTime>,
+}
+
+impl TurnState {
+    /// Tool-result ids on a user row that answer a pending question.
+    fn answered_ids(&self, value: &Value) -> Vec<String> {
+        if self.pending_questions.is_empty()
+            || value.get("type").and_then(Value::as_str) != Some("user")
+        {
+            return Vec::new();
+        }
+        let Some(Value::Array(blocks)) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+            .filter(|id| self.pending_questions.contains_key(*id))
+            .map(str::to_owned)
+            .collect()
     }
-    events.duration_events.push(KeyedDurationEvent {
-        key: None,
-        event: DurationEvent {
-            timestamp: Some(start),
-            session_id: None,
-            duration_ms,
-            status: Some("turn".to_owned()),
-        },
-    });
+
+    /// Record the questions an assistant row asks — first sighting only,
+    /// so a replayed row cannot reopen one (`seen` is file-wide).
+    fn note_questions(
+        &mut self,
+        value: &Value,
+        asked_at: OffsetDateTime,
+        seen: &mut HashSet<String>,
+    ) {
+        for id in question_tool_use_ids(value) {
+            if seen.insert(id.clone()) {
+                self.pending_questions.insert(id, asked_at);
+            }
+        }
+    }
+
+    /// The state between turns once the cutoff closed this one: no turn in
+    /// progress, but questions left open carry over so a late answer can
+    /// be recognized and start the next turn.
+    fn after_cutoff(self) -> Self {
+        Self {
+            pending_questions: self.pending_questions,
+            ..Self::default()
+        }
+    }
+
+    /// If the row answers a question left open across a cutoff, retire it
+    /// and start a fresh turn here: the late answer is the human's input.
+    /// The wait before the cutoff was charged to the previous turn, so this
+    /// one starts clean, with the cursor at its start so questions still
+    /// open charge only from here.
+    fn restart_if_answer(&mut self, value: &Value, now: OffsetDateTime) {
+        let answered = self.answered_ids(value);
+        if answered.is_empty() {
+            return;
+        }
+        for id in answered {
+            self.pending_questions.remove(&id);
+        }
+        self.start = Some(now);
+        self.key = string_field(value, "uuid");
+        self.last_activity = Some(now);
+        self.human_wait_ms = 0;
+        self.wait_cursor = Some(now);
+    }
+
+    /// Waiting so far plus the stretch the human has been blocked on up to
+    /// `until`: from the earliest still-open question (the human has been
+    /// busy since then, whichever question they answer first) or from the
+    /// end of the last charged stretch, whichever is later — so overlapping
+    /// questions never charge a shared interval twice.
+    fn waited_until(&self, until: OffsetDateTime) -> u64 {
+        let Some(earliest) = self.pending_questions.values().min().copied() else {
+            return self.human_wait_ms;
+        };
+        let from = self
+            .wait_cursor
+            .map_or(earliest, |cursor| cursor.max(earliest));
+        if until <= from {
+            return self.human_wait_ms;
+        }
+        let wait = u64::try_from((until - from).whole_milliseconds()).unwrap_or(0);
+        self.human_wait_ms.saturating_add(wait)
+    }
+
+    /// If the row answers pending questions, charge the wait up to it (see
+    /// `waited_until`), retire the answered ids, and report `true`. Rows
+    /// landing between the question and the answer (reminders, hook
+    /// attachments) never shorten the wait: it is measured from the ask.
+    fn charge_answer(&mut self, value: &Value, now: OffsetDateTime) -> bool {
+        let answered = self.answered_ids(value);
+        if answered.is_empty() {
+            return false;
+        }
+        self.human_wait_ms = self.waited_until(now);
+        self.wait_cursor = Some(self.wait_cursor.map_or(now, |cursor| cursor.max(now)));
+        for id in answered {
+            self.pending_questions.remove(&id);
+        }
+        true
+    }
+
+    /// Emit the completed turn (if any): stamped at its END like every other
+    /// provider's turn, keyed by the prompt uuid for cross-file dedup, with
+    /// the human's answer time clamped to the turn length. A question still
+    /// open at the end charges its tail as waiting — the agent stopped
+    /// working when it asked.
+    fn flush(&self, events: &mut FileEvents) {
+        let (Some(start), Some(end)) = (self.start, self.last_activity) else {
+            return;
+        };
+        let duration_ms = u64::try_from((end - start).whole_milliseconds()).unwrap_or(0);
+        if duration_ms == 0 {
+            return;
+        }
+        events.duration_events.push(KeyedDurationEvent {
+            key: self.key.as_ref().map(|uuid| format!("claude-turn:{uuid}")),
+            event: DurationEvent {
+                timestamp: Some(end),
+                session_id: None,
+                duration_ms,
+                human_wait_ms: self.waited_until(end).min(duration_ms),
+                status: Some("turn".to_owned()),
+            },
+        });
+    }
+}
+
+/// Ids of `AskUserQuestion` tool calls on an assistant row — the questions
+/// whose answers will land as tool results later in the same turn.
+fn question_tool_use_ids(value: &Value) -> Vec<String> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    let Some(Value::Array(blocks)) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                && block.get("name").and_then(Value::as_str) == Some("AskUserQuestion")
+        })
+        .filter_map(|block| block.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[allow(
@@ -860,6 +1051,412 @@ mod tests {
         // marker row contribute no durations.
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 60_000);
+    }
+
+    /// The time between an `AskUserQuestion` call and its answer is the
+    /// human's, not the agent's: it stays inside the turn length but is
+    /// charged to `human_wait_ms`, so `active_ms` excludes it.
+    #[test]
+    fn ask_user_question_answer_time_is_charged_to_human_wait() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick one"}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:11:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "
+"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // One completed turn: 00:00 -> last activity 00:12 = 12 min, of
+        // which the 10 min between the question and the answer is the
+        // human's. The turn is stamped at its end, like Codex / Copilot.
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 720_000);
+        assert_eq!(turn.human_wait_ms, 600_000);
+        assert_eq!(turn.active_ms(), 120_000);
+        assert_eq!(
+            turn.timestamp,
+            Some(time::macros::datetime!(2026-07-20 00:12 UTC))
+        );
+    }
+
+    /// Rows landing between the question and the answer (reminders, hook
+    /// attachments) must not shorten the wait, and two questions open at
+    /// once charge their shared interval once.
+    #[test]
+    fn question_waits_ignore_intervening_rows_and_overlap() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}},{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{}}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:20:00Z","sessionId":"s1","type":"attachment","attachment":{"type":"total_tokens_reminder"}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:41:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:43:00Z","sessionId":"s1","type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q2","content":"B"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:46:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-07-20T00:50:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "
+"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // 00:00 -> 00:46 = 46 min. Waits: q1 00:01 -> 00:41 (40 min), then
+        // q2 from the cursor 00:41 -> 00:43 (2 min), not 00:01 -> 00:43.
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 46 * 60_000);
+        assert_eq!(turn.human_wait_ms, 42 * 60_000);
+        assert_eq!(turn.active_ms(), 4 * 60_000);
+    }
+
+    /// A question answered after more than 30 minutes ended its turn when
+    /// it was asked (the tail is waiting, not work), and the late answer is
+    /// a fresh human input that starts the next turn — so the work after it
+    /// is kept and no single wait exceeds the silence cutoff.
+    #[test]
+    fn answer_after_long_silence_starts_a_new_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:41:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"x"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:46:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:50:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "\n",
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut turns: Vec<(u64, u64)> = collection
+            .duration_events
+            .iter()
+            .map(|turn| (turn.duration_ms, turn.human_wait_ms))
+            .collect();
+        turns.sort_unstable();
+        // 00:00 -> 00:01 (the ask ends it, nothing to wait for yet) and
+        // 00:41 -> 00:46 (the answer starts it, all work).
+        assert_eq!(turns, vec![(60_000, 0), (300_000, 0)]);
+    }
+
+    /// The cutoff may be triggered by a reminder row rather than the answer
+    /// itself; the open question must survive it so the late answer still
+    /// starts the next turn. A second question still open when that turn
+    /// starts charges its answer time from the new start.
+    #[test]
+    fn open_questions_survive_a_cutoff_by_another_row() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}},{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:35:00Z","sessionId":"s1","type":"attachment","attachment":{"type":"total_tokens_reminder"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:41:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:43:00Z","sessionId":"s1","type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q2","content":"B"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:46:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:50:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut turns: Vec<(u64, u64)> = collection
+            .duration_events
+            .iter()
+            .map(|turn| (turn.duration_ms, turn.human_wait_ms))
+            .collect();
+        turns.sort_unstable();
+        // 00:00 -> 00:01, then 00:41 -> 00:46 of which 00:41 -> 00:43 was
+        // spent answering q2.
+        assert_eq!(turns, vec![(60_000, 0), (300_000, 120_000)]);
+    }
+
+    /// A replayed copy of the prompt row (same uuid) must not flush and
+    /// restart the turn, or the question it left open is forgotten and its
+    /// answer time counts as work.
+    #[test]
+    fn replayed_prompt_row_does_not_restart_the_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let prompt = r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#;
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                prompt,
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
+                prompt,
+                r#"{"timestamp":"2026-07-20T00:11:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 12 * 60_000);
+        assert_eq!(turn.human_wait_ms, 10 * 60_000);
+    }
+
+    /// The gap from a turn's last activity to the next prompt is the
+    /// human's pace, keyed by the prompt uuid; a prompt after the 30-minute
+    /// cutoff is the human coming back, not their pace.
+    #[test]
+    fn pace_is_the_gap_before_a_prompt_under_the_cutoff() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:03:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"more"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:50:00Z","sessionId":"s1","type":"user","uuid":"h3","message":{"role":"user","content":"back"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        // h2 came 2 min after a1; h3 came 46 min after a2 (cutoff, not pace).
+        let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+        assert_eq!(gaps, vec![120_000]);
+    }
+
+    /// A completed earlier turn replayed in the middle of a later one
+    /// (resume writes history back) must leave the later turn untouched:
+    /// its prompt, question and answer are all inert on second sight.
+    #[test]
+    fn replayed_earlier_turn_does_not_contaminate_the_current_one() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let h1 = r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#;
+        let ask = r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#;
+        let answer = r#"{"timestamp":"2026-07-20T00:11:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#;
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                h1,
+                ask,
+                answer,
+                r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"next"}}"#,
+                h1,
+                ask,
+                answer,
+                r#"{"timestamp":"2026-07-20T00:20:00Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done again"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:25:00Z","sessionId":"s1","type":"user","uuid":"h3","message":{"role":"user","content":"thanks"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut turns: Vec<(u64, u64)> = collection
+            .duration_events
+            .iter()
+            .map(|turn| (turn.duration_ms, turn.human_wait_ms))
+            .collect();
+        turns.sort_unstable();
+        // h2 (00:15 -> 00:20) is five working minutes; h1's replayed
+        // question and answer charge nothing to it.
+        assert_eq!(turns, vec![(300_000, 0), (720_000, 600_000)]);
+    }
+
+    /// A replayed copy of the question row (resume / fork prefix) must not
+    /// reopen a question already answered, or the tail would be charged as
+    /// waiting again.
+    #[test]
+    fn replayed_question_row_does_not_reopen_an_answered_question() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let ask = r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#;
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                ask,
+                r#"{"timestamp":"2026-07-20T00:11:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"A"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                ask,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 12 * 60_000);
+        assert_eq!(turn.human_wait_ms, 10 * 60_000);
+    }
+
+    /// Staggered questions answered out of order charge the union of their
+    /// intervals: the human was busy from the first ask to the last answer.
+    #[test]
+    fn staggered_questions_charge_the_interval_union() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q2","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:10:00Z","sessionId":"s1","type":"user","uuid":"r2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q2","content":"x"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"x"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:16:00Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:20:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"thanks"}}"#,
+                "\n",
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 16 * 60_000);
+        // [00:01, 00:15] = 14 min, not 5 + 5.
+        assert_eq!(turn.human_wait_ms, 14 * 60_000);
+    }
+
+    /// A question still open when the turn is replaced (or the file ends)
+    /// charges its tail as waiting: the agent stopped working when it asked.
+    #[test]
+    fn unanswered_question_charges_its_tail_as_wait() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"pick"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:10:00Z","sessionId":"s1","type":"attachment","attachment":{"type":"total_tokens_reminder"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"never mind"}}"#,
+                "\n",
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.duration_events.len(), 1);
+        let turn = &collection.duration_events[0];
+        assert_eq!(turn.duration_ms, 10 * 60_000);
+        assert_eq!(turn.human_wait_ms, 9 * 60_000);
+        assert_eq!(turn.active_ms(), 60_000);
+    }
+
+    /// A fork child replays the parent's history: the copied turn shares
+    /// the prompt uuid and must not count twice — and when the copy is only
+    /// a prefix (the fork happened mid-turn), the complete observation wins
+    /// whichever file is scanned first.
+    #[test]
+    fn replayed_turns_dedupe_by_prompt_uuid_keeping_the_complete_one() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let prefix = concat!(
+            r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+            "\n",
+        );
+        let full = concat!(
+            r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:12:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"ok"}}"#,
+            "\n",
+        );
+        for (parent, child) in [
+            ("a-parent.jsonl", "b-child.jsonl"),
+            ("b-parent.jsonl", "a-child.jsonl"),
+        ] {
+            let dir = temp.path().join(parent.split('-').next().unwrap_or("x"));
+            fs::create_dir_all(&dir).expect("dir");
+            fs::write(dir.join(parent), full).expect("fixture");
+            fs::write(dir.join(child), prefix).expect("fixture");
+
+            let collection = collect(&dir, None, false, UtcOffset::UTC);
+
+            assert_eq!(collection.duration_events.len(), 1, "{parent}");
+            let turn = &collection.duration_events[0];
+            assert_eq!(turn.duration_ms, 12 * 60_000, "{parent}");
+            assert_eq!(
+                turn.timestamp,
+                Some(time::macros::datetime!(2026-07-20 00:12 UTC)),
+                "{parent}"
+            );
+        }
     }
 
     /// A marker without a timestamp still clears the active turn: the abort

@@ -48,10 +48,24 @@ pub struct SessionTouch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationEvent {
+    /// When the turn ENDED (Claude, Codex, Copilot, Grok); OpenCode stamps
+    /// the start. Windows attribute a turn by this stamp.
     pub timestamp: Option<OffsetDateTime>,
     pub session_id: Option<String>,
     pub duration_ms: u64,
+    /// Milliseconds inside the turn spent waiting on the human — Claude's
+    /// `AskUserQuestion` round-trips, which land mid-turn as tool results and
+    /// so never split the turn. Subtracted wherever the turn length stands
+    /// for "the agent was working"; 0 for providers without the notion.
+    pub human_wait_ms: u64,
     pub status: Option<String>,
+}
+
+impl DurationEvent {
+    /// The turn length with the human's answer time removed.
+    pub fn active_ms(&self) -> u64 {
+        self.duration_ms.saturating_sub(self.human_wait_ms)
+    }
 }
 
 /// One `rate_limits` snapshot from a Codex rollout: the plan's primary
@@ -93,6 +107,16 @@ pub struct PermissionEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterruptEvent {
     pub timestamp: Option<OffsetDateTime>,
+}
+
+/// The gap before a human prompt: from the previous turn's last activity
+/// to the prompt — reading, thinking, typing. Only gaps under the turn
+/// cutoff (30 minutes) are recorded; longer ones are the human being away,
+/// not their pace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaceEvent {
+    pub timestamp: Option<OffsetDateTime>,
+    pub gap_ms: u64,
 }
 
 /// Per-assistant-message mode flags for Claude: whether extended thinking
@@ -144,6 +168,7 @@ pub struct Collection {
     pub mode_events: Vec<ModeEvent>,
     pub permission_events: Vec<PermissionEvent>,
     pub interrupt_events: Vec<InterruptEvent>,
+    pub pace_events: Vec<PaceEvent>,
     pub stats: ScanStats,
 }
 
@@ -162,6 +187,7 @@ impl Collection {
             mode_events: Vec::new(),
             permission_events: Vec::new(),
             interrupt_events: Vec::new(),
+            pace_events: Vec::new(),
             stats: ScanStats::default(),
         }
     }
@@ -199,6 +225,9 @@ impl Collection {
             combined
                 .interrupt_events
                 .extend(collection.interrupt_events.iter().cloned());
+            combined
+                .pace_events
+                .extend(collection.pace_events.iter().cloned());
             combined.stats.add_assign(&collection.stats);
         }
         combined.stats.usage_events = combined.usage_events.len();
