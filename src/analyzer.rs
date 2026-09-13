@@ -1,3 +1,4 @@
+mod active_time;
 mod aggregates;
 mod concurrency;
 mod context;
@@ -214,6 +215,13 @@ pub fn summarize(
         modes::modes_summary(collection, codename_window_start, period_end, local_offset);
     let context =
         context::context_summary(collection, codename_window_start, period_end, local_offset);
+    let active_time = active_time::active_time_summary(
+        collection,
+        codename_window_start,
+        period_end,
+        u16::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30),
+        local_offset,
+    );
     let recent_window_active_days = recent_active_days.len();
 
     Summary {
@@ -250,6 +258,7 @@ pub fn summarize(
         completion_duration,
         interrupted,
         context,
+        active_time,
         orchestration,
     }
 }

@@ -92,7 +92,7 @@ fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
         .iter()
         .any(|model| model.reported_cost_usd.is_some());
     if !total.is_complete() {
-        // Width-fitted like the COMPLETION title: longest form that fits the
+        // Width-fitted like the TURN LENGTH title: longest form that fits the
         // rail after "▍ COST  ", falling back to the bare gap. The reported-
         // cost provenance survives alongside the gap — the per-model rows
         // still show those actual charges.

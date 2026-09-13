@@ -102,6 +102,7 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
     let mut seen_modes: HashMap<String, usize> = HashMap::new();
     let mut seen_permissions: HashMap<String, usize> = HashMap::new();
     let mut seen_interrupts: HashMap<String, usize> = HashMap::new();
+    let mut seen_paces: HashMap<String, usize> = HashMap::new();
 
     for (path, events) in per_file {
         collection.stats.files_seen += 1;
@@ -119,7 +120,18 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
                 keyed.key,
                 keyed.event,
                 |existing, incoming| {
-                    existing.timestamp = older_timestamp(existing.timestamp, incoming.timestamp);
+                    // A fork child's copy of a turn can be a prefix of the
+                    // parent's (the fork happened mid-turn): the longer
+                    // observation is the complete one. Keep it whole so its
+                    // end stamp, length and human wait stay consistent. Equal
+                    // observations (Grok fork copies rewrite the stamp) keep
+                    // the earlier stamp, whichever file was scanned first.
+                    if incoming.duration_ms > existing.duration_ms {
+                        *existing = incoming;
+                    } else if incoming.duration_ms == existing.duration_ms {
+                        existing.timestamp =
+                            older_timestamp(existing.timestamp, incoming.timestamp);
+                    }
                 },
             );
         }
@@ -216,6 +228,16 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
             );
         }
 
+        for keyed in events.pace_events {
+            dedupe_into(
+                &mut collection.pace_events,
+                &mut seen_paces,
+                keyed.key,
+                keyed.event,
+                |_existing, _incoming| {},
+            );
+        }
+
         for keyed in events.mode_events {
             dedupe_into(
                 &mut collection.mode_events,
@@ -239,7 +261,80 @@ pub fn merge_into(collection: &mut Collection, per_file: Vec<(PathBuf, Option<Fi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collector::KeyedUsageEvent;
+    use crate::collector::{KeyedDurationEvent, KeyedUsageEvent};
+    use crate::model::{DurationEvent, Provider};
+
+    fn keyed_turn(timestamp: &str, duration_ms: u64) -> KeyedDurationEvent {
+        KeyedDurationEvent {
+            key: Some("grok-duration:p1".to_owned()),
+            event: DurationEvent {
+                timestamp: Some(
+                    OffsetDateTime::parse(
+                        timestamp,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .expect("rfc3339"),
+                ),
+                session_id: None,
+                duration_ms,
+                human_wait_ms: 0,
+                status: Some("turn".to_owned()),
+            },
+        }
+    }
+
+    /// Keyed duration copies: the longer observation wins whole (a fork
+    /// prefix vs the complete turn); equal ones keep the earlier stamp
+    /// regardless of scan order (Grok fork copies rewrite the stamp).
+    #[test]
+    fn keyed_durations_keep_longer_then_earlier() {
+        let later_first = || {
+            let mut collection = Collection::new(Provider::Grok, PathBuf::from("/tmp"));
+            let mut a = FileEvents::default();
+            a.duration_events
+                .push(keyed_turn("2026-07-21T00:00:00Z", 5_000));
+            let mut b = FileEvents::default();
+            b.duration_events
+                .push(keyed_turn("2026-07-20T00:00:00Z", 5_000));
+            merge_into(
+                &mut collection,
+                vec![(PathBuf::from("b"), Some(a)), (PathBuf::from("a"), Some(b))],
+            );
+            collection
+        };
+        let collection = later_first();
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(
+            collection.duration_events[0]
+                .timestamp
+                .map(OffsetDateTime::day),
+            Some(20)
+        );
+
+        let mut collection = Collection::new(Provider::Grok, PathBuf::from("/tmp"));
+        let mut prefix = FileEvents::default();
+        prefix
+            .duration_events
+            .push(keyed_turn("2026-07-20T00:01:00Z", 1_000));
+        let mut full = FileEvents::default();
+        full.duration_events
+            .push(keyed_turn("2026-07-20T00:12:00Z", 12_000));
+        merge_into(
+            &mut collection,
+            vec![
+                (PathBuf::from("p"), Some(prefix)),
+                (PathBuf::from("f"), Some(full)),
+            ],
+        );
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 12_000);
+        assert_eq!(
+            collection.duration_events[0]
+                .timestamp
+                .map(OffsetDateTime::minute),
+            Some(12)
+        );
+    }
 
     /// A keyed usage duplicate (Claude streaming fragments of one message,
     /// or a Codex fork replay) keeps the larger token volume, the EARLIEST

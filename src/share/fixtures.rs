@@ -96,11 +96,30 @@ pub(crate) fn sample_summary() -> Summary {
         }),
         interrupted: 0,
         context: Some(sample_context()),
+        active_time: Some(sample_active_time()),
         orchestration: Orchestration {
             avg_concurrency: 2.5,
             peak_concurrency: 4,
             time_by_level: [144_000, 108_000, 54_000, 36_000, 18_000, 6_000],
         },
+    }
+}
+
+/// Working-time fixture: 87h over 30 days with 6h 40m spent answering
+/// questions, at 600K context tokens per working minute.
+fn sample_active_time() -> crate::model::ActiveTimeSummary {
+    crate::model::ActiveTimeSummary {
+        turns: 100,
+        active_ms: 313_200_000,
+        human_wait_ms: 24_000_000,
+        context_tokens: 3_132_000_000,
+        window_days: 30,
+        pace_gaps_ms: vec![20_000, 45_000, 90_000, 480_000],
+        daily_active_ms: vec![
+            (time::macros::date!(2026 - 09 - 02), 14_400_000),
+            (time::macros::date!(2026 - 09 - 03), 34_560_000),
+            (time::macros::date!(2026 - 09 - 04), 10_800_000),
+        ],
     }
 }
 

@@ -247,6 +247,7 @@ fn parse_messages(
                 // overflow panic, and a clock that ran backwards (completed <
                 // created) falls to 0 rather than a garbage duration.
                 duration_ms: u64::try_from(completed_ms.saturating_sub(created_ms)).unwrap_or(0),
+                human_wait_ms: 0,
                 status: value
                     .get("finish")
                     .and_then(Value::as_str)

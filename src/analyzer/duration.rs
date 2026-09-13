@@ -36,8 +36,9 @@ pub(super) fn longest_session_span(
         .max_by_key(SessionSpan::duration_secs)
 }
 
-/// Summarize completed-turn durations; `None` when no turn completed in the
-/// window. Interruptions are a separate metric — see `interrupted_count`.
+/// Summarize completed-turn durations (human answer time removed); `None`
+/// when no turn completed in the window. Interruptions are a separate
+/// metric — see `interrupted_count`.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -53,7 +54,8 @@ pub(super) fn completion_duration_summary(
                 date >= period_start && date <= period_end
             })
         })
-        .map(|event| event.duration_ms)
+        // The human's answer time inside a turn is not the agent running.
+        .map(crate::model::DurationEvent::active_ms)
         .filter(|duration_ms| *duration_ms > 0)
         .collect::<Vec<_>>();
     if values.is_empty() {

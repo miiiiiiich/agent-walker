@@ -110,8 +110,9 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     } else {
         Vec::new()
     };
-    // CONTEXT (cache reuse) renders on every tab, Total included — the
-    // summary adds up across providers.
+    // TIME (working time, context per minute) and CONTEXT (cache reuse)
+    // render on every tab, Total included — both add up across providers.
+    let time = sections::time_lines(summary, if two_column { right_u16 } else { width });
     let context = sections::context_lines(summary, if two_column { right_u16 } else { width });
     let modes = if matches!(summary.provider, Provider::Claude | Provider::Codex) {
         sections::modes_lines(summary, if two_column { right_u16 } else { width })
@@ -119,79 +120,58 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         Vec::new()
     };
 
-    // Decided chart priority: activity → token/day → by-hour → completion →
-    // PARALLEL AGENTS → models → (cost/signal/projects/tools/agents).
+    // Section order (user decision 2026-09-13), read row by row in the
+    // two-column layout: MODELS | PARALLEL AGENTS, TURN LENGTH | WORKING TIME,
+    // SKILLS | CONTEXT, then MODES, PROJECTS, TOOLS, (SUBAGENTS), COST,
+    // SIGNAL. The narrow layout keeps that reading order in one column.
     if width < TWO_COLUMN_MIN_WIDTH {
+        let mut blocks: Vec<Vec<Line<'static>>> = vec![
+            sections::model_lines(summary, width),
+            sections::parallel_lines(summary, width),
+        ];
         if summary.completion_duration.is_some() || summary.interrupted > 0 {
-            lines.extend(sections::duration_lines(summary, width));
-            lines.push(Line::default());
+            blocks.push(sections::duration_lines(summary, width));
         }
-        let parallel = sections::parallel_lines(summary, width);
-        if !parallel.is_empty() {
-            lines.extend(parallel);
-            lines.push(Line::default());
+        blocks.extend([time, skills, context, modes]);
+        blocks.push(sections::project_lines(summary, width));
+        blocks.push(sections::tool_lines(summary, width, 6));
+        if !summary.agents.is_empty() {
+            blocks.push(sections::agent_lines(summary, width, 4));
         }
-        lines.extend(sections::model_lines(summary, width));
-        lines.push(Line::default());
-        if !skills.is_empty() {
-            lines.extend(skills);
-            lines.push(Line::default());
-        }
-        // Same rule as the two-column layout: present drive panels first,
-        // then the bookkeeping pair in fixed order (below the usage sections).
-        for block in [context, modes].into_iter().filter(|b| !b.is_empty()) {
+        blocks.push(sections::cost_lines(summary, width));
+        blocks.push(sections::signal_lines(summary, width));
+        for block in blocks.into_iter().filter(|block| !block.is_empty()) {
             lines.extend(block);
             lines.push(Line::default());
         }
-        lines.extend(sections::project_lines(summary, width));
-        lines.push(Line::default());
-        lines.extend(sections::tool_lines(summary, width, 6));
-        if !summary.agents.is_empty() {
-            lines.push(Line::default());
-            lines.extend(sections::agent_lines(summary, width, 4));
-        }
-        lines.push(Line::default());
-        lines.extend(sections::cost_lines(summary, width));
-        lines.push(Line::default());
-        lines.extend(sections::signal_lines(summary, width));
+        lines.pop();
         return lines;
     }
 
-    // completion | PARALLEL AGENTS, side by side ("PARALLEL next to completion"),
-    // before the model/cost sections.
-    let has_parallel = summary
-        .orchestration
-        .time_by_level
-        .iter()
-        .any(|secs| *secs > 0);
-    if summary.completion_duration.is_some() || summary.interrupted > 0 || has_parallel {
-        let completion = sections::duration_lines(summary, left_u16);
-        let parallel = sections::parallel_lines(summary, right_u16);
-        lines.extend(join_columns(&completion, &parallel, left_width + 2));
-        lines.push(Line::default());
-    }
-
     // Pair sections column-wise so each row of sections starts on the same
-    // line in both columns: MODELS|COST, (SKILLS), PROJECTS|SIGNAL,
-    // line in both columns. Left: MODELS, (SKILLS), PROJECTS, TOOLS. Right:
-    // CONTEXT, MODES, (SUBAGENTS), COST, SIGNAL. The "how you drive it" panels
-    // (CONTEXT, MODES) lead the right column and the bookkeeping panels
-    // (COST, SIGNAL) close it; a tab without context or mode data keeps
-    // COST / SIGNAL in the top slots. SKILLS slots directly under MODELS on
-    // the Claude tab.
+    // line in both columns. Left: MODELS, TURN LENGTH, (SKILLS), PROJECTS,
+    // TOOLS. Right: PARALLEL AGENTS, TIME, CONTEXT, MODES, (SUBAGENTS),
+    // COST, SIGNAL. Rows pair positionally — MODELS | PARALLEL, TURN LENGTH
+    // | TIME, SKILLS | CONTEXT on the Claude tab.
     let mut left_blocks = vec![sections::model_lines(summary, left_u16)];
+    if summary.completion_duration.is_some() || summary.interrupted > 0 {
+        left_blocks.push(sections::duration_lines(summary, left_u16));
+    }
     if !skills.is_empty() {
         left_blocks.push(skills);
     }
     left_blocks.push(sections::project_lines(summary, left_u16));
     left_blocks.push(sections::tool_lines(summary, left_u16, 10));
-    // Whichever "drive" panels exist lead in order, then SUBAGENTS, then the
-    // bookkeeping pair in its own fixed order — so a tab without MODES still
-    // reads CONTEXT, COST, SIGNAL, and one without either keeps COST first.
-    let mut right_blocks: Vec<Vec<Line<'static>>> = [context, modes]
-        .into_iter()
-        .filter(|block| !block.is_empty())
-        .collect();
+
+    let mut right_blocks: Vec<Vec<Line<'static>>> = [
+        sections::parallel_lines(summary, right_u16),
+        time,
+        context,
+        modes,
+    ]
+    .into_iter()
+    .filter(|block| !block.is_empty())
+    .collect();
     if !summary.agents.is_empty() {
         right_blocks.push(sections::agent_lines(summary, right_u16, 5));
     }
@@ -479,21 +459,32 @@ mod tests {
         let page = rendered(&summary, 110);
         assert!(page.contains("CREDITS"));
         assert!(page.contains("30d total"));
-        assert!(page.contains("COMPLETION"));
+        assert!(page.contains("TURN LENGTH"));
+        // Same reading order as the wide layout's rows: MODELS, then
+        // TURN LENGTH, then WORKING TIME, then CONTEXT.
+        let at = |title: &str| page.find(title).expect(title);
+        assert!(at("▍ MODELS") < at("▍ TURN LENGTH"), "{page}");
+        assert!(at("▍ TURN LENGTH") < at("▍ WORKING TIME"), "{page}");
+        assert!(at("▍ WORKING TIME") < at("▍ CONTEXT"), "{page}");
     }
 
     /// Right-column order: the "how you drive it" panels lead (CONTEXT next
     /// to MODELS, then MODES) and the bookkeeping panels close (COST, then
     /// SIGNAL).
     #[test]
-    fn right_column_leads_with_context_and_modes() {
+    fn rows_pair_turn_length_with_working_time_and_skills_with_context() {
         let text = rendered(&v09_summary(Provider::Claude), 120);
-        let models_row = text
-            .lines()
-            .find(|line| line.contains("▍ MODELS"))
-            .expect("models row");
-        assert!(models_row.contains("▍ CONTEXT"), "{models_row}");
+        let row_of = |title: &str| {
+            text.lines()
+                .find(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("{title} row"))
+                .to_owned()
+        };
+        assert!(row_of("▍ TURN LENGTH").contains("▍ WORKING TIME"), "{text}");
+        assert!(row_of("▍ SKILLS").contains("▍ CONTEXT"), "{text}");
         let at = |title: &str| text.find(title).expect(title);
+        assert!(at("▍ MODELS") < at("▍ TURN LENGTH"));
+        assert!(at("▍ WORKING TIME") < at("▍ CONTEXT"));
         assert!(at("▍ CONTEXT") < at("▍ MODES"));
         assert!(at("▍ MODES") < at("▍ COST"));
         assert!(at("▍ COST") < at("▍ SIGNAL"));

@@ -28,7 +28,8 @@ bunx agent-walker
 | よく使う日はいつで、どの時間帯に活発に使っているか | ACTIVITY / BY HOUR |
 | どのプロジェクトで、どのモデルと設定で消費しているか | PROJECTS / MODELS / MODES |
 | 同時に何本のエージェントを走らせているか | PARALLEL AGENTS |
-| エージェントにどのくらいの時間、仕事をさせられているか | COMPLETION |
+| エージェントにどのくらいの時間、仕事をさせられているか | TURN LENGTH |
+| エージェントが実際に働いた時間と、自分が返すまでの速さ | WORKING TIME |
 | 無駄なコンテキストを消費していないか | CONTEXT |
 
 ## share

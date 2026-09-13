@@ -52,6 +52,7 @@ pub fn snapshot_app(report: &AppSummary) -> String {
         // Per-provider cache reuse: the retention rule differs by provider,
         // so the combined record alone would hide which side paid.
         lines.extend(context_line(provider).map(|line| format!("  {line}")));
+        lines.extend(active_time_line(provider).map(|line| format!("  {line}")));
     }
     lines.join("\n")
 }
@@ -120,6 +121,7 @@ pub fn snapshot(summary: &Summary) -> String {
     }
     lines.extend(completion_lines(summary));
     lines.extend(context_line(summary));
+    lines.extend(active_time_line(summary));
 
     lines.push("models:".to_owned());
     for model in summary.models.iter().take(5) {
@@ -192,6 +194,37 @@ fn context_line(summary: &Summary) -> Option<String> {
         context.calls,
         reason(&context.expired),
         reason(&context.cold_start),
+    ))
+}
+
+/// The working-time record over the fixed 30-day window: turn lengths with
+/// the human's answer time removed, that wait on its own, and context read
+/// per active minute.
+fn active_time_line(summary: &Summary) -> Option<String> {
+    let time = summary.active_time.as_ref()?;
+    let pace = time.pace_percentiles().map_or_else(
+        || "-".to_owned(),
+        |(p50, p90)| {
+            format!(
+                "{}/{}/{}",
+                format_duration_ms(p50),
+                format_duration_ms(p90),
+                time.pace_mean_ms()
+                    .map_or_else(|| "-".to_owned(), format_duration_ms)
+            )
+        },
+    );
+    let peak = time.peak_day().map_or_else(
+        || "-".to_owned(),
+        |(date, active_ms)| format!("{}@{}", format_duration_ms(active_ms), format_date(date)),
+    );
+    Some(format!(
+        "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90/avg:{pace} peak_day:{peak}",
+        format_duration_ms(time.active_ms),
+        format_duration_ms(time.human_wait_ms),
+        time.turns,
+        time.context_per_minute()
+            .map_or_else(|| "-".to_owned(), format_tokens),
     ))
 }
 

@@ -13,6 +13,7 @@ mod parallel;
 mod projects;
 mod signal;
 mod skills;
+mod time;
 mod tools;
 
 pub(super) use agents::agent_lines;
@@ -25,4 +26,5 @@ pub(super) use parallel::parallel_lines;
 pub(super) use projects::project_lines;
 pub(super) use signal::signal_lines;
 pub(super) use skills::skill_lines;
+pub(super) use time::time_lines;
 pub(super) use tools::tool_lines;

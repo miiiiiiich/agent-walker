@@ -6,15 +6,15 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
-    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedPermissionEvent,
-    KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent, list_files, merge_into,
-    parse_files_cached, project_from_cwd,
+    FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedPaceEvent,
+    KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent, list_files,
+    merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
-    Collection, DurationEvent, EffortEvent, InterruptEvent, PermissionEvent, Provider,
+    Collection, DurationEvent, EffortEvent, InterruptEvent, PaceEvent, PermissionEvent, Provider,
     RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
@@ -78,6 +78,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
     let mut events = FileEvents::default();
     let mut current_session_id = fallback_session_id(path);
+    let mut pace_state = PaceState::default();
     let mut current_model = None;
     let mut current_project = None;
     let mut session_meta_count = 0usize;
@@ -165,6 +166,13 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         );
         collect_duration_event(&value, timestamp, current_session_id.as_ref(), &mut events);
         collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
+        collect_pace_event(
+            &value,
+            timestamp,
+            current_session_id.as_ref(),
+            &mut pace_state,
+            &mut events,
+        );
         collect_tool_event(
             &value,
             timestamp,
@@ -378,6 +386,65 @@ fn collect_permission_event(
     });
 }
 
+/// Pace bookkeeping per file: the completion the next prompt will pair
+/// with, and the newest completion time ever seen — replayed rows (fork
+/// bursts that leak, resumes) are older than that high-water mark and
+/// must neither re-arm a consumed completion nor rewind a pending one.
+#[derive(Default)]
+struct PaceState {
+    pending_completion: Option<OffsetDateTime>,
+    newest_completion: Option<OffsetDateTime>,
+}
+
+/// The human's pace: `task_complete` → the next `user_message`, when under
+/// the 30-minute cutoff (longer is the human being away). Keyed by session
+/// and prompt time so a replayed prompt row doesn't count twice.
+fn collect_pace_event(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    state: &mut PaceState,
+    events: &mut FileEvents,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return;
+    }
+    match string_path(value, &["payload", "type"]).as_deref() {
+        Some("task_complete") => {
+            if let Some(at) = timestamp
+                && state.newest_completion.is_none_or(|newest| at > newest)
+            {
+                state.newest_completion = Some(at);
+                state.pending_completion = Some(at);
+            }
+        }
+        Some("user_message") => {
+            let Some(prompt_at) = timestamp else {
+                return;
+            };
+            // A replayed (older) prompt row neither records a gap nor
+            // consumes the completion the genuine next prompt will pair with.
+            if let Some(end) = state.pending_completion
+                && prompt_at > end
+                && prompt_at - end <= Duration::minutes(30)
+            {
+                state.pending_completion = None;
+                let gap_ms = u64::try_from((prompt_at - end).whole_milliseconds()).unwrap_or(0);
+                events.pace_events.push(KeyedPaceEvent {
+                    key: session_id.map(|session| {
+                        format!("codex-pace:{session}:{}", prompt_at.unix_timestamp_nanos())
+                    }),
+                    event: PaceEvent {
+                        timestamp: Some(prompt_at),
+                        gap_ms,
+                    },
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_duration_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -400,6 +467,7 @@ fn collect_duration_event(
             timestamp,
             session_id: session_id.cloned(),
             duration_ms,
+            human_wait_ms: 0,
             status,
         },
     });
@@ -707,6 +775,74 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// `task_complete` → the next `user_message` under 30 minutes is the
+    /// human's pace; a prompt an hour later is not.
+    #[test]
+    fn pace_is_task_complete_to_next_user_message() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("rollout.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/tmp/p","cli_version":"0.149.0"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":4000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:00:30Z","type":"event_msg","payload":{"type":"user_message","message":"next"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":30000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T01:30:00Z","type":"event_msg","payload":{"type":"user_message","message":"back"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+        assert_eq!(gaps, vec![26_000]);
+    }
+
+    /// Replayed rows are older than the state they meet: a replayed prompt
+    /// must not consume the latest completion, and a replayed completion
+    /// must not rewind it — the genuine next prompt still pairs correctly.
+    #[test]
+    fn replayed_codex_rows_do_not_disturb_pace_state() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("rollout.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/tmp/p","cli_version":"0.149.0"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":1000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:02:00Z","type":"event_msg","payload":{"type":"user_message","message":"a"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:03:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":1000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":1000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:02:00Z","type":"event_msg","payload":{"type":"user_message","message":"a"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:04:00Z","type":"event_msg","payload":{"type":"user_message","message":"b"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:03:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":1000}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-01T00:05:00Z","type":"event_msg","payload":{"type":"user_message","message":"mid-turn"}}"#,
+                "\n"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+        // 00:01 -> 00:02 and 00:03 -> 00:04; the replayed pair adds nothing,
+        // and a replayed completion after the pairing cannot re-arm a gap
+        // for the 00:05 prompt.
+        assert_eq!(gaps, vec![60_000, 60_000]);
+    }
 
     #[test]
     fn collects_codex_token_count_tools_and_duration() {

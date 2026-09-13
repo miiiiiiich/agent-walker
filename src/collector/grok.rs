@@ -375,6 +375,7 @@ fn collect_turn_usage(
                 timestamp,
                 session_id: session_id.cloned(),
                 duration_ms,
+                human_wait_ms: 0,
                 status: Some("turn".to_owned()),
             },
         });

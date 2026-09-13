@@ -41,7 +41,7 @@ tab appears only when a matching DB exists.
 - **Project** from `data.path.cwd` (the working directory), labeled like the other
   providers.
 - **Durations** from `data.time.created` → `time.completed` per assistant message
-  → the COMPLETION section.
+  → the TURN LENGTH section.
 - **Tools** from `part` rows of `type:"tool"` (the `tool` field: `glob` / `read` /
   `edit` / `bash` / an MCP name).
 - **Sessions / activity / hourly** from message timestamps (`time.created`).

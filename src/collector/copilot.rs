@@ -157,7 +157,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             }
             // Explicit turn boundaries (unlike Claude, whose turn durations
             // are inferred from prompt-to-activity gaps) — pair start/end by
-            // turnId for the COMPLETION panel.
+            // turnId for the TURN LENGTH panel.
             Some("assistant.turn_start") => {
                 if let (Some(turn_id), Some(timestamp)) = (turn_id(&value), timestamp) {
                     turn_starts.insert(turn_id, timestamp);
@@ -364,6 +364,7 @@ fn collect_turn_duration(
                 timestamp: Some(end),
                 session_id: session_id.cloned(),
                 duration_ms: u64::try_from((end - start).whole_milliseconds()).unwrap_or(0),
+                human_wait_ms: 0,
                 status: Some("turn".to_owned()),
             },
         });

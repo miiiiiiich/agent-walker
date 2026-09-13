@@ -22,8 +22,10 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
     }
     let total = context.effective_tokens;
     // Rows carry a value AND a share column; the shared `bar_width_for`
-    // budgets only a count column, so size the bar for label + value + share.
-    let bar_width = usize::from(width).saturating_sub(14 + 9 + 7).max(4);
+    // budgets only a count column, so size the bar for label + value + share
+    // — and cap it like MODELS / SKILLS so a wide rail doesn't stretch this
+    // panel's bars past every other section's.
+    let bar_width = usize::from(width).saturating_sub(14 + 9 + 7).clamp(8, 24);
     if total == 0 {
         return vec![utils::section_title(
             "CONTEXT",
