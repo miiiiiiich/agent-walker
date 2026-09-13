@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - WORKING TIME: how long the agent actually worked over the last 30 days —
   turn lengths minus the time you spent answering `AskUserQuestion`. Also
-  context read per working minute, the peak day, and your pace (median /
-  p90 gap before your next prompt; gaps over 30 minutes are left out).
+  context read per working minute, the peak day, and your pace (p50 / p90 /
+  average gap before your next prompt; gaps over 30 minutes are left out).
 - `--snapshot` gains an `active_time_30d` record.
 
 ### Changed

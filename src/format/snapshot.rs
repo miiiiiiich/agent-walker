@@ -204,14 +204,22 @@ fn active_time_line(summary: &Summary) -> Option<String> {
     let time = summary.active_time.as_ref()?;
     let pace = time.pace_percentiles().map_or_else(
         || "-".to_owned(),
-        |(p50, p90)| format!("{}/{}", format_duration_ms(p50), format_duration_ms(p90)),
+        |(p50, p90)| {
+            format!(
+                "{}/{}/{}",
+                format_duration_ms(p50),
+                format_duration_ms(p90),
+                time.pace_mean_ms()
+                    .map_or_else(|| "-".to_owned(), format_duration_ms)
+            )
+        },
     );
     let peak = time.peak_day().map_or_else(
         || "-".to_owned(),
         |(date, active_ms)| format!("{}@{}", format_duration_ms(active_ms), format_date(date)),
     );
     Some(format!(
-        "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90:{pace} peak_day:{peak}",
+        "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90/avg:{pace} peak_day:{peak}",
         format_duration_ms(time.active_ms),
         format_duration_ms(time.human_wait_ms),
         time.turns,

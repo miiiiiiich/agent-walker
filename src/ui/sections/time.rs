@@ -97,26 +97,41 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
             ),
         ]));
     }
-    if let Some((p50, p90)) = time.pace_percentiles() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<label_width$}", "your pace"),
-                Style::default().fg(theme::MUTED),
-            ),
-            Span::styled(
-                format_duration_ms(p50),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  p90 {}  between turns", format_duration_ms(p90)),
-                Style::default().fg(theme::MUTED),
-            ),
-        ]));
-    }
+    lines.extend(pace_line(time, label_width));
     lines.push(utils::kv("turns", &format_count(time.turns), label_width));
     lines
+}
+
+/// Your pace as one row: p50 / p90 / average gap before a prompt.
+fn pace_line(time: &crate::model::ActiveTimeSummary, label_width: usize) -> Option<Line<'static>> {
+    let (p50, p90) = time.pace_percentiles()?;
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<label_width$}", "your pace"),
+            Style::default().fg(theme::MUTED),
+        ),
+        Span::styled("p50 ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            format_duration_ms(p50),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · p90 ", Style::default().fg(theme::MUTED)),
+        Span::styled(format_duration_ms(p90), Style::default().fg(theme::TEXT)),
+    ];
+    if let Some(mean) = time.pace_mean_ms() {
+        spans.push(Span::styled(" · avg ", Style::default().fg(theme::MUTED)));
+        spans.push(Span::styled(
+            format_duration_ms(mean),
+            Style::default().fg(theme::TEXT),
+        ));
+    }
+    spans.push(Span::styled(
+        "  between turns",
+        Style::default().fg(theme::MUTED),
+    ));
+    Some(Line::from(spans))
 }
 
 #[cfg(test)]
@@ -153,7 +168,10 @@ mod tests {
             "{text:?}"
         );
         assert!(
-            text[5].contains("your pace") && text[5].contains("p90"),
+            text[5].contains("your pace")
+                && text[5].contains("p50")
+                && text[5].contains("p90")
+                && text[5].contains("avg"),
             "{text:?}"
         );
 

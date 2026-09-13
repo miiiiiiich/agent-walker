@@ -196,6 +196,15 @@ impl ActiveTimeSummary {
             .max_by_key(|(_, active_ms)| *active_ms)
     }
 
+    /// Your pace, on average — the mean gap before a prompt.
+    pub fn pace_mean_ms(&self) -> Option<u64> {
+        if self.pace_gaps_ms.is_empty() {
+            return None;
+        }
+        let total: u128 = self.pace_gaps_ms.iter().map(|&gap| u128::from(gap)).sum();
+        Some(u64::try_from(total / self.pace_gaps_ms.len() as u128).unwrap_or(u64::MAX))
+    }
+
     /// Your pace: the median and p90 gap before a prompt; `None` without
     /// any recorded gap.
     pub fn pace_percentiles(&self) -> Option<(u64, u64)> {
@@ -334,7 +343,9 @@ mod active_time_tests {
             ..ActiveTimeSummary::default()
         };
         assert_eq!(summary.pace_percentiles(), Some((5_000, 9_000)));
+        assert_eq!(summary.pace_mean_ms(), Some(5_500));
         assert!(ActiveTimeSummary::default().pace_percentiles().is_none());
+        assert!(ActiveTimeSummary::default().pace_mean_ms().is_none());
     }
 }
 
