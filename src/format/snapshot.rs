@@ -218,9 +218,17 @@ fn active_time_line(summary: &Summary) -> Option<String> {
         || "-".to_owned(),
         |(date, active_ms)| format!("{}@{}", format_duration_ms(active_ms), format_date(date)),
     );
-    let model = time
-        .model_share()
-        .map_or_else(|| "-".to_owned(), |share| format!("{:.0}%", share * 100.0));
+    // The split covers only providers whose logs can tell — say how much.
+    let model = time.model_share().map_or_else(
+        || "-".to_owned(),
+        |share| {
+            format!(
+                "{:.0}%/of:{}",
+                share * 100.0,
+                format_duration_ms(time.measured_ms)
+            )
+        },
+    );
     Some(format!(
         "active_time_30d: active:{} waiting:{} turns:{} context_per_min:{} pace_p50/p90/avg:{pace} peak_day:{peak} model_share:{model}",
         format_duration_ms(time.active_ms),

@@ -81,7 +81,7 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
             ),
         ]));
     }
-    lines.extend(made_of_line(time, label_width));
+    lines.extend(made_of_line(time, label_width, width));
     if let Some((date, active_ms)) = time.peak_day() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -110,33 +110,65 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
 fn made_of_line(
     time: &crate::model::ActiveTimeSummary,
     label_width: usize,
+    width: u16,
 ) -> Option<Line<'static>> {
     let model = time.model_share()?;
     let pct = |share: f64| format!("{:.0}%", share * 100.0);
-    let mut spans = vec![
+    let label = Span::styled(
+        format!("{:<label_width$}", "made of"),
+        Style::default().fg(theme::MUTED),
+    );
+    let model_span = |text: String| {
         Span::styled(
-            format!("{:<label_width$}", "made of"),
-            Style::default().fg(theme::MUTED),
-        ),
-        Span::styled("model ", Style::default().fg(theme::MUTED)),
-        Span::styled(
-            pct(model),
+            text,
             Style::default()
                 .fg(theme::TEXT)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" · tools ", Style::default().fg(theme::MUTED)),
-        Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
-    ];
-    // Providers whose logs can't tell (Copilot, OpenCode) are outside
-    // the split; say how much of the total it actually covers.
-    if time.measured_ms < time.active_ms {
-        spans.push(Span::styled(
-            format!("  of {} measured", format_hours(time.measured_ms)),
-            Style::default().fg(theme::MUTED),
-        ));
+        )
+    };
+    let muted = |text: String| Span::styled(text, Style::default().fg(theme::MUTED));
+    if time.measured_ms >= time.active_ms {
+        return Some(Line::from(vec![
+            label,
+            muted("model ".to_owned()),
+            model_span(pct(model)),
+            muted(" · tools ".to_owned()),
+            Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
+        ]));
     }
-    Some(Line::from(spans))
+    // Providers whose logs can't tell (Copilot, OpenCode) are outside the
+    // split, so the row must say how much of the total it covers — in
+    // whichever form fits the rail, never clipped off the end: the
+    // qualifier is the point of the row, so the tools half goes first.
+    let measured = format_hours(time.measured_ms);
+    let budget = usize::from(width).saturating_sub(label_width);
+    let full = format!(
+        "model {} · tools {}  of {measured} measured",
+        pct(model),
+        pct(1.0 - model)
+    );
+    let mid = format!(
+        "model {} · tools {} ({measured})",
+        pct(model),
+        pct(1.0 - model)
+    );
+    let short = format!("model {} of {measured}", pct(model));
+    let text = [full, mid, short]
+        .into_iter()
+        .find(|text| text.chars().count() <= budget)
+        .unwrap_or_else(|| format!("model {}", pct(model)));
+    let (head, rest) = text.split_at("model ".len());
+    let (value, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+    Some(Line::from(vec![
+        label,
+        muted(head.to_owned()),
+        model_span(value.to_owned()),
+        muted(if tail.is_empty() {
+            String::new()
+        } else {
+            format!(" {tail}")
+        }),
+    ]))
 }
 
 /// Your pace as one row: p50 / p90 / average gap before a prompt.
@@ -211,17 +243,12 @@ mod tests {
             time.measured_ms = time.active_ms;
         }
         assert!(!rendered(&time_lines(&full, 60)[4]).contains("measured"));
-        assert!(
-            text[5].contains("peak day") && text[5].contains("Sep 3"),
-            "{text:?}"
-        );
-        assert!(
-            text[6].contains("your pace")
-                && text[6].contains("p50")
-                && text[6].contains("p90")
-                && text[6].contains("avg"),
-            "{text:?}"
-        );
+        // Narrower rails keep the coverage in a shorter form, never clipped.
+        for width in [60_u16, 46, 38, 32] {
+            let row = rendered(&time_lines(&summary, width)[4]);
+            assert!(row.contains("80h 00m"), "{width}: {row}");
+            assert!(row.chars().count() <= usize::from(width), "{width}: {row}");
+        }
 
         let mut silent = summary;
         silent.active_time = None;
