@@ -111,10 +111,6 @@ impl Codename {
 // One axis only: tokens/day over the window. All numbers are provisional and
 // meant to be recalibrated against real-world reports. Retune here only.
 
-/// The level always reflects the most recent N days of token throughput.
-/// The analyzer fills `Summary::recent_window_volume` over this same window.
-pub(crate) const CODENAME_WINDOW_DAYS: i64 = 30;
-
 /// The ladder, top rank first: minimum tokens/day over the window, plus the
 /// rank's animals as ascending steps toward the next rank. Steps split the
 /// band log-uniformly, so each step is the same *ratio* of growth. Every
@@ -158,7 +154,8 @@ const OPS_DOMINANCE_PT: f64 = 15.0;
 /// tab's throughput earns by itself.
 pub fn for_summary(summary: &Summary) -> Codename {
     let ops = ops(&summary.hourly_usage);
-    let tokens_per_day = summary.recent_window_volume as f64 / CODENAME_WINDOW_DAYS as f64;
+    let tokens_per_day =
+        summary.recent_window_volume as f64 / f64::from(summary.period_days.max(1));
     if summary.recent_window_active_days < FLOOR_MIN_DAYS {
         return unranked(ops);
     }
@@ -270,7 +267,7 @@ mod tests {
     /// healthy number of active days.
     fn summary_at(tokens_per_day: u64) -> Summary {
         let mut summary = crate::share::fixtures::sample_summary();
-        summary.recent_window_volume = tokens_per_day * CODENAME_WINDOW_DAYS as u64;
+        summary.recent_window_volume = tokens_per_day * u64::from(summary.period_days);
         summary.recent_window_active_days = 25;
         summary
     }
@@ -367,7 +364,7 @@ mod tests {
         let combined = summary_at(800_000_000);
         let mut tab = combined.clone();
         tab.provider = crate::model::Provider::Claude;
-        tab.recent_window_volume = 250_000_000 * CODENAME_WINDOW_DAYS as u64;
+        tab.recent_window_volume = 250_000_000 * u64::from(tab.period_days);
         assert_eq!(for_summary(&combined).animal, "Orca");
         assert_eq!(for_summary(&tab).animal, "Octopus");
         assert_eq!(for_summary(&tab).rank, Rank::A);

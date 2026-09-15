@@ -55,7 +55,7 @@ pub struct AgentStat {
     pub calls: usize,
 }
 
-/// Per-skill token volume over the fixed 30-day window (Claude
+/// Per-skill token volume over the analysis window (Claude
 /// `attributionSkill`). TUI-only — must never reach the share card.
 #[derive(Debug, Clone)]
 pub struct SkillStat {
@@ -73,7 +73,7 @@ pub enum LimitDay {
     Measured(f64),
 }
 
-/// Daily-peak history of the plan's 5h window over the fixed 30-day window,
+/// Daily-peak history of the plan's 5h window over the analysis window,
 /// oldest day first.
 #[derive(Debug, Clone)]
 pub struct LimitsHistory {
@@ -81,7 +81,7 @@ pub struct LimitsHistory {
     pub peak: Option<(Date, f64)>,
 }
 
-/// Daily AI-credit spend over the fixed 30-day window (Copilot). Historical
+/// Daily AI-credit spend over the analysis window (Copilot). Historical
 /// by design — spend that already happened, not a remaining-quota meter.
 #[derive(Debug, Clone)]
 pub struct CreditsHistory {
@@ -91,7 +91,7 @@ pub struct CreditsHistory {
     pub peak: Option<(Date, f64)>,
 }
 
-/// Mode usage over the fixed 30-day window: how the user lets the model
+/// Mode usage over the analysis window: how the user lets the model
 /// think. Claude: thinking-block fire rate (+ fast mode when used) and the
 /// reasoning-effort distribution (top-level `effort`, CLI v2.1.212+);
 /// Codex: reasoning-effort distribution.
@@ -156,7 +156,7 @@ pub struct DurationBucket {
     pub count: usize,
 }
 
-/// TIME panel data over the fixed 30-day window: how long the agent was
+/// TIME panel data over the analysis window: how long the agent was
 /// working (turn lengths with the human's answer time removed) and how much
 /// context it read per minute of that. `Some` whenever a turn completed in
 /// the window.
@@ -386,7 +386,7 @@ pub struct Orchestration {
     pub time_by_level: [u64; 6],
 }
 
-/// CONTEXT panel data over the fixed 30-day window. The token totals (and so
+/// CONTEXT panel data over the analysis window. The token totals (and so
 /// the cached share) cover every dated usage event; the call-level rows —
 /// bands, cold starts, expiries, ordinary uncached input — cover main-chain
 /// calls of providers whose events are calls, and everything else lands in
@@ -549,23 +549,22 @@ pub struct Summary {
     pub root: PathBuf,
     pub scan_stats: ScanStats,
     pub total_usage: TokenUsage,
-    /// Token volume over the most recent fixed codename window (last 30 days,
-    /// inclusive of `period_end`), independent of the display `--days`. The
-    /// codename level divides this by the window length so it never drifts with
-    /// the chosen window.
+    /// Token volume over `period_start..=period_end`, counting only events
+    /// that carried tokens. The codename divides this by `period_days`, so
+    /// the rate it ranks on is a per-day figure over whatever span the
+    /// caller asked for.
     pub recent_window_volume: u64,
-    /// Distinct active days within the same fixed 30-day window. Used as the
-    /// codename's data-sufficiency floor so a short `--days` view can't demote a
-    /// real user to the no-data rank.
+    /// Distinct days in the same span that carried tokens (not session
+    /// touches). The codename's data-sufficiency floor reads this.
     pub recent_window_active_days: usize,
     pub daily: Vec<DailyStat>,
     pub daily_sessions: Vec<DailySessions>,
     pub model_daily: Vec<ModelDailyStat>,
     pub models: Vec<ModelStat>,
     pub agents: Vec<AgentStat>,
-    /// Fixed 30-day window (same as the codename window), NOT the display
-    /// `--days` — attribution fields exist only in recent logs, so an
-    /// all-time cut would silently under-count.
+    /// Same window as every other section. Attribution fields exist only in
+    /// recent logs, so a long span mixes eras: a skill missing from the older
+    /// half may only mean the field wasn't written yet.
     pub skills: Vec<SkillStat>,
     pub limits: Option<LimitsHistory>,
     pub credits: Option<CreditsHistory>,
@@ -590,11 +589,11 @@ pub struct Summary {
     /// `completion_duration`: a window can hold interruptions and no
     /// completed turn.
     pub interrupted: usize,
-    /// Cache reuse over the fixed 30-day window: event totals (the cached
+    /// Cache reuse over the analysis window: event totals (the cached
     /// share) plus optional call-level rows; `None` when no event carried
     /// context. The Total tab holds the sum of the provider summaries.
     pub context: Option<ContextSummary>,
-    /// Working time and context-per-minute over the fixed 30-day window;
+    /// Working time and context-per-minute over the analysis window;
     /// `None` when no turn completed there.
     pub active_time: Option<ActiveTimeSummary>,
     pub orchestration: Orchestration,

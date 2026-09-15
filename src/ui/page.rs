@@ -415,7 +415,6 @@ mod tests {
             grok_dir: None,
             opencode_dir: None,
             cursor: None,
-            days: 30,
             use_cache: false,
             local_offset: time::UtcOffset::UTC,
         };

@@ -3,7 +3,7 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// WORKING TIME: how long the agent was actually working over the fixed 30-day
+/// WORKING TIME: how long the agent was actually working over the analysis
 /// window, and how much context it re-read per minute of that. The turn
 /// length minus the human's answer time is the working time — tool runs and
 /// polling loops stay in (the agent was on the job), `AskUserQuestion`
@@ -29,11 +29,16 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     // form when the rail has room, shorter otherwise, never clipped
     // mid-word. The prefix budget covers "▍ WORKING TIME  ".
     let budget = usize::from(width).saturating_sub("▍ WORKING TIME  ".chars().count());
-    let annotation = ["30d · gaps over 30m excluded", "30d · >30m gaps out", "30d"]
-        .into_iter()
-        .find(|text| text.chars().count() <= budget)
-        .unwrap_or("30d");
-    let mut lines = vec![utils::section_title("WORKING TIME", annotation)];
+    let window = utils::window_label(summary);
+    let annotation = [
+        format!("{window} · gaps over 30m excluded"),
+        format!("{window} · >30m gaps out"),
+        window.clone(),
+    ]
+    .into_iter()
+    .find(|text| text.chars().count() <= budget)
+    .unwrap_or(window);
+    let mut lines = vec![utils::section_title("WORKING TIME", &annotation)];
     lines.push(Line::from(vec![
         Span::styled(
             format!("{:<label_width$}", "total"),

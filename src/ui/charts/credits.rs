@@ -32,7 +32,8 @@ pub(in crate::ui) fn credits_chart_lines(
         return Vec::new();
     }
     let annotation = format!(
-        "30d total {total} · peak {peak} · {month} {day}",
+        "{window} total {total} · peak {peak} · {month} {day}",
+        window = utils::window_label(summary),
         total = utils::format_credits(credits.total),
         peak = utils::format_credits(peak_value),
         month = utils::month_abbrev(peak_date.month()),

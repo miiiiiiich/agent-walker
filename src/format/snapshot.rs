@@ -176,8 +176,9 @@ fn completion_lines(summary: &Summary) -> Vec<String> {
     lines
 }
 
-/// The cache-reuse record over the fixed 30-day window (hence the `_30d`
-/// key — the rest of the snapshot follows `--days`): cached share,
+/// The cache-reuse record. The `_30d` key names the window the CLI always
+/// asks for; a caller that summarizes a different span gets that span under
+/// this key. Cached share,
 /// input-equivalent volume, and the two behaviours that pay full price for a
 /// prefix. `-` when the provider has no session notion.
 fn context_line(summary: &Summary) -> Option<String> {
@@ -197,7 +198,7 @@ fn context_line(summary: &Summary) -> Option<String> {
     ))
 }
 
-/// The working-time record over the fixed 30-day window: turn lengths with
+/// The working-time record over the analysis window: turn lengths with
 /// the human's answer time removed, that wait on its own, and context read
 /// per active minute.
 fn active_time_line(summary: &Summary) -> Option<String> {

@@ -6,7 +6,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{Collection, ModesSummary};
 
-/// Mode usage over the fixed 30-day window: Claude thinking / fast flags per
+/// Mode usage over the analysis window: Claude thinking / fast flags per
 /// assistant message, reasoning effort per Claude message / Codex turn.
 pub(super) fn modes_summary(
     collection: &Collection,

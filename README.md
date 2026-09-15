@@ -23,14 +23,23 @@ bunx agent-walker
 
 More than each agent's `status` or `usage` command tells you.
 
+Every section reads the same window: the last 30 days.
+
 | Question | Section |
 |---|---|
 | Which days you use it most, and at what hours | ACTIVITY / BY HOUR |
+| How the daily burn splits across models | TOKENS PER DAY |
 | Which projects, models and settings eat the tokens | PROJECTS / MODELS / MODES |
+| Which tools and subagents do the work | TOOLS / SUBAGENTS |
+| Which skills the tokens went to (Claude) | SKILLS |
 | How many agents you run at once | PARALLEL AGENTS |
 | How long you actually let an agent work | TURN LENGTH |
 | How many hours the agent worked, and how fast you answer it | WORKING TIME |
 | Whether you're wasting context | CONTEXT |
+| What it would have cost on the API | COST |
+| How close you got to the plan limit (Codex) | LIMITS |
+| How many AI credits you spent (Copilot) | CREDITS |
+| Your favourite model, best day, peak hour, longest session, streak | SIGNAL |
 
 ## Share
 
@@ -64,7 +73,6 @@ agent-walker sends your logs nowhere. The only network use is fetching the price
 
 | Flag | What it does |
 |---|---|
-| `--days <N>` | analysis window (default 30) |
 | `--share <path>` | write the share image to a PNG and exit |
 | `--no-cache` | reread every log |
 | `--no-cursor` | skip Cursor (no network at all) |

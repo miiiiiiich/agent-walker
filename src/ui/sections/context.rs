@@ -29,11 +29,11 @@ pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'s
     if total == 0 {
         return vec![utils::section_title(
             "CONTEXT",
-            &context_annotation(context, width),
+            &context_annotation(context, summary, width),
         )];
     }
     let mut lines = vec![
-        utils::section_title("CONTEXT", &context_annotation(context, width)),
+        utils::section_title("CONTEXT", &context_annotation(context, summary, width)),
         // Column legend: the value is input-equivalent tokens per call (so
         // "keep going" and "start fresh" compare directly), the share is the
         // row's slice of the effective total. Without it the values read as
@@ -125,17 +125,18 @@ fn per_call_reason(reason: &ContextReason) -> String {
 
 /// Width-fitted title annotation: the fixed window, the cached share, and
 /// the effective volume, dropping from the right until it fits.
-fn context_annotation(context: &ContextSummary, width: u16) -> String {
+fn context_annotation(context: &ContextSummary, summary: &Summary, width: u16) -> String {
     let budget = usize::from(width).saturating_sub("▍ CONTEXT  ".chars().count());
     let cached = format!("{:.0}% cached", context.cached_share() * 100.0);
-    // Fixed 30-day window, labelled like SKILLS / MODES so the page header's
-    // `--days` is never mistaken for this panel's period.
+    // The window is spelled out here like SKILLS / MODES do, so the panel
+    // never reads as an all-time figure.
     let effective = format_tokens(context.effective_tokens);
+    let window = utils::window_label(summary);
     [
-        format!("30d · {cached} · {effective} effective input"),
-        format!("30d · {cached} · {effective} effective"),
-        format!("30d · {cached}"),
-        "30d".to_owned(),
+        format!("{window} · {cached} · {effective} effective input"),
+        format!("{window} · {cached} · {effective} effective"),
+        format!("{window} · {cached}"),
+        window.clone(),
     ]
     .into_iter()
     .find(|text| text.chars().count() <= budget)

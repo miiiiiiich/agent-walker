@@ -117,11 +117,14 @@ fn cached_share_rides_header_and_caption() {
     assert!(!svg(&card).contains("cached"));
     assert!(!card.caption().contains("cached"));
 
-    // The ratio is a fixed-30-day metric: a 7-day card leaves it out rather
-    // than quoting a window its other stats don't cover.
+    // Every section reads one window, so the ratio rides along whatever span
+    // the caller asked for — no coincidence check.
     let mut summary = sample_summary();
     summary.period_days = 7;
-    assert_eq!(ShareCard::from_summary(&summary).cached, None);
+    assert_eq!(
+        ShareCard::from_summary(&summary).cached.as_deref(),
+        Some("95% cached")
+    );
 }
 
 /// X counts every character (whitespace included) and each URL as 23.
@@ -189,9 +192,8 @@ fn card_rank_badge_reflects_own_volume() {
     // the bottom of the A band → Octopus. The rank pill carries the 冠位
     // colour for A (blue) and the caption carries the letters — never a step
     // counter.
-    let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
     let mut summary = sample_summary();
-    summary.recent_window_volume = 250_000_000 * window;
+    summary.recent_window_volume = 250_000_000 * u64::from(summary.period_days);
     summary.recent_window_active_days = 29;
 
     let card = ShareCard::from_summary(&summary);
@@ -221,10 +223,9 @@ fn card_rank_badge_reflects_own_volume() {
 
 #[test]
 fn rank_badge_variants_cover_width_and_ink_lift() {
-    let window = crate::codename::CODENAME_WINDOW_DAYS as u64;
     let card_at = |tokens_per_day: u64| {
         let mut summary = sample_summary();
-        summary.recent_window_volume = tokens_per_day * window;
+        summary.recent_window_volume = tokens_per_day * u64::from(summary.period_days);
         summary.recent_window_active_days = 29;
         ShareCard::from_summary(&summary)
     };

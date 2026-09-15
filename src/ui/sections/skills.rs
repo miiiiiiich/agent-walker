@@ -3,8 +3,8 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// SKILLS: token volume by Claude `attributionSkill` over the fixed 30-day
-/// window (the display `--days` does not apply — attribution fields exist
+/// SKILLS: token volume by Claude `attributionSkill` over the analysis
+/// window (attribution fields exist
 /// only in recent logs). Claude-tab only, TUI-only: skill names are
 /// personal-environment labels that must never reach the share card, so this
 /// section reads `summary.skills`, never the `models` path the card renders.
@@ -20,13 +20,14 @@ pub(in crate::ui) fn skill_lines(
     let attributed = summary.skills.iter().fold(0_u64, |sum, skill| {
         sum.saturating_add(skill.usage.token_volume())
     });
+    let window = utils::window_label(summary);
     let subtitle = if summary.recent_window_volume > 0 {
         format!(
-            "30d · attributed {} of volume",
+            "{window} · attributed {} of volume",
             format_percent(attributed, summary.recent_window_volume)
         )
     } else {
-        "30d".to_owned()
+        window
     };
     let max_volume = summary
         .skills
