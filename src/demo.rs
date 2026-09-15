@@ -523,19 +523,26 @@ pub fn demo_report(config: &Config) -> AppSummary {
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
 
     let collections = vec![
-        claude_collection(now, config.days, &mut rng),
-        codex_collection(now, config.days, &mut rng),
+        claude_collection(now, crate::app::ANALYSIS_WINDOW_DAYS, &mut rng),
+        codex_collection(now, crate::app::ANALYSIS_WINDOW_DAYS, &mut rng),
     ];
 
     let providers = collections
         .iter()
-        .map(|collection| summarize(collection, now, config.days, config.local_offset))
+        .map(|collection| {
+            summarize(
+                collection,
+                now,
+                crate::app::ANALYSIS_WINDOW_DAYS,
+                config.local_offset,
+            )
+        })
         .collect::<Vec<_>>();
     let combined = crate::app::finish_combined(
         summarize(
             &Collection::combined(PathBuf::from("demo data"), &collections),
             now,
-            config.days,
+            crate::app::ANALYSIS_WINDOW_DAYS,
             config.local_offset,
         ),
         &providers,
@@ -543,7 +550,7 @@ pub fn demo_report(config: &Config) -> AppSummary {
 
     AppSummary {
         generated_at: now,
-        period_days: config.days.max(1),
+        period_days: crate::app::ANALYSIS_WINDOW_DAYS,
         load_duration_ms: 0,
         combined,
         providers,

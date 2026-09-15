@@ -165,17 +165,12 @@ impl ShareCard {
             tokens: format_tokens(total),
             cost: tally.complete_usd().map(format_usd),
             has_reported_cost,
-            // The cache share is a fixed-30-day metric (like SKILLS / MODES);
-            // the card's other stats follow `--days`, so it rides along only
-            // when the two windows coincide — a 7-day card must not quote a
-            // 30-day ratio.
+            // Every section reads the same window, so the cache share is on the
+            // same footing as the rest of the card.
             cached: summary
                 .context
                 .as_ref()
-                .filter(|context| {
-                    context.context_tokens > 0
-                        && i64::from(summary.period_days) == crate::codename::CODENAME_WINDOW_DAYS
-                })
+                .filter(|context| context.context_tokens > 0)
                 .map(|context| format!("{:.0}% cached", context.cached_share() * 100.0)),
             sessions: summary.sessions,
             models,

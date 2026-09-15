@@ -1,6 +1,16 @@
 //! CLI arguments, resolved configuration, and the default log-location
 //! probes — what the app reads and which mode it runs in (report, share,
 //! render, completions), separate from how the report is assembled.
+/// The analysis window, in days. Every section reads the same span — one
+/// window, so nothing on screen silently covers a different period.
+///
+/// This is fixed for the TUI on purpose: the day charts draw one column per
+/// day, and squeezing a longer span into them would fold the trend away. The
+/// analyzer itself takes the window as an argument (`summarize(..., days,
+/// ...)`), so a future machine-readable output can ask for 90 days or any
+/// other span without touching the aggregation layer.
+pub const ANALYSIS_WINDOW_DAYS: u16 = 30;
+
 use std::env;
 use std::path::PathBuf;
 
@@ -69,12 +79,6 @@ pub struct Args {
     #[arg(long)]
     pub no_cursor: bool,
 
-    /// Analysis window. Defaults to 30 days — Claude Code retains roughly a
-    /// month of logs. The codename level is always computed from the most recent
-    /// 30 days, so changing this only resizes the graphs, never the title.
-    #[arg(long, default_value_t = 30, value_name = "DAYS")]
-    pub days: u16,
-
     /// Ignore the per-file parse cache and rescan everything.
     #[arg(long)]
     pub no_cache: bool,
@@ -131,7 +135,6 @@ pub struct Config {
     /// the CLI-config path, and an optional token override. Auto-detected, but
     /// the one collector that reaches the network.
     pub cursor: Option<CursorConfig>,
-    pub days: u16,
     pub use_cache: bool,
     /// Local UTC offset captured at startup (single-threaded moment), used to
     /// bucket all timestamps into the user's local days and hours.

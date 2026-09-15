@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- `--days`. The window is fixed at 30 days; passing the flag is now an error
+  rather than a silent no-op for half the screen.
+
+### Changed
+
+- Every section now reads the same window. SKILLS, LIMITS, CREDITS, MODES,
+  CONTEXT and WORKING TIME used to ignore `--days` and always show 30 days,
+  which no document mentioned.
+- The day charts draw one column per day, so a longer span would have folded
+  the trend away — the window is fixed rather than configurable. The analyzer
+  still takes it as an argument for future use.
+- README gains the sections that were missing from its table: TOKENS PER
+  DAY, TOOLS, SUBAGENTS, SKILLS, COST, LIMITS, CREDITS and SIGNAL.
+
 ## [0.16.0] - 2026-09-14
 
 ### Added

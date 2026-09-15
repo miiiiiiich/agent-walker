@@ -15,7 +15,7 @@ pub(in crate::ui) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'sta
     if modes.is_empty() {
         return Vec::new();
     }
-    let mut lines = vec![utils::section_title("MODES", "30d")];
+    let mut lines = vec![utils::section_title("MODES", &utils::window_label(summary))];
     let bar_width = usize::from(width).saturating_sub(30).clamp(6, 16);
 
     if modes.assistant_turns > 0 {

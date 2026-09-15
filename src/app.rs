@@ -13,7 +13,7 @@ use crate::ui;
 
 mod config;
 
-pub use config::{Args, Config};
+pub use config::{ANALYSIS_WINDOW_DAYS, Args, Config};
 use config::{
     cursor_config, default_agy_dir, default_claude_dir, default_codex_dir, default_opencode_dir,
     demo_enabled,
@@ -59,7 +59,6 @@ pub fn run(args: Args) -> Result<()> {
         // Cursor is auto-detected (a signed-in state.vscdb) but is the one
         // collector that reaches the network; `None` when signed out / disabled.
         cursor,
-        days: args.days,
         use_cache: !args.no_cache,
         local_offset,
     };
@@ -238,12 +237,10 @@ pub(crate) fn finish_combined(
 }
 
 /// A provider earns a tab only if it has real activity. Token volume catches
-/// most agents; sessions, tools, completions, interruptions, fixed-window
-/// context volume, and the fixed-window credit ledger are the fallback for a session that logged
-/// activity but no usage tokens (Copilot credits cut on the fixed 30-day
-/// window, so they can exist even when a short `--days` display window is
-/// empty). Everything false ⇒ the directory was missing or empty, so the tab
-/// is dropped instead of showing a blank tab.
+/// most agents; sessions, tools, completions, interruptions, context volume
+/// and the credit ledger are the fallback for a session that logged activity
+/// but no usage tokens. Everything false ⇒ the directory was missing or
+/// empty, so the tab is dropped instead of showing a blank tab.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
@@ -284,12 +281,15 @@ fn load_report_inner(
     let started = Instant::now();
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
 
-    // Read the larger of the delta window (2× the display window plus a day of
-    // timezone slack) and the codename's fixed 30-day window, so the title stays
-    // window-stable even for a short `--days`. Files older than this cannot hold
-    // relevant events.
-    let history_days = (u64::from(config.days.max(1)) * 2 + 1)
-        .max(u64::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30) + 1);
+    // Twice the analysis window plus a day of timezone slack: the second
+    // window feeds the period-over-period delta. Files older than this cannot
+    // hold relevant events.
+    //
+    // The analyzer takes its window as an argument, but this floor does not —
+    // it is tied to the window the CLI asks for. A caller wanting a longer
+    // span (a future machine-readable output) has to widen this too, or it
+    // gets a silently short history instead of an error.
+    let history_days = u64::from(config::ANALYSIS_WINDOW_DAYS) * 2 + 1;
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
     let collections = collect_all(config, mtime_floor)?;
@@ -299,13 +299,20 @@ fn load_report_inner(
 
     let providers = collections
         .iter()
-        .map(|collection| summarize(collection, now, config.days, config.local_offset))
+        .map(|collection| {
+            summarize(
+                collection,
+                now,
+                config::ANALYSIS_WINDOW_DAYS,
+                config.local_offset,
+            )
+        })
         .collect::<Vec<_>>();
     let combined = finish_combined(
         summarize(
             &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
             now,
-            config.days,
+            config::ANALYSIS_WINDOW_DAYS,
             config.local_offset,
         ),
         &providers,
@@ -313,7 +320,7 @@ fn load_report_inner(
 
     Ok(AppSummary {
         generated_at: now,
-        period_days: config.days.max(1),
+        period_days: config::ANALYSIS_WINDOW_DAYS,
         load_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         combined,
         providers,

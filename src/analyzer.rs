@@ -159,23 +159,17 @@ pub fn summarize(
     let (longest_streak_days, current_streak_days) =
         streak::streaks(&aggregates.active_dates, period_start, period_end);
 
-    // Codename throughput is a fixed-window rate independent of the display
-    // `--days`: sum token volume over the most recent `CODENAME_WINDOW_DAYS`
-    // straight from the events (the collector loads at least that span), so a
-    // 7- or 90-day view yields the same level.
-    let codename_window_start =
-        period_end - Duration::days(crate::codename::CODENAME_WINDOW_DAYS - 1);
+    // Everything below reads the same window as the charts above. The codename
+    // divides this volume by the window length, so its rate stays comparable
+    // whatever span the caller asked for.
     let mut recent_window_volume = 0_u64;
     let mut recent_active_days = std::collections::HashSet::new();
-    // The v0.9 sections (SKILLS / LIMITS / MODES) share this fixed 30-day
-    // window: attribution fields exist only in recent logs, and the mode /
-    // limit views are "how you've been using it lately" by design.
     let mut skill_map: BTreeMap<String, TokenUsage> = BTreeMap::new();
     for event in &collection.usage_events {
         let Some(date) = event.timestamp.map(|ts| ts.to_offset(local_offset).date()) else {
             continue;
         };
-        if date < codename_window_start || date > period_end {
+        if date < period_start || date > period_end {
             continue;
         }
         let volume = event.usage.token_volume();
@@ -204,22 +198,19 @@ pub fn summarize(
     });
     let limits = limits::limits_history(
         collection,
-        codename_window_start,
+        period_start,
         period_end,
         local_offset,
         &recent_active_days,
     );
-    let credits =
-        credits::credits_history(collection, codename_window_start, period_end, local_offset);
-    let mode_usage =
-        modes::modes_summary(collection, codename_window_start, period_end, local_offset);
-    let context =
-        context::context_summary(collection, codename_window_start, period_end, local_offset);
+    let credits = credits::credits_history(collection, period_start, period_end, local_offset);
+    let mode_usage = modes::modes_summary(collection, period_start, period_end, local_offset);
+    let context = context::context_summary(collection, period_start, period_end, local_offset);
     let active_time = active_time::active_time_summary(
         collection,
-        codename_window_start,
+        period_start,
         period_end,
-        u16::try_from(crate::codename::CODENAME_WINDOW_DAYS).unwrap_or(30),
+        safe_period_days,
         local_offset,
     );
     let recent_window_active_days = recent_active_days.len();
@@ -437,9 +428,13 @@ mod tests {
         );
     }
 
+    /// The analyzer takes its window as an argument. The CLI always asks for
+    /// `ANALYSIS_WINDOW_DAYS`, but a machine-readable caller can ask for any
+    /// span — and EVERY section follows it, the codename's volume included.
+    /// Keep this contract: it is what a future JSON output rides on.
     #[test]
-    fn recent_window_volume_is_independent_of_display_days() {
-        // Four usage events at 0, 5, 20, and 40 days before period_end.
+    fn every_section_follows_the_requested_window() {
+        // Four usage events at 0, 1, 5, and 40 days before period_end.
         let now = datetime!(2026-06-30 12:00 UTC);
         let event = |at: OffsetDateTime, tokens: u64| UsageEvent {
             timestamp: Some(at),
@@ -456,10 +451,10 @@ mod tests {
             reported_cost_usd: None,
         };
         let events = vec![
-            event(datetime!(2026-06-30 10:00 UTC), 1_000_000), // 30d + every window
-            event(datetime!(2026-06-25 10:00 UTC), 2_000_000), // 30d + 7d window
-            event(datetime!(2026-06-10 10:00 UTC), 3_000_000), // 30d, not 7d window
-            event(datetime!(2026-05-21 10:00 UTC), 4_000_000), // only the 90d display
+            event(datetime!(2026-06-30 10:00 UTC), 1_000_000_000), // every window
+            event(datetime!(2026-06-29 10:00 UTC), 1_000_000_000), // every window
+            event(datetime!(2026-06-25 10:00 UTC), 1_000_000_000), // 7d and wider
+            event(datetime!(2026-05-21 10:00 UTC), 9_000_000_000), // only the 90d span
         ];
         let collection = |events: Vec<UsageEvent>| Collection {
             usage_events: events,
@@ -469,13 +464,30 @@ mod tests {
         let week = summarize(&collection(events.clone()), now, 7, UtcOffset::UTC);
         let quarter = summarize(&collection(events), now, 90, UtcOffset::UTC);
 
-        // The codename window is fixed at the last 30 days (06-01..06-30 = 6M),
-        // regardless of how many days the display covers.
-        assert_eq!(week.recent_window_volume, 6_000_000);
-        assert_eq!(quarter.recent_window_volume, 6_000_000);
-        // The display totals, by contrast, DO follow --days (3M vs 10M).
-        assert_eq!(week.total_usage.token_volume(), 3_000_000);
-        assert_eq!(quarter.total_usage.token_volume(), 10_000_000);
+        // One window: the codename volume and the display total cover the
+        // same span, so both move with the requested days (3B vs 12B).
+        assert_eq!(week.recent_window_volume, 3_000_000_000);
+        assert_eq!(quarter.recent_window_volume, 12_000_000_000);
+        assert_eq!(week.total_usage.token_volume(), 3_000_000_000);
+        assert_eq!(quarter.total_usage.token_volume(), 12_000_000_000);
+        assert_eq!(week.period_days, 7);
+        assert_eq!(quarter.period_days, 90);
+        // The rank's eligibility floor counts token-bearing days in the same
+        // span, and the codename reads the pair — restoring a constant
+        // divisor would show up here.
+        assert_eq!(week.recent_window_active_days, 3);
+        assert_eq!(quarter.recent_window_active_days, 4);
+        // 3B over 7 days is 428M/day (S); 12B over 90 is 133M/day (B). The
+        // ranks are pinned, not merely compared: dividing by a constant 30
+        // instead would yield C / S — also two different ranks.
+        assert_eq!(
+            crate::codename::for_summary(&week).rank,
+            crate::codename::Rank::S
+        );
+        assert_eq!(
+            crate::codename::for_summary(&quarter).rank,
+            crate::codename::Rank::B
+        );
     }
 
     #[test]
@@ -532,8 +544,8 @@ mod v09_tests {
     use super::*;
     use crate::model::LimitDay;
     use crate::model::{
-        Collection, EffortEvent, ModeEvent, PermissionEvent, Provider, RateLimitSample, SourceKind,
-        UsageEvent,
+        Collection, CreditSample, DurationEvent, EffortEvent, ModeEvent, PermissionEvent, Provider,
+        RateLimitSample, SourceKind, UsageEvent,
     };
 
     fn skill_event(at: OffsetDateTime, skill: Option<&str>, tokens: u64) -> UsageEvent {
@@ -553,11 +565,11 @@ mod v09_tests {
         }
     }
 
-    /// SKILLS / LIMITS / MODES all cut on the fixed 30-day codename window
-    /// (display `--days` = 90 here), and LIMITS days are tri-state.
+    /// SKILLS / LIMITS / MODES cut on the requested window, and LIMITS days
+    /// are tri-state (measured / no sample / no use).
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn v09_sections_use_fixed_window_and_tristate_days() {
+    fn v09_sections_follow_the_window_with_tristate_days() {
         let now = datetime!(2026-06-30 12:00 UTC);
         let collection = Collection {
             usage_events: vec![
@@ -576,6 +588,37 @@ mod v09_tests {
                 ),
                 // Active day without any rate-limit sample -> NoSample.
                 skill_event(datetime!(2026-06-22 09:00 UTC), None, 500),
+            ],
+            // CONTEXT reads cache_read off usage; WORKING TIME reads turns;
+            // CREDITS reads the ledger. One of each inside the 30-day window
+            // and one outside it, so a wider window has to pick both up.
+            duration_events: vec![
+                DurationEvent {
+                    timestamp: Some(datetime!(2026-06-25 10:00 UTC)),
+                    session_id: None,
+                    duration_ms: 600_000,
+                    human_wait_ms: 0,
+                    model_ms: Some(300_000),
+                    status: Some("turn".to_owned()),
+                },
+                DurationEvent {
+                    timestamp: Some(datetime!(2026-05-20 10:00 UTC)),
+                    session_id: None,
+                    duration_ms: 600_000,
+                    human_wait_ms: 0,
+                    model_ms: Some(300_000),
+                    status: Some("turn".to_owned()),
+                },
+            ],
+            credit_samples: vec![
+                CreditSample {
+                    timestamp: datetime!(2026-06-25 10:00 UTC),
+                    nano_aiu: 2_000_000_000,
+                },
+                CreditSample {
+                    timestamp: datetime!(2026-05-20 10:00 UTC),
+                    nano_aiu: 5_000_000_000,
+                },
             ],
             rate_limit_samples: vec![
                 RateLimitSample {
@@ -644,10 +687,12 @@ mod v09_tests {
                     mode: "default".to_owned(),
                 },
             ],
-            ..Collection::new(Provider::Combined, "/tmp".into())
+            // Claude: CONTEXT skips the Combined tab by design, and the other
+            // sections don't gate on provider here.
+            ..Collection::new(Provider::Claude, "/tmp".into())
         };
 
-        let summary = summarize(&collection, now, 90, UtcOffset::UTC);
+        let summary = summarize(&collection, now, 30, UtcOffset::UTC);
 
         // SKILLS: only the in-window 1M event counts.
         assert_eq!(summary.skills.len(), 1);
@@ -682,5 +727,25 @@ mod v09_tests {
             summary.modes.efforts,
             vec![("xhigh".to_owned(), 2), ("low".to_owned(), 1)]
         );
+
+        // CREDITS / CONTEXT / WORKING TIME cut on the same window, and the
+        // working-time average divides by it.
+        let time = summary.active_time.as_ref().expect("active time");
+        assert_eq!(summary.credits.as_ref().expect("credits").days.len(), 30);
+        assert_eq!(summary.context.as_ref().expect("context").calls, 2);
+        assert_eq!((time.turns, time.window_days), (1, 30));
+        assert_eq!(time.active_per_day_ms(), 600_000 / 30);
+
+        // Ask for a wider window and every one of them widens with it — the
+        // May events that a 30-day window excluded now count.
+        let wide = summarize(&collection, now, 90, UtcOffset::UTC);
+        let wide_time = wide.active_time.as_ref().expect("active time");
+        assert_eq!(wide.skills[0].usage.token_volume(), 3_000_000);
+        assert_eq!(wide.limits.expect("limits").days.len(), 90);
+        assert_eq!(wide.modes.assistant_turns, 3);
+        assert_eq!(wide.credits.expect("credits").days.len(), 90);
+        assert_eq!(wide.context.expect("context").calls, 3);
+        assert_eq!((wide_time.turns, wide_time.window_days), (2, 90));
+        assert_eq!(wide_time.active_per_day_ms(), 1_200_000 / 90);
     }
 }

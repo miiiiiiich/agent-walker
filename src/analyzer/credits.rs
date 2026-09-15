@@ -5,7 +5,7 @@ use time::{Date, Duration, UtcOffset};
 
 use crate::model::{Collection, CreditsHistory};
 
-/// Daily AI-credit spend over the fixed 30-day window: the sum of Copilot's
+/// Daily AI-credit spend over the analysis window: the sum of Copilot's
 /// `totalNanoAiu` deltas per local day, in credits (1e9 nano-AIU). `None`
 /// when the provider records no credit samples at all.
 #[allow(

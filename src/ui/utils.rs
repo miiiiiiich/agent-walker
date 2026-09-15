@@ -72,6 +72,12 @@ pub(super) fn stat_bar_line(
     Line::from(spans)
 }
 
+/// The analysis window as a section subtitle (`30d`) — read from the
+/// summary so a panel can never print a span it didn't cover.
+pub(super) fn window_label(summary: &Summary) -> String {
+    format!("{}d", summary.period_days)
+}
+
 pub(super) fn section_title(title: &'static str, annotation: &str) -> Line<'static> {
     let mut spans = vec![
         Span::styled("▍ ", Style::default().fg(theme::GOLD)),
