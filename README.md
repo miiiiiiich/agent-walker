@@ -57,7 +57,7 @@ Each one has a page on what is read and how: [Claude Code](docs/claude.md) / [Co
 
 ## Privacy
 
-agent-walker sends your logs nowhere. The only network use is fetching the price table, and fetching Cursor's usage when you're signed in.
+agent-walker sends your logs nowhere. The only network use is fetching the price table (kept for the day once it lands), and fetching Cursor's usage when you're signed in.
 
 ## Keys
 

@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The parse cache no longer keeps a copy per version; old copies are
   removed on startup.
+- The price table is kept on disk and reused for the day, so costs still
+  price offline.
 - Claude turns carry their session id, so JSON `turns[]` join to
   `sessions[]` on every provider. The parse cache rebuilds once.
 

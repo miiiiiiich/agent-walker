@@ -57,7 +57,7 @@ Claude Code / Codex CLI / OpenCode / Cursor / GitHub Copilot CLI / Grok Build / 
 
 ## プライバシー
 
-agent-walker はログをどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得と、Cursor の利用状況の取得だけです。
+agent-walker はログをどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得（取れたらその日は再利用）と、Cursor の利用状況の取得だけです。
 
 ## 操作
 
