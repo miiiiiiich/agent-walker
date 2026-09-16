@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -97,21 +97,29 @@ fn cache_file(dir: &Path, cache_name: &str) -> PathBuf {
     dir.join(format!("{cache_name}.bin"))
 }
 
+/// A temp file older than this was left by a run that died mid-write; a
+/// live writer finishes in well under a second.
+const ORPHAN_TEMP_AGE: Duration = Duration::from_hours(1);
+
 /// Remove what no run will read again: caches from before 0.17, when the
-/// version sat in the file name (`claude-v19.bin`) and no bump removed the
-/// previous one, and temp files left by a run killed before its rename.
-/// Runs once at startup, independent of which providers have logs today.
+/// version sat in the file name (`claude-v19.bin`, plus the `claude-v19.tmp`
+/// its interrupted writes left), and `<name>.tmp<pid>` files whose writer
+/// died before the rename. Runs once at startup, independent of which
+/// providers have logs today.
 pub fn sweep_cache_dir() {
     if let Ok(dir) = crate::paths::cache_dir() {
-        sweep(&dir);
+        sweep(&dir, SystemTime::now());
     }
 }
 
-fn sweep(dir: &Path) {
+fn all_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn sweep(dir: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let own_temp = format!(".tmp{}", std::process::id());
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -119,14 +127,18 @@ fn sweep(dir: &Path) {
         };
         let legacy = name
             .strip_suffix(".bin")
+            .or_else(|| name.strip_suffix(".tmp"))
             .and_then(|stem| stem.rsplit_once("-v"))
-            .is_some_and(|(_, version)| {
-                !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
-            });
-        let orphan_temp = !name.ends_with(&own_temp)
-            && name
-                .rsplit_once(".tmp")
-                .is_some_and(|(_, pid)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+            .is_some_and(|(_, version)| all_digits(version));
+        let orphan_temp = name
+            .rsplit_once(".tmp")
+            .is_some_and(|(_, pid)| all_digits(pid))
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > ORPHAN_TEMP_AGE);
         if legacy || orphan_temp {
             let _ = fs::remove_file(entry.path());
         }
@@ -306,21 +318,30 @@ mod tests {
     }
 
     #[test]
-    fn sweep_removes_legacy_versions_and_orphan_temps_only() {
+    fn sweep_removes_legacy_files_and_stale_temps_only() {
         let dir = tempfile::tempdir().unwrap();
-        let own = format!("claude.tmp{}", std::process::id());
         for name in [
             "claude-v19.bin",
+            "claude-v19.tmp",
             "codex-v20.bin",
-            "claude.tmp99999",
-            own.as_str(),
+            "claude.tmp111",
+            "claude.tmp222",
             "claude.bin",
             "claude-vx.bin",
             "pricing.json",
         ] {
             fs::write(dir.path().join(name), b"x").unwrap();
         }
-        sweep(dir.path());
+        // One temp is fresh (a concurrent run may still be writing it), the
+        // other is long dead.
+        let now = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("claude.tmp222"))
+            .unwrap()
+            .set_modified(now - ORPHAN_TEMP_AGE * 2)
+            .unwrap();
+        sweep(dir.path(), now);
         let mut left: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -328,7 +349,12 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            ["claude-vx.bin", "claude.bin", own.as_str(), "pricing.json"]
+            [
+                "claude-vx.bin",
+                "claude.bin",
+                "claude.tmp111",
+                "pricing.json"
+            ]
         );
     }
 
