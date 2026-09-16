@@ -32,7 +32,7 @@ pub(crate) fn session_day_bounds(
 
 /// Reconstruct session spans from touches and sweep them for concurrency.
 ///
-/// `avg_concurrency` is the time-weighted mean of simultaneous sessions and
+/// `avg_concurrency` is a time-weighted estimate using bucket representatives;
 /// `peak_concurrency` is the largest simultaneous count. This is the
 /// "orchestration" primitive: running many sessions at once, measurable on any
 /// agent, not a Claude-specific subagent feature.

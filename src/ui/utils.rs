@@ -187,7 +187,7 @@ pub(super) fn count_bar_line(
 }
 
 /// Truncate keeping the END of the label — repository names differ at the
-/// tail ("…-genkan-app"), not the head.
+/// tail ("…-web-app"), not the head.
 pub(super) fn compact_label_tail(label: &str, width: usize) -> String {
     let count = label.chars().count();
     if count <= width {

@@ -1,8 +1,7 @@
 //! Synthetic report data used when `AGENT_WALKER_DEMO=1`.
 //!
-//! Everything is generated from a fixed-seed xorshift, so the demo looks the
-//! same on every machine and run (apart from the date axis, which tracks the
-//! current day).
+//! A fixed-seed xorshift generates the report for the current date;
+//! the date axis and weekday-dependent volumes vary with the calendar.
 
 use std::path::PathBuf;
 
@@ -73,8 +72,7 @@ const SKILLS: [&str; 6] = [
 ];
 
 fn pick_skill(rng: &mut Rng, progress: f64) -> Option<String> {
-    // Attribution fields only exist in recent logs; mirror that by tagging
-    // mostly late-period events, at a modest rate like real data.
+    // Synthetic sparse attribution tags only a subset of late-period events.
     if progress < 0.4 || !rng.chance(35) {
         return None;
     }
@@ -198,7 +196,7 @@ fn daily_volume(rng: &mut Rng, progress: f64, weekday: Weekday) -> u64 {
     if progress < 0.3 && rng.chance(55) {
         return 0;
     }
-    // Envelope tuned so the demo Claude tab lands in the S band and Codex (at 1/2) in the A band.
+    // Shared daily-volume envelope; Codex applies its own scale.
     let ramp = 160_000_000.0 + 1_450_000_000.0 * progress * progress;
     let noise = rng.range(50, 160) as f64 / 100.0;
     let weekend = matches!(weekday, Weekday::Saturday | Weekday::Sunday);

@@ -3,8 +3,8 @@
 //! It reads the session logs that Claude Code, Codex CLI, and (auto-detected
 //! when present) Antigravity CLI already write to disk, aggregates tokens, API-equivalent
 //! cost, activity, and autonomy, and renders a terminal dashboard plus a
-//! shareable "codename" stats card. Everything is computed locally; the only
-//! network access is a pricing-metadata fetch.
+//! shareable "codename" stats card. Everything is computed locally; network
+//! access fetches pricing metadata and Cursor usage from its dashboard.
 //!
 //! This crate backs the `agent-walker` / `agw` binaries. Its library API is an
 //! internal seam and carries no stability guarantee.

@@ -66,16 +66,11 @@ fn project_label(path: &Path, root: &Path) -> Option<String> {
 }
 
 fn normalize_project_name(directory: &str) -> String {
-    // Claude Code names its project directories by flattening the cwd with
-    // every path separator replaced by `-`. Strip the home prefix so the label
-    // is a relative project path. Exact on macOS / Linux. Windows-native
-    // Claude Code's flattening rule isn't confirmed (especially whether the
-    // drive-letter `:` is dropped or rewritten), so we sanitize the home like
-    // the directory name itself — replacing `:` as well as the separators —
-    // and trim any trailing separator first so a home such as `/home/me/` or
-    // `D:\` doesn't yield a double-hyphen prefix. When the flattened prefix
-    // still doesn't match we fall back to the leading-`-` trim; the cwd field
-    // in the session is preferred as the project label whenever present.
+    // Strip the normalized home prefix from the flattened directory name,
+    // falling back to trimming its leading separator. Home has its trailing
+    // separator trimmed and ':' / separators replaced by '-', so `/home/me/`
+    // or `D:\` cannot yield a double-hyphen prefix. Windows-native
+    // flattening is unconfirmed.
     let home_prefix = crate::paths::home_dir()
         .ok()
         .and_then(|home| home.to_str().map(ToOwned::to_owned))
@@ -131,13 +126,8 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         }
         if source_kind == SourceKind::Main {
             if is_interrupt_marker(&value) {
-                // The active turn was aborted: discard it (completion stats
-                // count completed turns only, matching Codex where
-                // `turn_aborted` never reaches the durations) and don't
-                // start a bogus turn from the marker row itself. Recognized
-                // before requiring a timestamp — an undated marker must
-                // still clear the turn, or the abort would flush as a
-                // completed duration at the next prompt or EOF.
+                // Clear an interrupted turn before timestamp validation; an undated
+                // marker must also prevent a completed-duration event.
                 turn = TurnState::default();
             } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
                 if is_human_turn(&value) {
@@ -390,8 +380,8 @@ impl TurnState {
         true
     }
 
-    /// Emit the completed turn (if any): stamped at its END like every other
-    /// provider's turn, keyed by the prompt uuid for cross-file dedup, with
+    /// Emit the completed turn (if any): stamped at its end,
+    /// keyed by the prompt uuid for cross-file dedup, with
     /// the human's answer time clamped to the turn length. A question still
     /// open at the end charges its tail as waiting — the agent stopped
     /// working when it asked.
@@ -518,16 +508,8 @@ fn parse_line(
         });
     }
 
-    // `usage.iterations` (log-schema addition, 2026-04) breaks one turn into
-    // its underlying API calls. The top level is the turn's BILLED usage for
-    // the serving model: a failed fallback attempt is not billed (fallback
-    // credit refunds the switch) and the turn is billed as the serving model
-    // alone, and on advisor turns the top level already sums the main-model
-    // iterations. So main-model `message` and `fallback_message` entries must
-    // never be re-emitted — only `advisor_message` entries are additional
-    // billed calls, made under their own model and absent from the top-level
-    // counters (ccusage#1115 lost them entirely). Keyed per iteration index
-    // so streamed duplicates of the message still dedupe.
+    // Top-level usage includes main-model iterations; emit only separately billed
+    // advisor iterations, keyed by message and iteration index (ccusage#1115).
     if let Some(iterations) = usage_value
         .and_then(|usage| usage.get("iterations"))
         .and_then(Value::as_array)
@@ -634,18 +616,9 @@ fn collect_permission_event(
     });
 }
 
-/// A main-thread row the harness writes when the user hits esc: a user row
-/// whose content IS one of the two complete marker forms the harness
-/// emits (the only variants across real logs) — a prompt that merely
-/// quotes or starts with the marker text must not count or clear a turn.
-/// `isMeta` rows are excluded because agent messages QUOTING the marker
-/// would otherwise count. `isSidechain` rows are excluded because one esc
-/// against a parallel team fans out as marker echoes into every subagent
-/// transcript (bursts of 10-16 observed — counting them would overstate
-/// interruptions ~1.8x, load-dependently). The trade-off: an esc recorded
-/// only in sidechain files (~14% of esc moments) is deliberately not
-/// counted — the same turn-level ruling as Codex, where `turn_aborted`
-/// is used and `sub_agent_activity: interrupted` is discarded.
+/// Count only exact main-thread interruption markers; exclude `isMeta` rows
+/// (they can quote the marker) and sidechain echoes, accepting that
+/// sidechain-only interruptions are omitted.
 fn is_interrupt_marker(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("user") {
         return false;
@@ -706,9 +679,8 @@ fn collect_interrupt_event(
 }
 
 /// One effort event per assistant message (keyed by message id), from the
-/// top-level `effort` field Claude Code writes since v2.1.212 (2026-07-17).
-/// Older lines lack the field and contribute nothing; subagent (sidechain)
-/// messages carry it too, so the mix covers delegated turns.
+/// top-level `effort` field supported since Claude Code v2.1.212.
+/// Absent fields contribute no event; sidechain messages are included.
 fn collect_effort_event(
     value: &Value,
     message: &Value,

@@ -429,10 +429,7 @@ mod tests {
         );
     }
 
-    /// The analyzer takes its window as an argument. The CLI always asks for
-    /// `ANALYSIS_WINDOW_DAYS`, but a machine-readable caller can ask for any
-    /// span — and EVERY section follows it, the codename's volume included.
-    /// Keep this contract: it is what a future JSON output rides on.
+    /// Every section follows the requested analysis window, including codename volume.
     #[test]
     fn every_section_follows_the_requested_window() {
         // Four usage events at 0, 1, 5, and 40 days before period_end.
@@ -580,8 +577,7 @@ mod v09_tests {
                     Some("sk:review"),
                     1_000_000,
                 ),
-                // In the 90d display window but OUTSIDE the fixed 30d window:
-                // must not appear in SKILLS.
+                // Included in SKILLS for a 90-day window, excluded for a 30-day window.
                 skill_event(
                     datetime!(2026-05-20 10:00 UTC),
                     Some("sk:review"),

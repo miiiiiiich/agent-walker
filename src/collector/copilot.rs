@@ -17,25 +17,11 @@ use crate::model::{
     ToolEvent, UsageEvent,
 };
 
-/// GitHub Copilot CLI (`@github/copilot`, the agentic CLI — not the retired
-/// `gh copilot` extension) writes one directory per session under
-/// `<root>/session-state/<uuid>/`, with an `events.jsonl` event stream.
-/// Schema verified live against CLI 1.0.73:
-///
-/// - Token counts exist ONLY on `session.shutdown`, written on clean exit
-///   (`/exit` or non-interactive completion) as per-model cumulative totals
-///   (`data.modelMetrics`). A crashed or still-open session has no shutdown
-///   and therefore no token data — a documented gap, recovered when the
-///   session eventually exits (the cumulative shutdown covers its lifetime).
-/// - Resuming appends to the SAME session file and a later clean exit appends
-///   ANOTHER shutdown whose totals are cumulative. Each shutdown therefore
-///   emits the component-wise DELTA since the previous snapshot, dated at its
-///   own exit time — never the raw cumulative. Keeping one cumulative event
-///   instead would mis-window resumed sessions: the merged event would carry
-///   the latest totals at the EARLIEST exit's date, so a session first closed
-///   before the analysis window and resumed today would drop today's usage
-///   entirely. A counter going backwards (CLI update / metric reset) starts a
-///   new epoch and the snapshot counts in full.
+/// GitHub Copilot CLI (`@github/copilot`) 1.0.73 schema:
+/// `<root>/session-state/<uuid>/events.jsonl` contains per-session events.
+/// Clean shutdowns contain cumulative per-model counters; emit deltas at each
+/// shutdown timestamp, counting a reset snapshot in full.
+/// Usage since the last shutdown is unavailable until another clean exit.
 pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -245,14 +231,7 @@ impl RawCounters {
     }
 }
 
-/// Per-model usage from a `session.shutdown`: the component-wise delta since
-/// the previous shutdown snapshot of the same model, so every clean exit is
-/// counted once at its own time (see the module doc for why the cumulative
-/// must not be kept whole). Field semantics verified against the CLI's own
-/// on-screen totals: `inputTokens` INCLUDES `cacheReadTokens` (14,166 =
-/// 12,630 fresh + 1,536 cached in the probe session), so fresh input is the
-/// difference — the same convention as Codex. `reasoningTokens` is a subset
-/// of `outputTokens` and is tracked without being added to the volume.
+/// Fresh input is input minus cached input; reasoning is already included in output.
 #[allow(
     clippy::too_many_arguments,
     reason = "Per-line parse context; bundling into a struct adds noise for one caller."
@@ -435,9 +414,7 @@ fn collect_tool_event(
     let Some(tool_name) = data.get("toolName").and_then(Value::as_str) else {
         return;
     };
-    // Scoped per session: toolCallId uniqueness across sessions is not
-    // guaranteed by anything we verified, and the seen-set in merge_into is
-    // global.
+    // Namespace tool-call IDs by session because the merge deduplication set is global.
     let key = match (session_id, data.get("toolCallId").and_then(Value::as_str)) {
         (Some(sid), Some(id)) => Some(format!("copilot-tool:{sid}:{id}")),
         _ => None,

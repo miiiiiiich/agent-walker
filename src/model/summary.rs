@@ -56,7 +56,7 @@ pub struct AgentStat {
 }
 
 /// Per-skill token volume over the analysis window (Claude
-/// `attributionSkill`). TUI-only — must never reach the share card.
+/// `attributionSkill`). Used by the TUI and local JSON, never the share card.
 #[derive(Debug, Clone)]
 pub struct SkillStat {
     pub name: String,
@@ -181,7 +181,7 @@ pub struct ActiveTimeSummary {
     /// the Total tab can take percentiles across providers.
     pub pace_gaps_ms: Vec<u64>,
     /// Working time per local day (turn end date), ascending by date, only
-    /// days with any. Feeds the peak-day row and, later, a daily chart.
+    /// days with any. Feeds the peak-day row.
     pub daily_active_ms: Vec<(Date, u64)>,
     /// Of the turns that can tell model time from tool time: the model's
     /// share, and the working time those turns cover (the denominator).
@@ -377,7 +377,7 @@ mod active_time_tests {
 
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
-    /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
+    /// Time-weighted concurrency estimate using bucket representatives. Shown
     /// in the PARALLEL AGENTS panel (display-only — the codename ranks on token
     /// throughput alone).
     pub avg_concurrency: f64,
@@ -394,7 +394,7 @@ pub struct Orchestration {
 /// calls of providers whose events are calls, and everything else lands in
 /// `unclassified_effective`. `Some` whenever any event carried context;
 /// `calls` may be 0 for aggregate-only providers. The share card quotes the
-/// cached share only on a 30-day report.
+/// cached share whenever context token volume is positive.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSummary {
     pub calls: usize,
@@ -564,9 +564,8 @@ pub struct Summary {
     pub model_daily: Vec<ModelDailyStat>,
     pub models: Vec<ModelStat>,
     pub agents: Vec<AgentStat>,
-    /// Same window as every other section. Attribution fields exist only in
-    /// recent logs, so a long span mixes eras: a skill missing from the older
-    /// half may only mean the field wasn't written yet.
+    /// Same window as every other section. Missing attribution does not prove
+    /// that no skill was used.
     pub skills: Vec<SkillStat>,
     pub limits: Option<LimitsHistory>,
     pub credits: Option<CreditsHistory>,

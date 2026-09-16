@@ -1,7 +1,7 @@
 //! Codename: a playful vanity title derived from a usage `Summary`.
 //!
 //! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Puma". The title is earned on a
-//! single absolute axis — token throughput over the most recent 30 days — so
+//! single absolute axis — token throughput over the supplied summary window — so
 //! it needs no accounts and no population data. RANK is the letter tier (SS at
 //! the top, then S/A/B/C/D/E; below E is unranked); STEP is the position
 //! inside the rank's token band, and each step is one animal. The 24 animals
@@ -131,9 +131,7 @@ const LADDER: [(Rank, f64, &[&str]); 7] = [
     (Rank::E, 3_000_000.0, &["Firefly", "Butterfly"]),
 ];
 
-/// Tokens/day where the top SS step (Lion) begins — 30B over the 30-day
-/// window. Retuned 2026-07-13: the old band-ratio extrapolation put Lion near
-/// 5B/day (148B monthly), which no real operator could reach.
+/// Tokens/day anchoring the top SS step (Lion).
 const SS_LION_MIN: f64 = 1_000_000_000.0;
 
 /// The floor below the ladder — the unranked animal.
@@ -359,8 +357,7 @@ mod tests {
 
     #[test]
     fn tabs_rank_on_their_own_volume() {
-        // No whole-person style inheritance anymore: a provider tab earns the
-        // rank its own throughput clears.
+        // Each provider summary earns its own rank from its own throughput.
         let combined = summary_at(800_000_000);
         let mut tab = combined.clone();
         tab.provider = crate::model::Provider::Claude;

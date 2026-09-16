@@ -44,11 +44,11 @@ pub struct ShareCard {
     pub(crate) models: Vec<(String, String, f64, String)>,
     /// Hour-of-day profile: heights normalized to 0..=1 plus the peak hour.
     pub(crate) hourly: Option<(Vec<f64>, usize, String)>,
-    /// Turn-duration buckets (7 counts), (unattended, total), and formatted (p50, p90, max).
+    /// Turn-duration buckets (6 counts), (unattended, total), and formatted (p50, p90, max).
     pub(crate) completion: Option<(Vec<usize>, usize, usize, String, String, String)>,
     /// PARALLEL AGENTS: (% of active time at 4+ concurrent, peak concurrency).
     pub(crate) parallel: Option<(u64, usize)>,
-    /// Time-weighted average simultaneous sessions (the PARALLEL AGENTS stat).
+    /// Time-weighted concurrency estimate using bucket representatives.
     pub(crate) avg_concurrency: f64,
     pub(crate) grass: Grass,
 }
@@ -58,8 +58,8 @@ pub(crate) struct Grass {
 }
 
 impl ShareCard {
-    /// Build a card for `summary`. The codename ranks on the summary's own
-    /// 30-day throughput, so a provider tab's card matches the tab's badge.
+    /// Build a card for `summary`, ranking on its supplied window.
+    /// Application share actions pass the combined Total summary.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -266,10 +266,8 @@ impl Grass {
             .collect();
         let thresholds = quartiles(&value_by_date);
 
-        // The card's activity panel is sized for ~5 weeks, and the codename is a
-        // 30-day signal — so render only the most recent 30 days. A longer
-        // analysis window (e.g. --days 90) would otherwise overflow the grid into
-        // the neighbouring charts.
+        // The activity grid fits the most recent 30 days; longer analysis
+        // windows are clipped here to avoid overflowing neighbouring charts.
         let start = summary
             .period_start
             .max(summary.period_end.saturating_sub(Duration::days(29)));
@@ -323,8 +321,8 @@ fn heat_level(value: u64, thresholds: &[u64; 3]) -> usize {
     1 + thresholds.iter().filter(|t| value > **t).count()
 }
 
-/// X's character accounting: every code point counts 1 (2 above U+10FF),
-/// whitespace included, and each URL counts a flat 23 whatever its length.
+/// X's character accounting: configured weight-one ranges count 1, other
+/// code points count 2, and each URL counts a flat 23 whatever its length.
 pub(super) fn x_weight(text: &str) -> usize {
     const URL_WEIGHT: usize = 23;
     // X's configured weight-1 ranges (twitter-text config v3); everything

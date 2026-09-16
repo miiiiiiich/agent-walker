@@ -32,7 +32,7 @@ pub fn run(args: Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    // Resolve Cursor opt-in before the struct literal below moves other `args`
+    // Resolve Cursor auto-detection before the struct literal below moves other `args`
     // fields out (a borrow of `args` after a partial move won't compile).
     let cursor = cursor_config(&args);
     let config = Config {
@@ -55,8 +55,8 @@ pub fn run(args: Args) -> Result<()> {
             .or_else(|| crate::paths::copilot_home().ok()),
         grok_dir: args.grok_dir.or_else(|| crate::paths::grok_home().ok()),
         opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
-        // Cursor is auto-detected (a signed-in state.vscdb) but is the one
-        // collector that reaches the network; `None` when signed out / disabled.
+        // Cursor uses an explicit token or a present store unless disabled.
+        // The collector handles signed-out stores without a network request.
         cursor,
         use_cache: !args.no_cache,
         local_offset,
@@ -86,8 +86,7 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if let Some(width) = args.render {
-        // Load once and render every visible tab (present providers + Total) from
-        // the same report — the tab set is now data-dependent, not a fixed four.
+        // Render all present providers and Total from one loaded report.
         let report = load_report(&config)?;
         for tab_index in 0..=report.providers.len() {
             println!(
@@ -126,9 +125,8 @@ fn load_report_with_collections(
     load_report_inner(config, days, pricing_refresh)
 }
 
-/// Run every collector (threaded where independent) and keep the providers
-/// that produced anything. Split out of `load_report_inner` so the report
-/// assembly stays readable as providers accumulate.
+/// Run configured collectors, threading independent work, and return their
+/// collections, including empty ones.
 fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<Collection>> {
     let (
         codex_result,
@@ -253,8 +251,8 @@ pub(crate) fn finish_combined(
 /// A provider earns a tab only if it has real activity. Token volume catches
 /// most agents; sessions, tools, completions, interruptions, context volume
 /// and the credit ledger are the fallback for a session that logged activity
-/// but no usage tokens. Everything false ⇒ the directory was missing or
-/// empty, so the tab is dropped instead of showing a blank tab.
+/// but no usage tokens. Everything false means no activity is represented
+/// in this summary, so the tab is dropped.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
@@ -270,9 +268,8 @@ fn provider_has_data(summary: &crate::model::Summary) -> bool {
 
 /// Order the provider tabs by how much each is used — token volume, descending —
 /// so the heaviest provider lands at `tab_index 0` (the startup tab). Ties break
-/// on provider identity for a stable order. Antigravity carries no tokens, so it
-/// naturally sorts last. The Total tab is not in `providers`; it stays appended
-/// at the end of the tab strip.
+/// on provider label for a stable order. The Total tab is not in `providers`;
+/// it stays appended at the end of the tab strip.
 fn sort_providers_by_usage(providers: &mut [crate::model::Summary]) {
     providers.sort_by(|left, right| {
         right
@@ -346,9 +343,7 @@ mod tests {
     use super::*;
     use crate::model::{Orchestration, Provider, ScanStats, Summary, TokenUsage};
 
-    /// Minimal provider summary carrying just the fields the cost sort reads:
-    /// the provider label and a single-day `model_daily` block whose token
-    /// volume determines the fallback ordering when pricing is unloaded.
+    /// Provider summary for sorting by total token volume, then provider label.
     fn provider_summary(provider: Provider, model: &str, volume: u64) -> Summary {
         let usage = TokenUsage {
             input_tokens: volume,
@@ -442,8 +437,7 @@ mod tests {
         interrupted_only.interrupted = 2;
         assert!(provider_has_data(&interrupted_only));
 
-        // Fixed-window cache-reuse calls keep the tab even when the short
-        // display window holds no usage (the Total tab already counts them).
+        // Context volume alone keeps the tab even when total usage is zero.
         let mut context_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
         context_only.context = Some(crate::model::ContextSummary {
             calls: 0,

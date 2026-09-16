@@ -96,18 +96,15 @@ fn normalize(model_name: &str) -> String {
 /// Look up pricing: exact snapshot match first, then the longest snapshot key
 /// the name extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
 /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
-/// plain word suffix (`gemini-pro-default`) must not collide with a shorter base
-/// key — without that guard, dropping the provider allowlist would let unrelated
-/// ids misprice. When the literal name misses entirely, dotted version
+/// plain word suffix (`gemini-pro-default`) must not match a shorter base
+/// key. When the literal name misses entirely, dotted version
 /// segments are retried dashed (`claude-sonnet-4.6` -> `claude-sonnet-4-6`,
 /// the Copilot CLI's spelling) — only as a fallback, so ids whose pricing
 /// keys genuinely contain dots (`gpt-3.5-turbo`) resolve exactly first.
 pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     let mut name = normalize(model_name);
     if name == "codex" || name == "openai" || name == "codex-auto-review" {
-        // Codex sessions occasionally log only the provider name, and the
-        // automated-review flow logs `codex-auto-review` — neither has a
-        // LiteLLM key. Price both as the current Codex default model.
+        // Provider-name and automated-review aliases use the explicit fallback below.
         "gpt-5.5".clone_into(&mut name);
     }
 
@@ -176,11 +173,8 @@ pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
     )
 }
 
-/// A cost sum that keeps "no price known" distinct from "$0". Token volume
-/// whose model has no pricing (the LiteLLM table unreachable and uncached,
-/// or an id the table lacks) is tallied as `unpriced_volume` — never folded
-/// into `priced_usd` as zero, which is what made an offline run render
-/// "$0.00 API-equivalent" on the share card.
+/// Track unpriced volume separately so incomplete pricing cannot be reported
+/// as a complete zero-dollar total.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CostTally {
     /// USD over the entries that could be priced (provider-reported cost is
@@ -401,9 +395,7 @@ pub(crate) mod tests {
             input_tokens: 1_000_000,
             ..TokenUsage::default()
         };
-        // The live LiteLLM snapshot carries exact keys for claude-fable-5 /
-        // claude-opus-4-8 / gpt-5.5 (verified 2026-07-08); the resolver must
-        // hit them without suffix games.
+        // Resolve the exact model key from the installed pricing fixture.
         let fable = usage_cost_usd("claude-fable-5", &usage).expect("fable should be priced");
         assert!((fable - 8.0).abs() < 1e-9);
         // `codex-auto-review` has no LiteLLM key upstream; it prices as the

@@ -2,7 +2,7 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// Concurrency distribution: how much active time ran 1 / 2 / 3 / 4–6 / 7+
+/// Concurrency distribution: how much active time ran 1 / 2 / 3 / 4–6 / 7–9 / 10+
 /// sessions at once. Cool→hot per level (solo = cool, heavy parallel = bright).
 #[allow(
     clippy::cast_precision_loss,

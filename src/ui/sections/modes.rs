@@ -74,8 +74,8 @@ pub(in crate::ui) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'sta
 }
 
 /// One label-plus-entries row (`effort    xhigh 98.2% · max 0.3%`): top
-/// `max_entries` labels with their share, fitted to the rail — an entry that
-/// would overflow `width` is dropped whole, never clipped mid-label.
+/// `max_entries` labels with their share. Keep the first entry even if oversized;
+/// stop before any later entry that would overflow `width`.
 fn mix_line(
     label: &'static str,
     entries: &[(String, usize)],

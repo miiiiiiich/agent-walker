@@ -250,8 +250,8 @@ mod tests {
         assert_eq!(context_lines(&summary, 100).len(), 1);
     }
 
-    /// No context data → no section; session-less providers keep the bands
-    /// but have no reason rows.
+    /// No context data means no section; sessionless providers retain bands
+    /// and uncached input, but omit cold-start and expiry rows.
     #[test]
     fn absent_and_sessionless_shapes() {
         let mut summary = crate::share::fixtures::sample_summary();

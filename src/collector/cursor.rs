@@ -1,24 +1,10 @@
-//! Cursor collector — auto-detected, and the only provider that reaches the
-//! network.
-//!
-//! Cursor keeps no per-request token counts on disk (the local stores hold chat
-//! text, accepted-line attribution, and the auth token — never token usage), so
-//! the figures live only behind Cursor's web dashboard. We replay that
-//! dashboard's own CSV export the way the browser does: read the session JWT
-//! from the local Electron `state.vscdb`, build the `WorkosCursorSessionToken`
-//! cookie, and `GET` the usage CSV.
-//!
-//! This is the one collector that sends anything off the machine (the user's own
-//! session cookie, to Cursor, to read the user's own usage). It's auto-detected
-//! from a signed-in `state.vscdb` like the other providers, and — like them —
-//! simply skips (no tab, no error) when the pieces aren't all there: no Cursor
-//! store, signed out (no token), or the fetch doesn't come back. So no request
-//! is made unless you're actually signed in. It is also an undocumented endpoint
-//! that can change without notice.
-//!
-//! Cursor's usage events carry **no project/repo identifier** and its models
-//! (`composer-2.5-fast`, …) aren't in the `LiteLLM` table, so the CSV's own
-//! `Cost` column is carried through as `UsageEvent::reported_cost_usd`.
+//! Cursor usage comes from its dashboard CSV export.
+//! Authentication uses a local `state.vscdb` JWT or `CURSOR_TOKEN` override.
+//! The session cookie is sent to cursor.com via an undocumented endpoint.
+//! Auto-detection is disabled by `--no-cursor`; signed-out stores make no request.
+//! Store-read and fetch failures count as unreadable sources; fetch reasons are logged.
+//! Usage events carry no project/repo identifier.
+//! The CSV's `Cost` column is authoritative and stored as `reported_cost_usd`.
 
 use std::io::Read;
 use std::path::Path;
@@ -132,14 +118,8 @@ fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
     }
 }
 
-/// A usable session token. Cursor stores the JWT raw, but other VS Code
-/// `ItemTable` values are JSON-serialized strings, so surrounding quotes are
-/// stripped defensively (a JWT never contains `"`). A `WorkOS` session token is a
-/// JWT — `header.payload.signature`, each segment base64url (`[A-Za-z0-9_-]`)
-/// joined by `.` — so the token is restricted to exactly that character set.
-/// That rejects not just CR/LF (header injection) but every cookie
-/// metacharacter (`;`, `=`, `,`, space) that could split or confuse the `Cookie`
-/// header. A token that doesn't fit is treated as unusable rather than sent.
+/// Strip surrounding JSON quotes and require token-safe characters before
+/// interpolating the token into a cookie.
 fn sanitize_token(raw: &str) -> Option<String> {
     let token = raw.trim().trim_matches('"').trim();
     let is_jwt_byte = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.');
@@ -189,13 +169,8 @@ fn normalize_subject(subject: &str) -> Option<String> {
     {
         return Some(tail.to_owned());
     }
-    // Otherwise accept any single-pipe `<provider>|<id>` with non-empty halves —
-    // but only when both halves are safe id characters. This subject is decoded
-    // from the JWT payload (arbitrary bytes once base64-decoded), and unlike the
-    // raw token it is NOT constrained to base64url, so a `sub` carrying a CR/LF
-    // or a cookie metacharacter would otherwise be interpolated straight into
-    // the `Cookie` header. Validating here is what makes the token's
-    // header-injection guard hold for the bridged-OAuth path too.
+    // Decoded subjects need separate cookie validation; accept one pipe with
+    // nonempty, safe halves.
     match subject.split_once('|') {
         Some((provider, id)) if is_safe_subject_part(provider) && is_safe_subject_part(id) => {
             Some(subject.to_owned())
@@ -204,13 +179,8 @@ fn normalize_subject(subject: &str) -> Option<String> {
     }
 }
 
-/// A non-empty `<provider>` / `<id>` half of a bridged-OAuth subject that's safe
-/// to interpolate into a cookie value. The guard is a denylist, not a narrow
-/// allowlist: SSO subjects legitimately use `@`, `+`, `:`, etc. (all valid
-/// RFC 6265 cookie-octets), so only the characters that could actually break the
-/// header are rejected — ASCII control (incl CR/LF) and the cookie delimiters
-/// (space, `"`, `,`, `;`, `\`), plus a second `|` so each half stays a single
-/// segment. A narrower allowlist silently dropped enterprise/email accounts.
+/// Accept nonempty SSO subject halves, including punctuation such as `@`, `+`,
+/// and `:`; reject control characters, cookie delimiters, and extra pipes.
 fn is_safe_subject_part(part: &str) -> bool {
     !part.is_empty()
         && part.bytes().all(|byte| {

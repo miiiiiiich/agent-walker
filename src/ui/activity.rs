@@ -133,9 +133,7 @@ fn heatmap_grid(summary: &Summary, value_by_date: &BTreeMap<Date, u64>) -> Vec<L
     lines
 }
 
-/// Quartile thresholds over the non-zero days. Quantile bucketing keeps the
-/// four greens evenly used even when one outlier day dwarfs the rest —
-/// linear max-scaling collapsed everything else into the darkest shade.
+/// Nonzero-day quartiles reduce domination of the heat scale by an outlier.
 fn heat_thresholds(value_by_date: &BTreeMap<Date, u64>) -> Vec<u64> {
     let mut values = value_by_date
         .values()

@@ -41,8 +41,8 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     // Codename animal as a braille badge. Side-by-side in the right column next
     // to the ACTIVITY grass (aligned with BY HOUR / COST on the shared boundary)
     // only when the grass actually fits in the left column — otherwise the
-    // gutter would collapse and the badge would collide with the grass. Skip the
-    // ACTIVITY title/legend row (index 0) since the badge's first row is blank.
+    // gutter would collapse and the badge would collide with the grass. Ignore
+    // the ACTIVITY title/legend row only when measuring grass width.
     let activity = activity::activity_lines(summary);
     let badge = badge::codename_badge_lines(&crate::codename::for_summary(summary));
     let grass_width = activity.iter().skip(1).map(Line::width).max().unwrap_or(0);
@@ -120,10 +120,6 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         Vec::new()
     };
 
-    // Section order (user decision 2026-09-13), read row by row in the
-    // two-column layout: MODELS | PARALLEL AGENTS, TURN LENGTH | WORKING TIME,
-    // SKILLS | CONTEXT, then MODES, PROJECTS, TOOLS, (SUBAGENTS), COST,
-    // SIGNAL. The narrow layout keeps that reading order in one column.
     if width < TWO_COLUMN_MIN_WIDTH {
         let mut blocks: Vec<Vec<Line<'static>>> = vec![
             sections::model_lines(summary, width),
@@ -148,11 +144,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         return lines;
     }
 
-    // Pair sections column-wise so each row of sections starts on the same
-    // line in both columns. Left: MODELS, TURN LENGTH, (SKILLS), PROJECTS,
-    // TOOLS. Right: PARALLEL AGENTS, TIME, CONTEXT, MODES, (SUBAGENTS),
-    // COST, SIGNAL. Rows pair positionally — MODELS | PARALLEL, TURN LENGTH
-    // | TIME, SKILLS | CONTEXT on the Claude tab.
+    // Pair visible blocks positionally and align each pair's start.
     let mut left_blocks = vec![sections::model_lines(summary, left_u16)];
     if summary.completion_duration.is_some() || summary.interrupted > 0 {
         left_blocks.push(sections::duration_lines(summary, left_u16));
@@ -188,8 +180,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
 
 /// Like `join_columns`, but aligns *section boundaries*: each (left, right)
 /// block pair is padded to the taller of the two before the next pair begins,
-/// so the second section in each column (PROJECTS / SIGNAL) starts on the same
-/// row even when the first sections differ in height.
+/// so subsequent pairs start on the same row even when block heights differ.
 fn join_section_columns(
     left_blocks: &[Vec<Line<'static>>],
     right_blocks: &[Vec<Line<'static>>],
@@ -467,9 +458,8 @@ mod tests {
         assert!(at("▍ WORKING TIME") < at("▍ CONTEXT"), "{page}");
     }
 
-    /// Right-column order: the "how you drive it" panels lead (CONTEXT next
-    /// to MODELS, then MODES) and the bookkeeping panels close (COST, then
-    /// SIGNAL).
+    /// Pair TURN LENGTH with WORKING TIME and SKILLS with CONTEXT;
+    /// MODES, COST, and SIGNAL follow in the right column.
     #[test]
     fn rows_pair_turn_length_with_working_time_and_skills_with_context() {
         let text = rendered(&v09_summary(Provider::Claude), 120);

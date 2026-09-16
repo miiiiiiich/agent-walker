@@ -40,11 +40,9 @@ fn axis_label_row(width: u16, points: &[(usize, String)]) -> Line<'static> {
     ))
 }
 
-/// Geometry shared by every vertical (column) chart: a 6-char y-label
-/// column plus the axis bar, then exactly ONE character per column — the
-/// deliberate density standard (wider 2-char bars read worse; user decision
-/// 2026-07-28) — and an x-axis label row underneath. New column charts must
-/// render through `column_chart_lines` so they inherit this frame.
+/// Column charts use six characters for y-labels, one axis character, and
+/// one character per data column, with an x-axis label row underneath.
+/// New column charts must render through `column_chart_lines`.
 pub(super) const Y_AXIS_WIDTH: usize = 7;
 
 /// One column of a column chart.

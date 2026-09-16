@@ -1,12 +1,6 @@
-//! Cross-platform path helpers. All home / cache / downloads resolution goes
-//! through here so a switch from `HOME` to `dirs::*` happens once, and Windows
-//! and Unix share the same code path.
-//!
-//! Per-tool roots can be overridden by an environment variable so users with a
-//! relocated config (multi-account setups, repos on a different drive on
-//! Windows) don't end up with a blank dashboard. The variables we honor are
-//! the ones each tool itself reads; see `claude_home` / `codex_home` for the
-//! per-tool notes.
+//! Centralized platform-aware home, cache, and downloads resolution,
+//! with environment overrides for per-tool roots — only the variables each
+//! tool itself reads.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -19,14 +13,8 @@ pub fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow!("could not locate the user home directory"))
 }
 
-/// Pure helper: if `env_value` is a non-empty `Some` use it as the root,
-/// otherwise call `fallback()`. The fallback is lazy so `home_dir()` (which
-/// can itself fail) is never invoked when an env override is in effect — that
-/// lets a user with no resolvable home still point agent-walker at their
-/// relocated agent state via the env variable. Takes an `OsString` (not a
-/// `String`) so a path with non-UTF-8 bytes — legal on Unix — round-trips
-/// instead of being silently dropped. Split out so the env logic can be
-/// tested without mutating process environment variables.
+/// Use a nonempty `OsString` override, preserving non-UTF-8 paths;
+/// otherwise invoke the lazy fallback.
 fn resolve_root<F>(env_value: Option<OsString>, fallback: F) -> Result<PathBuf>
 where
     F: FnOnce() -> Result<PathBuf>,
@@ -37,13 +25,7 @@ where
     }
 }
 
-/// Root directory Claude Code reads. Defaults to `~/.claude`.
-///
-/// `CLAUDE_CONFIG_DIR` overrides it if set — Anthropic has not officially
-/// documented this variable as of 2026-06 (it's a recurring feature request),
-/// but Claude Code does read it in practice. We honor it best-effort so
-/// agent-walker doesn't disagree with users who relocate their config; if
-/// Anthropic ever changes the contract we simply fall back to `~/.claude`.
+/// Use nonempty `CLAUDE_CONFIG_DIR`; otherwise use `~/.claude`.
 pub fn claude_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("CLAUDE_CONFIG_DIR"), || {
         Ok(home_dir()?.join(".claude"))
@@ -180,9 +162,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_root_preserves_non_utf8_env_path() {
-        // Unix paths can contain non-UTF-8 bytes. The earlier `env::var`-based
-        // path silently dropped these into the fallback; `env::var_os` round-
-        // trips them so the override still wins.
+        // Non-UTF-8 environment paths must survive resolution without invoking the fallback.
         use std::os::unix::ffi::OsStringExt;
         let bytes = vec![b'/', b't', b'm', b'p', b'/', 0xff, 0xfe, b'/', b'x'];
         let raw = OsString::from_vec(bytes.clone());

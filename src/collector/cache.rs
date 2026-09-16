@@ -12,44 +12,10 @@ use tracing::debug;
 
 use super::events::FileEvents;
 
-/// Bump whenever the serialized layout OR the parsing semantics (event
-/// extraction, dedup keys) of a cached `FileEvents` change — stale caches
-/// would otherwise deserialize into garbage, or replay outdated keys that
-/// defeat a dedup fix.
-/// - 7: session-touch compression moved from UTC to local-day bucketing (cached
-///   touches depend on the local offset; a cache is invalidated by EITHER a
-///   version bump OR a changed `local_offset`, recorded in
-///   `CacheFile::offset_seconds`, so a machine-TZ change rebuilds automatically).
-/// - 8: `UsageEvent` gained `reported_cost_usd`, changing its bincode layout.
-/// - 9: v0.9 events — `UsageEvent.attribution_skill`, plus rate-limit /
-///   effort / mode event lists on `FileEvents`.
-/// - 10: Codex dedup keys became content-based (fork-replay dedup, GH-36) —
-///   same layout, but cached events carry the old positional keys.
-/// - 11: Claude `usage.iterations` parsing (fallback/advisor calls) — cached
-///   `FileEvents` lack the iteration events.
-/// - 12: `FileEvents` gained `credit_samples` (Copilot CREDITS), changing its
-///   bincode layout.
-/// - 13: duration events became keyed (`KeyedDurationEvent`, Grok fork
-///   dedup), changing the `FileEvents` layout.
-/// - 14: Claude top-level `effort` extraction — v13 caches deserialize fine
-///   but carry empty effort events for already-parsed sessions.
-/// - 15: `FileEvents` gained `permission_events` (autonomy mix), changing
-///   its bincode layout.
-/// - 16: `FileEvents` gained `interrupt_events` (esc / `turn_aborted` counts),
-///   changing its bincode layout.
-/// - 17: interrupt admission tightened (exact Claude marker forms as the
-///   sole content block, subagent file provenance, Codex
-///   `reason == "interrupted"` + required `turn_id`) — v16 caches carry
-///   over-counted interrupt events.
-/// - 18: `DurationEvent` gained `human_wait_ms` (Claude `AskUserQuestion`
-///   answer time inside a turn) and `FileEvents` gained `pace_events` (the
-///   gap before each prompt), changing the bincode layout; Claude turns are
-///   now stamped at their end and keyed by prompt uuid for fork dedup.
-/// - 19: `DurationEvent` gained `model_ms` (the model's own share of a
-///   turn vs tool runs), changing its bincode layout.
-/// - 20: Claude turns carry their `session_id` (same layout, new values).
-///
-/// The per-file key remains (mtime, size); `--no-cache` is never required.
+/// Bump when `FileEvents`' serialized layout or parsing semantics change,
+/// including extraction, attribution, deduplication, and timestamp rules.
+/// Cached results require the current version and matching local UTC offset.
+/// Per-file reuse compares (mtime, size); semantic changes require a bump.
 const CACHE_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -201,18 +167,13 @@ fn store_cache(path: &Path, cache: &CacheFile) {
     // Per-process name: two concurrent runs must never share a temp inode.
     let temp = path.with_extension(format!("tmp{}", std::process::id()));
     if write_private(&temp, &bytes).is_ok() {
-        // `std::fs::rename` is atomic on Unix and uses
-        // `MoveFileExW + MOVEFILE_REPLACE_EXISTING` on Windows, so the
-        // destination is overwritten on both platforms without an explicit
-        // unlink. Removing the file first would break the Unix atomicity
-        // guarantee and momentarily leave the cache missing for concurrent
-        // readers.
+        // Replace by rename without unlinking first, preserving atomic replacement on Unix.
         let _ = fs::rename(&temp, path);
     }
 }
 
 /// Parse `files` through `parse`, reusing cached per-file results when the
-/// file is byte-identical to the last run ((mtime, size) match) AND the cache
+/// file's (mtime, size) match the last run AND the cache
 /// was built under the same `local_offset` (compressed touches are
 /// offset-dependent). Cache misses are parsed in parallel; results are returned
 /// in `files` order so that downstream deduplication stays deterministic.

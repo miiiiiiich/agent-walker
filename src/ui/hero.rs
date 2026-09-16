@@ -16,7 +16,7 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    // Tabs always fit before decoration: title 14 + tabs ≈ 4 labels × ~12.
+    // Show the period annotation at this width; the provider tab count is variable.
     if width >= 84 {
         spans.push(Span::styled(
             format!("  last {} days", state.report.period_days),
@@ -44,7 +44,7 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Progressively shed decoration, then secondary metrics, until the line fits.
+/// Use the full line if it fits; otherwise return the compact variant.
 pub(super) fn hero_line(summary: &Summary, width: u16) -> Line<'static> {
     let width = usize::from(width);
     let full = build_hero(summary, "   ·   ", false);

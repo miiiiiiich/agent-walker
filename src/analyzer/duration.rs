@@ -36,9 +36,9 @@ pub(super) fn longest_session_span(
         .max_by_key(SessionSpan::duration_secs)
 }
 
-/// Summarize completed-turn durations (human answer time removed); `None`
-/// when no turn completed in the window. Interruptions are a separate
-/// metric — see `interrupted_count`.
+/// Summarize positive active-duration samples (human answer time removed),
+/// accepting undated events and dates in the window; `None` if none qualify.
+/// Interruptions are a separate metric — see `interrupted_count`.
 pub(super) fn completion_duration_summary(
     collection: &Collection,
     period_start: Date,
@@ -102,11 +102,8 @@ fn percentile_ms(sorted_values: &[u64], percentile: usize) -> u64 {
 fn duration_buckets(sorted_values: &[u64]) -> Vec<DurationBucket> {
     const SECOND: u64 = 1_000;
     const MINUTE: u64 = 60 * SECOND;
-    // Weighted toward the autonomy range: in 90 days of real data ~96% of
-    // turns finish under 20m, so the short side gets three buckets and the
-    // 20m+ tail (the "can it run unattended" signal) gets three. Six total so
-    // the section aligns row-for-row with PARALLEL AGENTS. The first three are
-    // <20m; `.skip(3)` therefore still isolates the unattended tail.
+    // Six buckets align row-for-row with PARALLEL AGENTS. The first three
+    // cover <20m; `.skip(3)` isolates the unattended tail.
     const BUCKETS: [(&str, u64, u64); 6] = [
         ("<2m", 0, 2 * MINUTE),
         ("2-10m", 2 * MINUTE, 10 * MINUTE),

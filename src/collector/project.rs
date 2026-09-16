@@ -61,7 +61,7 @@ fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
 
 /// Same shape on Unix: require a path-component boundary so that home
 /// `/Users/me` does not silently strip a cwd like `/Users/metadata/app` into
-/// `tadata/app` (an attribution bug the previous `{home}/` prefix avoided).
+/// `tadata/app`.
 #[cfg(not(windows))]
 fn strip_home_prefix(cwd: &str, home: &str) -> Option<String> {
     // Trim any trailing slash on `home` so the boundary check below isn't

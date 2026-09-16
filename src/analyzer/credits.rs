@@ -7,7 +7,7 @@ use crate::model::{Collection, CreditsHistory};
 
 /// Daily AI-credit spend over the analysis window: the sum of Copilot's
 /// `totalNanoAiu` deltas per local day, in credits (1e9 nano-AIU). `None`
-/// when the provider records no credit samples at all.
+/// when the provider records no credit samples in the requested window.
 #[allow(
     clippy::cast_precision_loss,
     reason = "Credits are a display quantity; nano-AIU never approaches 2^52."

@@ -14,7 +14,7 @@
 //! `busy_timeout` rides out the rare exclusive moments. Reading directly — rather
 //! than copying the whole DB into memory first — keeps memory proportional to
 //! the recent-window rows we actually parse, not the entire history. Cost is
-//! left to the shared LiteLLM pricing path like every other provider — the
+//! left to the shared LiteLLM pricing path like every non-Cursor provider — the
 //! per-message `cost` OpenCode records (and local models such as Ollama, which
 //! report no priced usage) is not used here.
 

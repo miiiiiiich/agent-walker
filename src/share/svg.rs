@@ -164,10 +164,7 @@ fn draw_header(s: &mut String, card: &ShareCard) {
     );
 }
 
-/// The rank as a pill badge above the title, in the slot the "CODENAME" label
-/// used to occupy (the label said nothing the card doesn't already show).
-/// Coloured by the 冠位十二階 ladder via `Rank::display_rgb`; unranked leaves
-/// the slot empty.
+/// Draw the rank above the title using `Rank::display_rgb`; omit it when unranked.
 fn draw_rank_badge(s: &mut String, card: &ShareCard) {
     let (Some(letters), Some((r, g, b))) = (card.rank.letters(), card.rank.display_rgb()) else {
         return;

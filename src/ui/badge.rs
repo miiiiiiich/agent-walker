@@ -1,4 +1,4 @@
-//! The codename badge: braille-art icons for each PW24 animal (20×10, source
+//! The codename badge: braille-art icons for each codename animal (20×10, source
 //! PNGs pre-thresholded to pure black/white so faint gray frame artifacts
 //! don't fill the box when downscaled), plus the badge line renderer and the
 //! OPS color mapping that paint it next to the ACTIVITY grass.

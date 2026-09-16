@@ -10,9 +10,7 @@ use crate::ui::{theme, utils};
 
 /// Daily volume as stacked per-model bars, rendered by hand: one column per
 /// day (or per day-bucket on narrow terminals), each half-cell colored by
-/// the segment that owns it. The Chart widget painter-stacking left rounding
-/// artifacts (floating caps, bleeding columns); exact half-cell assignment
-/// cannot.
+/// the segment that owns it, preventing overlapping stacked-bar painting.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,

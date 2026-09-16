@@ -62,13 +62,9 @@ struct Multipliers {
 }
 
 fn multipliers(model: Option<&str>) -> Multipliers {
-    // The fallback covers an unresolved model or a table without an input
-    // price. A resolved model keeps its table ratios as they are — a zero
-    // cache-write rate (OpenAI) is a real price, and overriding it would put
-    // this panel at odds with COST. The ratios are in units of that model's
-    // own input tokens; summing across models with different input prices
-    // mixes units — accepted, since the panel reports volume-shaped cost,
-    // not dollars, and each provider tab is dominated by one price tier.
+    // Use resolved model price ratios, including zero cache rates; fall back
+    // when pricing is unresolved or the input rate is nonpositive.
+    // Effective volume uses model-relative input-token units, not dollars.
     let fallback = Multipliers {
         read: DEFAULT_READ_MULTIPLIER,
         write_5m: DEFAULT_WRITE_5M_MULTIPLIER,
@@ -183,25 +179,15 @@ fn add_reason(reason: &mut ContextReason, call: &CallAccount) {
     reason.effective = reason.effective.saturating_add(call.uncached_effective);
 }
 
-/// Summarize cache reuse over the fixed window.
-///
-/// Every dated event feeds the token totals (so the cached share matches
-/// the tab's all-token volume). Call-level rows — bands, cold starts,
-/// expiries, ordinary uncached input — use main-chain calls of providers
-/// whose events are calls (`call_level`): sidechain rows share the parent's
-/// session id and would interleave parallel call chains. A session whose
-/// previous call predates the collection history floor (≥ 31 days idle)
-/// files its in-window call as a cold start rather than an expiry — both
-/// are "paid for the whole prefix" rows, and the floor sits a day beyond
-/// the window, so nothing inside the window is misfiled.
-/// One usage event is treated as one call; the one known exception is a
-/// Claude advisor turn, whose top-level event sums its main-model
-/// iterations (a handful per corpus) — accepted rather than threaded
-/// through the collector, since splitting it would need a cache layout
-/// change for a rounding-level effect. Predecessors are found before the
-/// window filter so the first in-window call of a running session is not
-/// a false cold start. The combined collection gets `None` — the Total tab
-/// sums the providers.
+/// Summarize the requested window: dated events feed totals; main-chain calls
+/// from call-level providers feed bands and reasons (sidechains share the
+/// parent's session id and would interleave parallel chains). One usage event
+/// counts as one call, including a Claude advisor-turn event whose top-level
+/// usage sums several main-model iterations.
+/// Find predecessors before filtering the window; missing history can make a
+/// resumed session appear cold. The scan floor uses file mtime, at twice the
+/// requested window plus one day, and does not bound event history.
+/// The combined collection gets `None`; Total sums provider summaries.
 pub(super) fn context_summary(
     collection: &Collection,
     window_start: Date,
@@ -233,10 +219,7 @@ pub(super) fn context_summary(
                 .or_default()
                 .push(event);
         } else if in_window(timestamp) {
-            // Totals only: the volume counts toward the cached share and the
-            // uncached row's volume, but not toward any call count — an
-            // aggregate record is not a call, so per-call figures must not
-            // divide by it.
+            // Volume feeds cached share and the other row, without call counts.
             add_totals(&mut summary, &call);
             summary.unclassified_effective = summary
                 .unclassified_effective
@@ -441,8 +424,8 @@ mod tests {
     }
 
     /// The predecessor is found before the window filter: the first in-window
-    /// call of a session that started earlier is not a cold start. Sidechain
-    /// rows and the combined provider contribute nothing.
+    /// call of a session that started earlier is not a cold start. Sidechains
+    /// feed totals but not call rows; the combined provider returns None.
     #[test]
     fn window_and_source_gates() {
         let before = datetime!(2026-05-20 10:00 UTC);
@@ -467,8 +450,7 @@ mod tests {
         assert_eq!(summary.cold_start.expect("cold start").calls, 0);
         assert_eq!(summary.expired.expect("expired").calls, 1);
 
-        // Copilot keeps its in-window token totals for the Total share but no
-        // call-level rows: calls stays 0 so its own tab shows nothing.
+        // Copilot keeps in-window totals and the other row, with no call-level rows.
         let copilot = context_summary(
             &collection(Provider::Copilot, events.clone()),
             date!(2026 - 06 - 01),
@@ -633,7 +615,7 @@ mod tests {
         assert_eq!(summary.cold_start.expect("cold start").calls, 1);
     }
 
-    /// Session-less providers (Cursor) get bands but no reason rows.
+    /// Sessionless providers get bands and uncached input, but no cold-start or expiry rows.
     #[test]
     fn sessionless_events_skip_reasons() {
         let mut e = event("x", datetime!(2026-06-08 10:00 UTC), 50_000, 0, 0);

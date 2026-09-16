@@ -3,23 +3,14 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// WORKING TIME: how long the agent was actually working over the analysis
-/// window, and how much context it re-read per minute of that. The turn
-/// length minus the human's answer time is the working time — tool runs and
-/// polling loops stay in (the agent was on the job), `AskUserQuestion`
-/// round-trips come out. Context per minute is the density that tracks
-/// cost: a long context dragged through many calls reads high here. Your
-/// pace is the other side: how long you take between the agent stopping
-/// and your next prompt. "made of" splits the working time into the
-/// model's own share and tools running, so the headline hours read
-/// honestly — a long batch wait is time the agent spent asleep.
-/// Hours and minutes, never days: 30 days of working time reads as "87h
-/// 12m", which compares across tabs and months the way "3d 15h" doesn't.
+/// Format elapsed time as hours and minutes, without converting to days.
 fn format_hours(duration_ms: u64) -> String {
     let minutes = duration_ms / 60_000;
     format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
+/// WORKING TIME: turn time minus human answers, context per working minute,
+/// between-turn pace, and the model/tool split where measured.
 pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let Some(time) = &summary.active_time else {
         return Vec::new();
@@ -141,10 +132,8 @@ fn made_of_line(
             Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
         ]));
     }
-    // Providers whose logs can't tell (Copilot, OpenCode) are outside the
-    // split, so the row must say how much of the total it covers — in
-    // whichever form fits the rail, never clipped off the end: the
-    // qualifier is the point of the row, so the tools half goes first.
+    // The split excludes unmeasured turns. Try coverage-qualified variants;
+    // if none fits, fall back to the model percentage alone.
     let measured = format_hours(time.measured_ms);
     let budget = usize::from(width).saturating_sub(label_width);
     let full = format!(

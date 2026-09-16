@@ -43,8 +43,8 @@ pub fn collect(
 
     // A session can briefly exist in both dirs (a stale `sessions/` copy left
     // after archiving). Dedupe by relative path before parsing — keeping the
-    // larger, more-complete file — so duration events and session touches (which
-    // merge_into does not key-dedupe) can't double-count.
+    // larger, more-complete file — so Codex durations (emitted without keys)
+    // and session touches are not duplicated during merging.
     let file_len = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
     let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
@@ -116,16 +116,10 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             current_project =
                 string_path(&value, &["payload", "cwd"]).map(|cwd| project_from_cwd(&cwd));
         }
-        // A fork/spawn child rollout opens with its own session_meta, then the
-        // ancestors' copied session_metas, then the ancestor history replayed
-        // in one write burst — every replayed line stamped at the fork
-        // instant (GH-36). Skip event collection for that burst wholesale:
-        // this works even when the parent rollout itself is outside the scan
-        // (deleted, or past the mtime window), where cross-file dedup has no
-        // original to collapse into. Burst lines that leak past the fork
-        // second are still caught by the content-based keys when the parent
-        // is in the scan. State tracking (session id, model, project) stays
-        // live so post-burst lines parse with the right context.
+        // Fork/spawn copies rewrite timestamps to the fork instant and shift
+        // line positions (GH-36). Skip the replay burst even without a parent
+        // in the scan; content keys deduplicate remaining replay when present.
+        // Keep tracking session, model, and project through the burst.
         let in_replay_burst = session_meta_count >= 2
             && match (replay_second, timestamp) {
                 (Some(second), Some(ts)) => ts.unix_timestamp() == second,
@@ -230,20 +224,10 @@ fn collect_usage_event(
     let Some(usage) = parse_token_usage(last_usage) else {
         return;
     };
-    // `info.last_token_usage` is the delta for the most recent turn, NOT the
-    // running `info.total_token_usage` cumulative. Summing one usage event per
-    // token_count line therefore yields the session total — do not also add the
-    // cumulative field, or every turn would be double-counted.
-    // Dedup key: fork/spawn copies parent history into the child rollout with
-    // every copied line's timestamp rewritten to the fork instant and line
-    // positions shifted, so a positional (session, timestamp, line_index) key
-    // counts replayed history again (GH-36). The usage payload is copied
-    // verbatim and the cumulative `total_token_usage` is non-decreasing
-    // between compactions, so (session, last vector, cumulative vector)
-    // identifies one turn's consumption across every file it appears in;
-    // re-emissions of an unchanged state (no new consumption) collapse into
-    // it too. Logs without `total_token_usage` fall back to the positional
-    // key, which still dedupes whole-file copies.
+    // Emit last_token_usage deltas; do not also add cumulative total_token_usage.
+    // Key by session, last vector, and cumulative vector to collapse replay
+    // and unchanged re-emissions (GH-36). Without cumulative usage, positional
+    // keys deduplicate whole-file copies only.
     let key = match (session_id, total_usage(value)) {
         (Some(sid), Some(cum)) => Some(format!(
             "codex-usage:v2:{sid}:{last}:{cum}",
@@ -269,13 +253,9 @@ fn collect_usage_event(
     });
 }
 
-/// Rate-limit snapshot riding on a `token_count` event: the plan's primary
-/// (5h) window utilization at that moment. Only the primary window is kept —
-/// the weekly window was deliberately dropped from the LIMITS history (a
-/// 30-day view of a 7-day window nests confusingly). Keyed on the co-riding
-/// usage state plus the snapshot's own fields, so a fork replay (a verbatim
-/// copy stamped at the fork instant, GH-36) collapses while a genuine
-/// re-notification of the same usage state with a moved window survives.
+/// Only primary-window snapshots from `token_count` events enter LIMITS.
+/// Key by co-riding usage state and snapshot fields so fork replay collapses
+/// (GH-36), while a moved window survives.
 fn collect_rate_limit_sample(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -347,12 +327,8 @@ fn collect_effort_event(
     });
 }
 
-/// One interrupt event per user-caused `turn_aborted`. Other abort reasons
-/// (`replaced`, `review_ended`) are not user escs and never count; every
-/// observed rollout carries the reason field. Events without a `turn_id`
-/// (legacy rollouts only, all predating any 30-day window) are skipped —
-/// a positional fallback is not replay-stable across forks and would
-/// double-count copies, which matters for a counted metric.
+/// Count `turn_aborted` only with reason `interrupted`, a session id, and a
+/// turn id. A positional fallback is not fork-stable and would count copies.
 fn collect_interrupt_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -666,12 +642,8 @@ fn is_shell_wrapper(name: &str) -> bool {
     )
 }
 
-/// Resolve a shell-wrapper tool call to the basename of the command it actually
-/// ran. Reads `payload.arguments` (a JSON string), pulls `command` (or `cmd` as
-/// a fallback; array or string), unwraps a `bash -c "<script>"` shape to the
-/// script's first token, skips run-prefixes (`env`/`sudo`/…) and variable
-/// assignments, and strips the path. Returns `None` when anything is
-/// unrecognized, so the caller keeps the original wrapper name as a fallback.
+/// Read JSON-encoded `payload.arguments` with `command` or `cmd` as an array
+/// or string. Return the command basename, or `None` to keep the wrapper name.
 fn exec_command_basename(value: &Value) -> Option<String> {
     let arguments = string_path(value, &["payload", "arguments"])?;
     let parsed = serde_json::from_str::<Value>(&arguments).ok()?;
@@ -800,10 +772,8 @@ fn fingerprintable(usage: &Value) -> Option<&Value> {
         .then_some(usage)
 }
 
-/// Order-fixed fingerprint of a usage object's raw counters. Fields missing
-/// from a log read as 0, keeping the fingerprint stable across schema growth
-/// (`cache_write_input_tokens` is absent from current logs but present in the
-/// upstream schema).
+/// Order-fixed fingerprint of raw usage counters; missing fields, including
+/// the optional `cache_write_input_tokens`, read as zero.
 fn usage_fingerprint(value: &Value) -> String {
     format!(
         "{}:{}:{}:{}:{}:{}",
@@ -1486,9 +1456,7 @@ mod tests {
         assert_eq!(collection.effort_events.len(), 2);
     }
 
-    /// Two `turn_context`s sharing one timestamp but carrying distinct
-    /// `turn_id`s are distinct turns — the key must separate them where the
-    /// old positional key relied on the timestamp differing.
+    /// Distinct `turn_id` values sharing a timestamp must remain distinct.
     #[test]
     fn effort_same_timestamp_distinct_turn_ids_both_survive() {
         let temp = TempDir::new().expect("test tempdir should be created");

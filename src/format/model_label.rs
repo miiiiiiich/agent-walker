@@ -15,8 +15,8 @@ pub fn short_model_name(name: &str) -> String {
 /// `geminiUsersalicesecret`). So a label containing anything outside the
 /// model-name character set is treated as suspicious and collapsed to a generic
 /// value. Legitimate names (which only use that set) pass through unchanged,
-/// capped for layout; well-known families have already collapsed to a constant
-/// upstream, so this only ever judges an unrecognized passthrough name.
+/// capped for layout. Sanitization applies to recognized families as well as
+/// unknown passthrough names.
 fn sanitize_label(label: &str) -> String {
     const MAX: usize = 24;
     // Bound the scan: an untrusted name could be megabytes long, and there's no

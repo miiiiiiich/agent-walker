@@ -18,10 +18,10 @@ pub struct UsageEvent {
     pub source_kind: SourceKind,
     pub attribution_agent: Option<String>,
     /// Skill active when this message was produced (Claude `attributionSkill`).
-    /// Feeds the SKILLS section only — never the share card.
+    /// Feeds the SKILLS section and local JSON — never the share card.
     pub attribution_skill: Option<String>,
-    /// Repository / working-directory label derived from the log location
-    /// (Claude: project directory name; Codex: `session_meta` cwd).
+    /// Repository / working-directory label: Claude prefers recorded `cwd`
+    /// with the project directory as fallback; Codex uses `session_meta` cwd.
     pub project: Option<String>,
     pub usage: TokenUsage,
     /// Provider-reported cost in USD for this event, when the source gives an
@@ -53,10 +53,9 @@ pub struct DurationEvent {
     pub timestamp: Option<OffsetDateTime>,
     pub session_id: Option<String>,
     pub duration_ms: u64,
-    /// Milliseconds inside the turn spent waiting on the human — Claude's
-    /// `AskUserQuestion` round-trips, which land mid-turn as tool results and
-    /// so never split the turn. Subtracted wherever the turn length stands
-    /// for "the agent was working"; 0 for providers without the notion.
+    /// Milliseconds waiting on the human during Claude's `AskUserQuestion`.
+    /// Ordinary round-trips stay within a turn; answers after the idle cutoff
+    /// start another. Subtracted from working time; 0 for other providers.
     pub human_wait_ms: u64,
     /// Milliseconds of the turn the model itself was working (thinking and
     /// writing) as opposed to a tool running — Claude: the gaps that end
@@ -92,7 +91,7 @@ pub struct CreditSample {
     pub nano_aiu: u64,
 }
 
-/// One Codex turn's reasoning-effort setting (`turn_context.payload.effort`).
+/// A provider-reported reasoning-effort observation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffortEvent {
     pub timestamp: Option<OffsetDateTime>,

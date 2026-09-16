@@ -16,28 +16,13 @@ use crate::model::{
     UsageEvent,
 };
 
-/// Grok Build (xAI's agentic CLI, OSS at `xai-org/grok-build`) writes one
-/// directory per session under `<root>/sessions/<encoded-cwd>/<session-id>/`,
-/// with an ACP update stream in `updates.jsonl`. Schema verified against the
-/// source and live logs (v0.2.x):
-///
-/// - Every prompt ends with a durable `turn_completed` update carrying a full
-///   per-prompt usage delta (input / output / cachedRead / reasoning, plus a
-///   per-model split in `modelUsage`) and a `prompt_id`.
-/// - Subagent runs get their own session directory, marked by
-///   `summary.json`'s `session_kind: "subagent*"`, while the coordinator
-///   folds their usage into its own turn totals — so their usage and turn
-///   durations are suppressed (the fold already carries them), while their
-///   unique tool calls and activity are kept as subagent work.
-/// - Forking copies `updates.jsonl` into the new session directory with
-///   envelope timestamps rewritten to the fork instant (the same shape as
-///   the Codex fork replay, GH-36) but `prompt_id` preserved — so usage is
-///   deduplicated globally by `prompt_id`, under which a fork copy collapses
-///   into its original and the earliest timestamp wins.
-/// - Resuming appends to the same directory; no copy is involved.
-/// - The mtime floor is deliberately not applied (see `collect`), and
-///   summary-derived facts are stamped after the parse cache so they are
-///   re-read fresh every run.
+/// Grok Build (`xai-org/grok-build`) v0.2.x schema:
+/// `<root>/sessions/<encoded-cwd>/<session-id>/updates.jsonl` stores ACP updates.
+/// `turn_completed` carries per-prompt usage and a `prompt_id`.
+/// Subagent usage and durations are suppressed because coordinator totals
+/// include them; unique tools and activity remain marked as subagent work.
+/// Forks preserve `prompt_id` while rewriting timestamps (GH-36); deduplication
+/// keeps the earliest timestamp. Mutable summary facts are read outside the cache.
 pub fn collect(
     root: &Path,
     _mtime_floor: Option<SystemTime>,
@@ -82,11 +67,6 @@ pub fn collect(
                 continue;
             };
             let dir = session_dir.path();
-            // Subagent sessions are folded into their coordinator's turn
-            // totals; counting their own directory too would double-count.
-            // An unreadable/corrupt summary is skipped for the same reason —
-            // it might be hiding a subagent marker (fail closed) — and
-            // surfaced in the stats.
             let Ok(meta) = read_summary(&dir) else {
                 collection.stats.unreadable_files += 1;
                 continue;
@@ -132,11 +112,6 @@ pub fn collect(
         let Some(meta) = dir_meta.get(path) else {
             continue;
         };
-        // Subagent sessions: their token usage is folded into the
-        // coordinator's turn totals, so usage (and its per-turn durations)
-        // would double-count — but their tool calls and activity are unique
-        // records the coordinator does NOT carry. Keep those, marked as
-        // subagent work.
         if meta
             .kind
             .as_deref()
@@ -207,12 +182,11 @@ struct DirMeta {
     parent_session_id: Option<String>,
 }
 
-/// Read the sibling `summary.json`. `Ok` with `kind: None` covers both a
-/// missing file and a summary without the field — ordinary sessions. An
-/// existing-but-unreadable or corrupt summary is `Err`: the caller must NOT
-/// fail open and treat the directory as an ordinary session, because if it
-/// was actually a subagent its usage is already folded into the coordinator
-/// and counting it would double-count.
+/// Read the sibling `summary.json`: a missing file or absent kind gives
+/// `kind: None`; an unreadable or corrupt file gives `Err`. Callers must skip
+/// an `Err` directory rather than treat it as an ordinary session: a corrupt
+/// summary may hide a subagent marker, and that usage is already folded into
+/// the coordinator.
 fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
     let raw = match std::fs::read_to_string(session_dir.join("summary.json")) {
         Ok(raw) => raw,
@@ -621,9 +595,8 @@ mod tests {
         );
     }
 
-    /// A fork whose parent is gone (deleted or outside the mtime window)
-    /// still counts once — `prompt_id` dedup simply has nothing to collide
-    /// with.
+    /// A fork whose parent is absent still counts once; `prompt_id` deduplication
+    /// has no parent record to collide with.
     #[test]
     fn orphan_fork_counts_once() {
         let temp = TempDir::new().expect("test tempdir should be created");
