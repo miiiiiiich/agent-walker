@@ -16,8 +16,10 @@ aggregate statistics.
 
 - **Network access.** Two kinds, both to read your own data — never any
   telemetry, log content, or usage upload:
-  1. A per-run fetch of public model-pricing metadata from
-     [LiteLLM's pricing database](https://github.com/BerriAI/litellm).
+  1. A fetch of public model-pricing metadata from
+     [LiteLLM's pricing database](https://github.com/BerriAI/litellm). A
+     successful fetch is kept in `~/.cache/agent-walker/pricing.json` and
+     reused for the rest of the UTC day; a failed one is retried next run.
   2. **Cursor only:** Cursor keeps no usage on disk, so when you're signed in,
      agent-walker reads your local Cursor session cookie and sends it to
      `cursor.com` to fetch *your own* usage figures — the same request the
