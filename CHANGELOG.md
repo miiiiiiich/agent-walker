@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The parse cache no longer keeps a copy per version; old copies are
+  removed on startup.
 - Every section now reads the same window. SKILLS, LIMITS, CREDITS, MODES,
   CONTEXT and WORKING TIME used to ignore `--days` and always show 30 days,
   which no document mentioned.
