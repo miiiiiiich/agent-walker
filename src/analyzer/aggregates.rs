@@ -171,6 +171,7 @@ impl ProjectAccumulator {
 
     pub(super) fn into_stat(self, name: String) -> ProjectStat {
         ProjectStat {
+            path: name.clone(),
             name,
             usage: self.usage,
         }

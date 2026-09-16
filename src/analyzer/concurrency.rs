@@ -4,6 +4,32 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{Collection, Orchestration};
 
+/// Bound session spans per (session, local day): a resumed id reused across
+/// days must not collapse into one giant span. The same rows feed PARALLEL
+/// and the JSON `sessions[]` export.
+pub(crate) fn session_day_bounds(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> {
+    let mut bounds: HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
+    for touch in &collection.session_touches {
+        let date = touch.timestamp.to_offset(local_offset).date();
+        if date < period_start || date > period_end {
+            continue;
+        }
+        bounds
+            .entry((touch.session_id.as_str(), date))
+            .and_modify(|(start, end)| {
+                *start = (*start).min(touch.timestamp);
+                *end = (*end).max(touch.timestamp);
+            })
+            .or_insert((touch.timestamp, touch.timestamp));
+    }
+    bounds
+}
+
 /// Reconstruct session spans from touches and sweep them for concurrency.
 ///
 /// `avg_concurrency` is the time-weighted mean of simultaneous sessions and
@@ -20,22 +46,7 @@ pub(super) fn orchestration(
     period_end: Date,
     local_offset: UtcOffset,
 ) -> Orchestration {
-    // Bound spans per (session, local day) exactly like longest_session_span:
-    // a resumed id reused across days must not collapse into one giant span.
-    let mut bounds: HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
-    for touch in &collection.session_touches {
-        let date = touch.timestamp.to_offset(local_offset).date();
-        if date < period_start || date > period_end {
-            continue;
-        }
-        bounds
-            .entry((touch.session_id.as_str(), date))
-            .and_modify(|(start, end)| {
-                *start = (*start).min(touch.timestamp);
-                *end = (*end).max(touch.timestamp);
-            })
-            .or_insert((touch.timestamp, touch.timestamp));
-    }
+    let bounds = session_day_bounds(collection, period_start, period_end, local_offset);
 
     // Only spans with real width can overlap; a single-touch session is a point.
     let mut events: Vec<(OffsetDateTime, i32)> = Vec::with_capacity(bounds.len() * 2);

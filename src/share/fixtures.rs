@@ -43,10 +43,12 @@ pub(crate) fn sample_summary() -> Summary {
         tools: Vec::new(),
         projects: vec![
             crate::model::ProjectStat {
+                path: "agent-walker".to_owned(),
                 name: "agent-walker".to_owned(),
                 usage: usage.clone(),
             },
             crate::model::ProjectStat {
+                path: "orchestra".to_owned(),
                 name: "orchestra".to_owned(),
                 usage: usage.clone(),
             },

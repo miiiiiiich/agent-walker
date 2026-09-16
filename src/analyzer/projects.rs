@@ -32,6 +32,7 @@ mod tests {
 
     fn project(name: &str) -> ProjectStat {
         ProjectStat {
+            path: name.to_owned(),
             name: name.to_owned(),
             usage: TokenUsage::default(),
         }
@@ -46,6 +47,8 @@ mod tests {
         strip_common_project_prefix(&mut projects);
         assert_eq!(projects[0].name, "api");
         assert_eq!(projects[1].name, "web");
+        assert_eq!(projects[0].path, "ghq/github.com/me/api");
+        assert_eq!(projects[1].path, "ghq/github.com/me/web");
     }
 
     #[test]

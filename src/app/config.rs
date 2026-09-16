@@ -7,8 +7,8 @@
 /// This is fixed for the TUI on purpose: the day charts draw one column per
 /// day, and squeezing a longer span into them would fold the trend away. The
 /// analyzer itself takes the window as an argument (`summarize(..., days,
-/// ...)`), so a future machine-readable output can ask for 90 days or any
-/// other span without touching the aggregation layer.
+/// ...)`), so JSON output can request a different span without changing
+/// the TUI window.
 pub const ANALYSIS_WINDOW_DAYS: u16 = 30;
 
 use std::env;
@@ -91,8 +91,19 @@ pub struct Args {
     #[arg(long, value_enum, value_name = "SHELL")]
     pub completions: Option<Shell>,
 
-    #[arg(long, hide = true)]
-    pub snapshot: bool,
+    /// Export the summary and dated events as one JSON document (experimental).
+    #[arg(long, conflicts_with_all = ["share", "render", "completions"])]
+    pub json: bool,
+
+    /// Analysis window in days (with --json only).
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = ANALYSIS_WINDOW_DAYS,
+        requires = "json",
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
+    pub days: u16,
 
     /// Render the TUI of every provider tab as plain text at the given
     /// terminal width and exit.
@@ -224,4 +235,39 @@ pub(super) fn demo_enabled() -> bool {
         || value.eq_ignore_ascii_case("true")
         || value.eq_ignore_ascii_case("yes")
         || value.eq_ignore_ascii_case("on")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn days_requires_json() {
+        let error = Args::try_parse_from(["agent-walker", "--days", "60"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(Args::try_parse_from(["agent-walker"]).is_ok());
+        let defaults = Args::try_parse_from(["agent-walker", "--json"]).unwrap();
+        assert_eq!(defaults.days, ANALYSIS_WINDOW_DAYS);
+        let custom = Args::try_parse_from(["agent-walker", "--json", "--days", "60"]).unwrap();
+        assert_eq!(custom.days, 60);
+        for invalid in ["0", "65536"] {
+            assert!(Args::try_parse_from(["agent-walker", "--json", "--days", invalid]).is_err());
+        }
+    }
+
+    #[test]
+    fn json_is_public_and_exclusive() {
+        use clap::CommandFactory;
+
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("--json"));
+        assert!(help.contains("--days <N>"));
+        assert!(Args::try_parse_from(["agent-walker", "--snapshot"]).is_err());
+        for flag in ["--render", "--share=out.png", "--completions=bash"] {
+            assert!(Args::try_parse_from(["agent-walker", "--json", flag]).is_err());
+        }
+    }
 }

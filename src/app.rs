@@ -7,7 +7,6 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
 use crate::collector::{agy, claude, codex, copilot, cursor, grok, opencode};
-use crate::format::snapshot_app;
 use crate::model::{AppSummary, Collection};
 use crate::ui;
 
@@ -74,10 +73,16 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    if args.snapshot {
-        let report = load_report(&config)?;
-        println!("{}", snapshot_app(&report));
-        return Ok(());
+    if args.json {
+        let (mut report, collections) = load_report_with_collections(&config, args.days)?;
+        finish_providers(&mut report);
+        let stdout = std::io::stdout();
+        return crate::format::write_json(
+            &mut std::io::BufWriter::new(stdout.lock()),
+            &report,
+            &collections,
+            config.local_offset,
+        );
     }
 
     if let Some(width) = args.render {
@@ -97,19 +102,28 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 pub fn load_report(config: &Config) -> Result<AppSummary> {
-    // Pricing overlaps log collection, but must be loaded before the
-    // analyzer runs: CONTEXT bakes price multipliers into the summary, so
-    // summarizing under a half-finished refresh would make the same logs
-    // yield different numbers run to run.
-    let pricing_refresh = crate::cost::spawn_pricing_refresh();
-    let result = load_report_inner(config, pricing_refresh);
-    result.map(|mut report| {
-        // Only surface a provider tab when that provider actually has data, then
-        // order what's left by how much it's used (heaviest first).
-        report.providers.retain(provider_has_data);
-        sort_providers_by_usage(&mut report.providers);
+    let result = load_report_with_collections(config, ANALYSIS_WINDOW_DAYS);
+    result.map(|(mut report, _)| {
+        finish_providers(&mut report);
         report
     })
+}
+
+/// Only surface a provider when it actually has data, then order what's left
+/// by how much it's used (heaviest first). Shared by the TUI and `--json`.
+fn finish_providers(report: &mut AppSummary) {
+    report.providers.retain(provider_has_data);
+    sort_providers_by_usage(&mut report.providers);
+}
+
+fn load_report_with_collections(
+    config: &Config,
+    days: u16,
+) -> Result<(AppSummary, Vec<Collection>)> {
+    // CONTEXT uses prices during aggregation, so collection overlaps refresh
+    // but every summary waits for the same completed pricing refresh.
+    let pricing_refresh = crate::cost::spawn_pricing_refresh();
+    load_report_inner(config, days, pricing_refresh)
 }
 
 /// Run every collector (threaded where independent) and keep the providers
@@ -269,28 +283,27 @@ fn sort_providers_by_usage(providers: &mut [crate::model::Summary]) {
     });
 }
 
+fn history_days(days: u16) -> u64 {
+    u64::from(days) * 2 + 1
+}
+
 fn load_report_inner(
     config: &Config,
+    days: u16,
     pricing_refresh: std::thread::JoinHandle<()>,
-) -> Result<AppSummary> {
+) -> Result<(AppSummary, Vec<Collection>)> {
     if config.demo {
         let _ = pricing_refresh.join();
-        return Ok(crate::demo::demo_report(config));
+        return Ok(crate::demo::demo_report_with_collections(config, days));
     }
 
     let started = Instant::now();
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
 
-    // Twice the analysis window plus a day of timezone slack: the second
-    // window feeds the period-over-period delta. Files older than this cannot
-    // hold relevant events.
-    //
-    // The analyzer takes its window as an argument, but this floor does not —
-    // it is tied to the window the CLI asks for. A caller wanting a longer
-    // span (a future machine-readable output) has to widen this too, or it
-    // gets a silently short history instead of an error.
-    let history_days = u64::from(config::ANALYSIS_WINDOW_DAYS) * 2 + 1;
-    let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
+    // Derive the scan floor from the requested window, including the previous
+    // window for comparisons and one day of timezone slack.
+    let mtime_floor =
+        SystemTime::now().checked_sub(StdDuration::from_secs(history_days(days) * 86_400));
 
     if config.use_cache {
         crate::collector::sweep_cache_dir();
@@ -302,32 +315,28 @@ fn load_report_inner(
 
     let providers = collections
         .iter()
-        .map(|collection| {
-            summarize(
-                collection,
-                now,
-                config::ANALYSIS_WINDOW_DAYS,
-                config.local_offset,
-            )
-        })
+        .map(|collection| summarize(collection, now, days, config.local_offset))
         .collect::<Vec<_>>();
     let combined = finish_combined(
         summarize(
             &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
             now,
-            config::ANALYSIS_WINDOW_DAYS,
+            days,
             config.local_offset,
         ),
         &providers,
     );
 
-    Ok(AppSummary {
-        generated_at: now,
-        period_days: config::ANALYSIS_WINDOW_DAYS,
-        load_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        combined,
-        providers,
-    })
+    Ok((
+        AppSummary {
+            generated_at: now,
+            period_days: days,
+            load_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            combined,
+            providers,
+        },
+        collections,
+    ))
 }
 
 #[cfg(test)]
@@ -388,6 +397,14 @@ mod tests {
             active_time: None,
             orchestration: Orchestration::default(),
         }
+    }
+
+    #[test]
+    fn scan_history_tracks_the_requested_window() {
+        assert_eq!(history_days(1), 3);
+        assert_eq!(history_days(30), 61);
+        assert_eq!(history_days(90), 181);
+        assert_eq!(history_days(u16::MAX), 131_071);
     }
 
     #[test]

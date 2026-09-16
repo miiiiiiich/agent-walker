@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Experimental `--json`: export usage summaries and dated events for
+  charts and LLMs, with `--days <N>` for JSON-only windows. The schema is
+  still settling and may change between minor releases; `schema_version`
+  moves when it does.
+
 ### Removed
 
-- `--days`. The window is fixed at 30 days; passing the flag is now an error
-  rather than a silent no-op for half the screen.
+- Hidden `--snapshot` text output, replaced by `--json`.
+- `--days` for the TUI, share, and render modes; it now requires `--json`.
 
 ### Changed
 
@@ -20,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CONTEXT and WORKING TIME used to ignore `--days` and always show 30 days,
   which no document mentioned.
 - The day charts draw one column per day, so a longer span would have folded
-  the trend away — the window is fixed rather than configurable. The analyzer
-  still takes it as an argument for future use.
+  the trend away — the TUI window stays fixed. JSON can request a longer
+  window through the same analyzer.
 - README gains the sections that were missing from its table: TOKENS PER
   DAY, TOOLS, SUBAGENTS, SKILLS, COST, LIMITS, CREDITS and SIGNAL.
 

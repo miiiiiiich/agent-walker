@@ -121,6 +121,8 @@ pub struct ToolStat {
 
 #[derive(Debug, Clone)]
 pub struct ProjectStat {
+    /// Original project identifier, before display-prefix stripping.
+    pub path: String,
     pub name: String,
     pub usage: TokenUsage,
 }

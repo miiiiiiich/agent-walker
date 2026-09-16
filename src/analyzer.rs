@@ -19,6 +19,7 @@ use crate::model::{
 };
 
 use self::aggregates::Aggregates;
+pub(crate) use self::concurrency::session_day_bounds;
 
 /// Summarize a collection over the trailing window. All timestamps are
 /// normalized to `local_offset` before day/hour bucketing so that daily and
