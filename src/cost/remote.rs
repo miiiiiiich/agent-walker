@@ -6,12 +6,16 @@
 //! ever sent.
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tracing::debug;
 
 use super::{Pricing, Snapshot, loaded, parse_snapshot_json, replace_loaded};
+
+/// Decoded-body cap; the table is a few MB.
+const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 const PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -21,11 +25,27 @@ const PRICING_URL: &str =
 /// allowlist — a model is priced if its id is in the table; unknown ids stay
 /// $0. Provider/region duplicates and absurd rates are the actual guards.
 fn fetch_snapshot_json() -> Option<String> {
-    let response = ureq::get(PRICING_URL)
-        .timeout(Duration::from_secs(10))
+    // No env proxy: ureq 3 would pick up `HTTPS_PROXY` & co. by default,
+    // which would silently change where this request leaves the machine.
+    let mut response = ureq::get(PRICING_URL)
+        .config()
+        .proxy(None)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
         .call()
         .ok()?;
-    let raw = response.into_string().ok()?;
+    // Cap the *decoded* body: ureq's own limit counts compressed bytes, and
+    // the table arrives gzipped.
+    let mut raw = String::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_BODY_BYTES + 1)
+        .read_to_string(&mut raw)
+        .ok()?;
+    if raw.len() as u64 > MAX_BODY_BYTES {
+        return None;
+    }
     let upstream: HashMap<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
 
     let mut models = HashMap::new();

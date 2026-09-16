@@ -20,6 +20,7 @@
 //! (`composer-2.5-fast`, …) aren't in the `LiteLLM` table, so the CSV's own
 //! `Cost` column is carried through as `UsageEvent::reported_cost_usd`.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -217,43 +218,68 @@ fn is_safe_subject_part(part: &str) -> bool {
         })
 }
 
+/// Decoded-body cap; the export is a few KB per month.
+const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
 /// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
 /// short reason for the log: a 401/403 means the session expired (re-login in
 /// Cursor), other statuses and transport failures pass their own message.
 fn fetch_csv(cookie: &str) -> Result<String, String> {
+    fetch_csv_from(CSV_URL, cookie)
+}
+
+fn fetch_csv_from(url: &str, cookie: &str) -> Result<String, String> {
     // Don't follow redirects: the session cookie is attached by hand, so a 3xx
     // from the endpoint must never carry it to another host. With redirects
     // disabled the cookie only ever reaches cursor.com; a redirect is refused
     // below rather than chased.
-    let agent = ureq::builder().redirects(0).build();
-    let response = agent
-        .get(CSV_URL)
+    // `max_redirects(0)` never follows and never errors: the 3xx comes back
+    // as a response and is refused below.
+    let agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        // No env proxy (ureq 2 never used one): the cookie must leave only
+        // over the direct connection to cursor.com.
+        .proxy(None)
         // The fetch is synchronous and the dashboard waits on it, so keep the
         // cap short — the CSV is tiny; a slow network shouldn't hang startup.
-        .timeout(Duration::from_secs(5))
-        .set("Cookie", cookie)
-        .set("Referer", REFERER)
-        .set("User-Agent", USER_AGENT)
-        .set("Accept", "*/*")
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get(url)
+        .header("Cookie", cookie)
+        .header("Referer", REFERER)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "*/*")
         .call()
         .map_err(|err| match err {
-            ureq::Error::Status(401 | 403, _) => {
+            ureq::Error::StatusCode(401 | 403) => {
                 "session expired — re-login in Cursor to refresh the token".to_owned()
             }
-            ureq::Error::Status(code, _) => format!("HTTP {code} from the usage endpoint"),
-            ureq::Error::Transport(transport) => format!("network error: {transport}"),
+            ureq::Error::StatusCode(code) => format!("HTTP {code} from the usage endpoint"),
+            ureq::Error::Timeout(_) => "the usage endpoint did not answer in time".to_owned(),
+            other => format!("network error: {other}"),
         })?;
     // With redirects disabled a 3xx returns as `Ok`; refuse it instead of
     // reading a redirect target's body (the cookie was never sent there).
-    let status = response.status();
+    let status = response.status().as_u16();
     if (300..400).contains(&status) {
         return Err(format!(
             "unexpected redirect (HTTP {status}) from the usage endpoint"
         ));
     }
+    // Cap the *decoded* body: ureq's own limit counts compressed bytes.
+    let mut csv = String::new();
     response
-        .into_string()
-        .map_err(|err| format!("reading the response body: {err}"))
+        .body_mut()
+        .as_reader()
+        .take(MAX_BODY_BYTES + 1)
+        .read_to_string(&mut csv)
+        .map_err(|err| format!("reading the response body: {err}"))?;
+    if csv.len() as u64 > MAX_BODY_BYTES {
+        return Err("usage export larger than expected".to_owned());
+    }
+    Ok(csv)
 }
 
 /// Parse the dashboard CSV. Columns are resolved by header name (Cursor inserts
@@ -646,5 +672,57 @@ mod tests {
         assert_eq!(normalize_subject("google-oauth2|123\r\nInjected: 1"), None);
         assert_eq!(normalize_subject("google-oauth2|123; evil=1"), None);
         assert_eq!(normalize_subject("prov ider|123"), None);
+    }
+
+    /// Serve one canned HTTP response on a local port and hand back the
+    /// request line + headers the client sent, plus the request count.
+    /// `{addr}` in `response` is replaced with the listener's own address, so
+    /// a redirect points back here and a followed one shows up as a second
+    /// request.
+    fn one_shot_server(response: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/usage.csv");
+        let response = response.replace("{addr}", &addr.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (url, rx)
+    }
+
+    /// A 3xx is refused, not followed: the cookie must never travel to the
+    /// redirect target. Exactly one request reaches the server.
+    #[test]
+    fn redirects_are_refused_without_being_followed() {
+        let (url, rx) = one_shot_server(
+            "HTTP/1.1 302 Found\r\nLocation: http://{addr}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let error = fetch_csv_from(&url, "WorkosCursorSessionToken=secret").unwrap_err();
+        assert!(error.contains("unexpected redirect (HTTP 302)"), "{error}");
+        // ureq 3 lowercases header names on the wire.
+        let request = rx.recv().unwrap().to_ascii_lowercase();
+        assert!(request.contains("cookie: workoscursorsessiontoken=secret"));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "redirect was followed"
+        );
+    }
+
+    #[test]
+    fn an_expired_session_is_named_as_such() {
+        let (url, _rx) = one_shot_server(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let error = fetch_csv_from(&url, "x").unwrap_err();
+        assert!(error.contains("session expired"), "{error}");
     }
 }
