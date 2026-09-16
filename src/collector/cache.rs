@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -90,12 +90,59 @@ struct CacheEntry {
     events: FileEvents,
 }
 
-fn cache_path(cache_name: &str) -> Option<PathBuf> {
-    Some(
-        crate::paths::cache_dir()
-            .ok()?
-            .join(format!("{cache_name}-v{CACHE_VERSION}.bin")),
-    )
+/// One file per provider, `<name>.bin`, versioned by the header inside it:
+/// a bump overwrites the old file on the next store instead of leaving a
+/// sibling behind.
+fn cache_file(dir: &Path, cache_name: &str) -> PathBuf {
+    dir.join(format!("{cache_name}.bin"))
+}
+
+/// A temp file older than this was left by a run that died mid-write; a
+/// live writer finishes in well under a second.
+const ORPHAN_TEMP_AGE: Duration = Duration::from_hours(1);
+
+/// Remove what no run will read again: caches from before 0.17, when the
+/// version sat in the file name (`claude-v19.bin`, plus the `claude-v19.tmp`
+/// its interrupted writes left), and `<name>.tmp<pid>` files whose writer
+/// died before the rename. Runs once at startup, independent of which
+/// providers have logs today.
+pub fn sweep_cache_dir() {
+    if let Ok(dir) = crate::paths::cache_dir() {
+        sweep(&dir, SystemTime::now());
+    }
+}
+
+fn all_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn sweep(dir: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let legacy = name
+            .strip_suffix(".bin")
+            .or_else(|| name.strip_suffix(".tmp"))
+            .and_then(|stem| stem.rsplit_once("-v"))
+            .is_some_and(|(_, version)| all_digits(version));
+        let orphan_temp = name
+            .rsplit_once(".tmp")
+            .is_some_and(|(_, pid)| all_digits(pid))
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > ORPHAN_TEMP_AGE);
+        if legacy || orphan_temp {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A cached file is reusable only when both the format version and the
@@ -105,26 +152,42 @@ fn cache_is_reusable(cache: &CacheFile, offset_seconds: i32) -> bool {
     cache.version == CACHE_VERSION && cache.offset_seconds == offset_seconds
 }
 
-fn load_cache(cache_name: &str, offset_seconds: i32) -> CacheFile {
-    let Some(path) = cache_path(cache_name) else {
-        return CacheFile::default();
-    };
-    let Ok(bytes) = fs::read(&path) else {
-        return CacheFile::default();
-    };
+/// `None` when nothing reusable is on disk (missing, corrupt, or built under
+/// another version / offset), so the caller knows it must write.
+fn load_cache(path: &Path, offset_seconds: i32) -> Option<CacheFile> {
+    let bytes = fs::read(path).ok()?;
     match bincode::deserialize::<CacheFile>(&bytes) {
-        Ok(cache) if cache_is_reusable(&cache, offset_seconds) => cache,
+        Ok(cache) if cache_is_reusable(&cache, offset_seconds) => Some(cache),
         _ => {
             debug!(path = %path.display(), "discarding stale, corrupt, or offset-changed cache");
-            CacheFile::default()
+            None
         }
     }
 }
 
-fn store_cache(cache_name: &str, cache: &CacheFile) {
-    let Some(path) = cache_path(cache_name) else {
-        return;
-    };
+/// The cache holds project paths and session ids derived from the logs, so
+/// it is written owner-only where the platform can express that.
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
+    // `mode` only applies on create; a leftover temp keeps its old bits.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
+}
+
+fn store_cache(path: &Path, cache: &CacheFile) {
     let Some(parent) = path.parent() else {
         return;
     };
@@ -134,15 +197,16 @@ fn store_cache(cache_name: &str, cache: &CacheFile) {
     let Ok(bytes) = bincode::serialize(cache) else {
         return;
     };
-    let temp = path.with_extension("tmp");
-    if fs::write(&temp, bytes).is_ok() {
+    // Per-process name: two concurrent runs must never share a temp inode.
+    let temp = path.with_extension(format!("tmp{}", std::process::id()));
+    if write_private(&temp, &bytes).is_ok() {
         // `std::fs::rename` is atomic on Unix and uses
         // `MoveFileExW + MOVEFILE_REPLACE_EXISTING` on Windows, so the
         // destination is overwritten on both platforms without an explicit
         // unlink. Removing the file first would break the Unix atomicity
         // guarantee and momentarily leave the cache missing for concurrent
         // readers.
-        let _ = fs::rename(&temp, &path);
+        let _ = fs::rename(&temp, path);
     }
 }
 
@@ -158,12 +222,24 @@ pub fn parse_files_cached(
     local_offset: UtcOffset,
     parse: impl Fn(&Path) -> Option<FileEvents> + Sync,
 ) -> Vec<(PathBuf, Option<FileEvents>)> {
-    let offset_seconds = local_offset.whole_seconds();
-    let cache = cache_name
-        .map(|name| load_cache(name, offset_seconds))
-        .unwrap_or_default();
+    let cache_file =
+        cache_name.and_then(|name| Some(cache_file(&crate::paths::cache_dir().ok()?, name)));
+    parse_files_with_cache(cache_file.as_deref(), files, local_offset, parse)
+}
 
-    let parsed: Vec<(PathBuf, Option<FileEvents>, Option<FileStamp>)> = files
+fn parse_files_with_cache(
+    cache_file: Option<&Path>,
+    files: &[PathBuf],
+    local_offset: UtcOffset,
+    parse: impl Fn(&Path) -> Option<FileEvents> + Sync,
+) -> Vec<(PathBuf, Option<FileEvents>)> {
+    let offset_seconds = local_offset.whole_seconds();
+    let loaded = cache_file.and_then(|path| load_cache(path, offset_seconds));
+    let reusable = loaded.is_some();
+    let cache = loaded.unwrap_or_default();
+
+    // (path, events, stamp, served from cache)
+    let parsed: Vec<(PathBuf, Option<FileEvents>, Option<FileStamp>, bool)> = files
         .par_iter()
         .map(|path| {
             let stamp = file_stamp(path);
@@ -172,22 +248,36 @@ pub fn parse_files_cached(
                 && entry.mtime_ns == stamp.mtime_ns
                 && entry.size == stamp.size
             {
-                return (path.clone(), Some(entry.events.clone()), Some(stamp));
+                return (path.clone(), Some(entry.events.clone()), Some(stamp), true);
             }
-            (path.clone(), parse(path), stamp)
+            (path.clone(), parse(path), stamp, false)
         })
         .collect();
+
+    // Every storable file came from the cache and nothing was pruned: the
+    // file on disk already says exactly this, so skip the rebuild and write.
+    let storable = parsed
+        .iter()
+        .filter(|(_, events, stamp, _)| events.is_some() && stamp.is_some())
+        .count();
+    let hits = parsed.iter().filter(|(_, _, _, hit)| *hit).count();
+    let unchanged = reusable && hits == storable && storable == cache.entries.len();
+
+    let Some(cache_file) = cache_file.filter(|_| !unchanged) else {
+        return parsed
+            .into_iter()
+            .map(|(path, events, _, _)| (path, events))
+            .collect();
+    };
 
     let mut next = CacheFile {
         version: CACHE_VERSION,
         offset_seconds,
-        entries: HashMap::with_capacity(parsed.len()),
+        entries: HashMap::with_capacity(storable),
     };
     let mut results = Vec::with_capacity(parsed.len());
-    for (path, events, stamp) in parsed {
-        if cache_name.is_some()
-            && let (Some(events), Some(stamp)) = (&events, stamp)
-        {
+    for (path, events, stamp, _) in parsed {
+        if let (Some(events), Some(stamp)) = (&events, stamp) {
             next.entries.insert(
                 path.clone(),
                 CacheEntry {
@@ -199,9 +289,7 @@ pub fn parse_files_cached(
         }
         results.push((path, events));
     }
-    if let Some(name) = cache_name {
-        store_cache(name, &next);
-    }
+    store_cache(cache_file, &next);
     results
 }
 
@@ -227,5 +315,113 @@ mod tests {
         assert!(!cache_is_reusable(&cache_with(CACHE_VERSION, jst), 0));
         // Version changed: discard regardless of offset.
         assert!(!cache_is_reusable(&cache_with(CACHE_VERSION - 1, jst), jst));
+    }
+
+    #[test]
+    fn sweep_removes_legacy_files_and_stale_temps_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "claude-v19.bin",
+            "claude-v19.tmp",
+            "codex-v20.bin",
+            "claude.tmp111",
+            "claude.tmp222",
+            "claude.bin",
+            "claude-vx.bin",
+            "pricing.json",
+        ] {
+            fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        // One temp is fresh (a concurrent run may still be writing it), the
+        // other is long dead.
+        let now = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("claude.tmp222"))
+            .unwrap()
+            .set_modified(now - ORPHAN_TEMP_AGE * 2)
+            .unwrap();
+        sweep(dir.path(), now);
+        let mut left: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "claude-vx.bin",
+                "claude.bin",
+                "claude.tmp111",
+                "pricing.json"
+            ]
+        );
+    }
+
+    /// A cache discarded for its header is rewritten even when there is
+    /// nothing to store, so a bump never leaves the old file behind.
+    #[test]
+    fn discarded_cache_is_replaced_even_with_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("claude.bin");
+        let stale = bincode::serialize(&cache_with(CACHE_VERSION - 1, 0)).unwrap();
+        fs::write(&cache, stale).unwrap();
+        assert!(load_cache(&cache, 0).is_none());
+
+        parse_files_with_cache(Some(&cache), &[], UtcOffset::UTC, |_| None);
+        assert!(
+            load_cache(&cache, 0).is_some(),
+            "rewritten with the current header"
+        );
+    }
+
+    /// An unchanged file set is served from the cache without rewriting it;
+    /// a changed file re-parses and rewrites. The file is owner-only on Unix.
+    #[test]
+    fn unchanged_runs_do_not_rewrite_the_cache() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("a.jsonl");
+        fs::write(&log, b"one\n").unwrap();
+        let cache = dir.path().join("claude.bin");
+        let parses = AtomicUsize::new(0);
+        let parse = |_: &Path| {
+            parses.fetch_add(1, Ordering::SeqCst);
+            Some(FileEvents::default())
+        };
+        let files = vec![log.clone()];
+
+        parse_files_with_cache(Some(&cache), &files, UtcOffset::UTC, parse);
+        assert_eq!(parses.load(Ordering::SeqCst), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        // Stamp the cache with a time no write could produce, so "rewritten"
+        // is a plain inequality instead of a sleep-dependent ordering.
+        let sentinel = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&cache)
+            .unwrap()
+            .set_modified(sentinel)
+            .unwrap();
+        let modified = || fs::metadata(&cache).unwrap().modified().unwrap();
+        assert_eq!(modified(), sentinel);
+
+        parse_files_with_cache(Some(&cache), &files, UtcOffset::UTC, parse);
+        assert_eq!(parses.load(Ordering::SeqCst), 1, "served from cache");
+        assert_eq!(modified(), sentinel, "unchanged run must not rewrite");
+
+        fs::write(&log, b"one\ntwo\n").unwrap();
+        parse_files_with_cache(Some(&cache), &files, UtcOffset::UTC, parse);
+        assert_eq!(parses.load(Ordering::SeqCst), 2, "changed file re-parses");
+        assert_ne!(modified(), sentinel, "changed run rewrites");
     }
 }
