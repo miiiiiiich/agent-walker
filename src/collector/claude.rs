@@ -166,6 +166,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                         turn.flush(&mut events);
                         turn = TurnState {
                             start: Some(timestamp),
+                            session_id: session_id_field(&value),
                             key,
                             last_activity: Some(timestamp),
                             ..TurnState::default()
@@ -264,6 +265,8 @@ fn is_human_turn(value: &Value) -> bool {
 #[derive(Default)]
 struct TurnState {
     start: Option<OffsetDateTime>,
+    /// The prompt row's session, so JSON consumers can join turns to sessions.
+    session_id: Option<String>,
     /// The prompt row's uuid — fork children replay the parent's history,
     /// so a turn copied into a child file must dedupe against the original.
     key: Option<String>,
@@ -322,6 +325,7 @@ impl TurnState {
     /// be recognized and start the next turn.
     fn after_cutoff(self) -> Self {
         Self {
+            session_id: self.session_id,
             pending_questions: self.pending_questions,
             ..Self::default()
         }
@@ -342,6 +346,9 @@ impl TurnState {
         }
         self.start = Some(now);
         self.key = string_field(value, "uuid");
+        if let Some(id) = session_id_field(value) {
+            self.session_id = Some(id);
+        }
         self.last_activity = Some(now);
         self.human_wait_ms = 0;
         self.wait_cursor = Some(now);
@@ -400,7 +407,7 @@ impl TurnState {
             key: self.key.as_ref().map(|uuid| format!("claude-turn:{uuid}")),
             event: DurationEvent {
                 timestamp: Some(end),
-                session_id: None,
+                session_id: self.session_id.clone(),
                 duration_ms,
                 human_wait_ms: self.waited_until(end).min(duration_ms),
                 model_ms: Some(self.model_ms.min(duration_ms)),
@@ -433,6 +440,12 @@ fn question_tool_use_ids(value: &Value) -> Vec<String> {
         .collect()
 }
 
+fn session_id_field(value: &Value) -> Option<String> {
+    string_field(value, "sessionId")
+        .or_else(|| string_field(value, "session_id"))
+        .or_else(|| string_field(value, "session_id_v2"))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Per-line parse context; bundling into a struct adds noise for one caller."
@@ -447,9 +460,7 @@ fn parse_line(
     events: &mut FileEvents,
 ) {
     let timestamp = parse_timestamp(value.get("timestamp"));
-    let session_id = string_field(value, "sessionId")
-        .or_else(|| string_field(value, "session_id"))
-        .or_else(|| string_field(value, "session_id_v2"));
+    let session_id = session_id_field(value);
     if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
         events.session_touches.push(SessionTouch {
             timestamp,
@@ -1102,6 +1113,10 @@ mod tests {
         // which the 10 min between the question and the answer is the
         // human's. The turn is stamped at its end, like Codex / Copilot.
         assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(
+            collection.duration_events[0].session_id.as_deref(),
+            Some("s1")
+        );
         let turn = &collection.duration_events[0];
         assert_eq!(turn.duration_ms, 720_000);
         assert_eq!(turn.human_wait_ms, 600_000);
@@ -1171,7 +1186,7 @@ mod tests {
                 "\n",
                 r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{}}]}}"#,
                 "\n",
-                r#"{"timestamp":"2026-07-20T00:41:00Z","sessionId":"s1","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"x"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:41:00Z","sessionId":"s2","type":"user","uuid":"r1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"x"}]}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-20T00:46:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
                 "\n",
@@ -1192,6 +1207,13 @@ mod tests {
         // 00:00 -> 00:01 (the ask ends it, nothing to wait for yet) and
         // 00:41 -> 00:46 (the answer starts it, all work).
         assert_eq!(turns, vec![(60_000, 0), (300_000, 0)]);
+        // The restarted turn belongs to the session of the row that started it.
+        let sessions: Vec<_> = collection
+            .duration_events
+            .iter()
+            .map(|turn| turn.session_id.as_deref())
+            .collect();
+        assert_eq!(sessions, vec![Some("s1"), Some("s2")]);
     }
 
     /// The cutoff may be triggered by a reminder row rather than the answer

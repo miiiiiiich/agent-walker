@@ -47,9 +47,10 @@ use super::events::FileEvents;
 ///   now stamped at their end and keyed by prompt uuid for fork dedup.
 /// - 19: `DurationEvent` gained `model_ms` (the model's own share of a
 ///   turn vs tool runs), changing its bincode layout.
+/// - 20: Claude turns carry their `session_id` (same layout, new values).
 ///
 /// The per-file key remains (mtime, size); `--no-cache` is never required.
-const CACHE_VERSION: u32 = 19;
+const CACHE_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {

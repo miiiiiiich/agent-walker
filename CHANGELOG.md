@@ -9,28 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Experimental `--json`: export usage summaries and dated events for
-  charts and LLMs, with `--days <N>` for JSON-only windows. The schema is
-  still settling and may change between minor releases; `schema_version`
-  moves when it does.
+- Experimental `--json` exports summaries and dated events for charts and
+  LLMs; `--days <N>` widens the window for JSON only. The schema may still
+  change between minor releases.
 
 ### Removed
 
+- `--days` for the TUI, share and render modes: every section reads the same
+  30 days. Passing it without `--json` is an error.
 - Hidden `--snapshot` text output, replaced by `--json`.
-- `--days` for the TUI, share, and render modes; it now requires `--json`.
 
 ### Changed
 
 - The parse cache no longer keeps a copy per version; old copies are
   removed on startup.
-- Every section now reads the same window. SKILLS, LIMITS, CREDITS, MODES,
-  CONTEXT and WORKING TIME used to ignore `--days` and always show 30 days,
-  which no document mentioned.
-- The day charts draw one column per day, so a longer span would have folded
-  the trend away — the TUI window stays fixed. JSON can request a longer
-  window through the same analyzer.
-- README gains the sections that were missing from its table: TOKENS PER
-  DAY, TOOLS, SUBAGENTS, SKILLS, COST, LIMITS, CREDITS and SIGNAL.
+- Claude turns carry their session id, so JSON `turns[]` join to
+  `sessions[]` on every provider. The parse cache rebuilds once.
 
 ## [0.16.0] - 2026-09-14
 
