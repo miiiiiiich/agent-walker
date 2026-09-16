@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- HTTP client moved to ureq 3. Same hosts and headers (names now lowercase
+  on the wire), no proxy from the environment, and redirects from the
+  Cursor endpoint are still refused rather than followed.
+
 ## [0.17.0] - 2026-09-16
 
 ### Added
