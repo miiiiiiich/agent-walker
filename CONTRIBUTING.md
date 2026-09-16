@@ -17,7 +17,7 @@ narrow `#[allow]`s with a `reason` are fine where the lint hurts readability.
 ## Useful dev flags
 
 - `agw --render=120` — render every tab as plain text (no TTY needed)
-- `agw --snapshot` — aggregate stats as text
+- `agw --json` — summaries and dated events as JSON
 - `agw --no-cache` — bypass the parse cache
 
 ## Conventions

@@ -518,41 +518,45 @@ pub(crate) fn copilot_collection_for_tests(now: OffsetDateTime, days: u16) -> Co
     copilot_collection(now, days, &mut rng)
 }
 
+#[cfg(test)]
 pub fn demo_report(config: &Config) -> AppSummary {
+    demo_report_with_collections(config, crate::app::ANALYSIS_WINDOW_DAYS).0
+}
+
+pub(crate) fn demo_report_with_collections(
+    config: &Config,
+    days: u16,
+) -> (AppSummary, Vec<Collection>) {
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
 
     let collections = vec![
-        claude_collection(now, crate::app::ANALYSIS_WINDOW_DAYS, &mut rng),
-        codex_collection(now, crate::app::ANALYSIS_WINDOW_DAYS, &mut rng),
+        claude_collection(now, days, &mut rng),
+        codex_collection(now, days, &mut rng),
     ];
 
     let providers = collections
         .iter()
-        .map(|collection| {
-            summarize(
-                collection,
-                now,
-                crate::app::ANALYSIS_WINDOW_DAYS,
-                config.local_offset,
-            )
-        })
+        .map(|collection| summarize(collection, now, days, config.local_offset))
         .collect::<Vec<_>>();
     let combined = crate::app::finish_combined(
         summarize(
             &Collection::combined(PathBuf::from("demo data"), &collections),
             now,
-            crate::app::ANALYSIS_WINDOW_DAYS,
+            days,
             config.local_offset,
         ),
         &providers,
     );
 
-    AppSummary {
-        generated_at: now,
-        period_days: crate::app::ANALYSIS_WINDOW_DAYS,
-        load_duration_ms: 0,
-        combined,
-        providers,
-    }
+    (
+        AppSummary {
+            generated_at: now,
+            period_days: days,
+            load_duration_ms: 0,
+            combined,
+            providers,
+        },
+        collections,
+    )
 }

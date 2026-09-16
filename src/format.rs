@@ -1,5 +1,4 @@
-use time::format_description::well_known::Rfc3339;
-use time::{Date, OffsetDateTime};
+use time::Date;
 
 #[allow(
     clippy::cast_precision_loss,
@@ -98,68 +97,15 @@ pub fn format_date(date: Date) -> String {
     )
 }
 
-pub fn format_timestamp(timestamp: OffsetDateTime) -> String {
-    timestamp
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_owned())
-}
-
+mod json;
 mod model_label;
-mod snapshot;
 
+pub(crate) use json::write_json;
 pub use model_label::short_model_name;
-pub use snapshot::snapshot_app;
 
 #[cfg(test)]
 mod tests {
-    use super::snapshot::snapshot;
     use super::*;
-
-    #[test]
-    fn snapshot_carries_the_rank_line() {
-        // 250M/day over the 30-day window → A band; the fixture itself
-        // (≈700K/day) stays unranked.
-        let mut summary = crate::share::fixtures::sample_summary();
-        summary.recent_window_volume = 7_500_000_000;
-        summary.recent_window_active_days = 29;
-        assert!(snapshot(&summary).contains("rank: A"));
-        assert!(snapshot(&crate::share::fixtures::sample_summary()).contains("rank: unranked"));
-    }
-
-    /// Duration stats and the interruption count are independent records:
-    /// an interrupt-only window emits the count and no duration record.
-    #[test]
-    fn snapshot_reports_interruptions_independently() {
-        let mut summary = crate::share::fixtures::sample_summary();
-        let text = snapshot(&summary);
-        assert!(text.contains("completion_duration:"));
-        assert!(text.contains("completion_interrupted: 0"));
-        summary.completion_duration = None;
-        summary.interrupted = 3;
-        let text = snapshot(&summary);
-        assert!(!text.contains("completion_duration:"));
-        assert!(text.contains("completion_interrupted: 3"));
-        // Neither → neither record (the silent-window shape is unchanged).
-        summary.interrupted = 0;
-        assert!(!snapshot(&summary).contains("completion_"));
-    }
-
-    /// Every provider block carries its own cache-reuse record — retention
-    /// differs per provider, so the combined line alone would hide who paid.
-    #[test]
-    fn snapshot_app_emits_context_per_provider() {
-        let provider = crate::share::fixtures::sample_summary();
-        let report = crate::model::AppSummary {
-            generated_at: time::macros::datetime!(2026-06-08 12:00 UTC),
-            period_days: 30,
-            load_duration_ms: 1,
-            combined: provider.clone(),
-            providers: vec![provider],
-        };
-        let text = snapshot_app(&report);
-        assert_eq!(text.matches("context_30d: cached:").count(), 2, "{text}");
-        assert!(text.contains("\n  context_30d: cached:"), "{text}");
-    }
 
     #[test]
     fn formats_tokens_with_compact_units() {
