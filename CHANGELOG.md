@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The TUI redraws only on a key or a resize, instead of rebuilding every
   section four times a second while idle.
-
 - HTTP client moved to ureq 3. Same hosts and headers (names now lowercase
   on the wire), no proxy from the environment, and redirects from the
   Cursor endpoint are still refused rather than followed.
