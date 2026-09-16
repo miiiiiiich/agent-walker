@@ -86,21 +86,11 @@ agent-walker はログをどこのサーバーにも送りません。ネット�
 
 ## JSON
 
-`--json` はローカル分析用の集計と日時付きイベントを、整形済みの単一 JSON に出力します。試験的な機能で、形が固まるまではマイナーリリースでもスキーマが変わることがあります。LLM に渡す場合:
+`--json` は TUI と同じ集計と、その元になった日時付きイベントを 1 つの JSON に出力します。試験的な機能で、スキーマはマイナーリリースでも変わることがあります。
 
 ```sh
 agent-walker --json | jq '{schema_version, window, total}'
 ```
-
-`schema_version: 1` はスキーマの版です。フィールドの改名・削除・意味の変更があれば上がります。追加は非破壊的変更なので、利用側は未知のフィールドを無視し、未知の値も許容してください。
-`null` は取得不可、`[]` は行なし（プロバイダにそのストリームが無い場合も、窓内に行が無かった場合も同じ）、`0` は計測されたゼロです。`reported_usd` はログに課金の記録が無ければ `0` です。
-`2^53 - 1` を超えるトークン整数を JavaScript で正確に扱うには、精度を保つ JSON パーサーが必要です。
-`reasoning_output_tokens` は `output_tokens` に、保持時間別のキャッシュ書き込みは `cache_creation_input_tokens` に含まれます。`_tokens` をすべて足さないでください。
-日付は `time_basis` の固定 UTC オフセットを使い、期間の両端日を含みます。日時不明のイベントは生データから除外します（集計には含まれるので、`turn_length.turns` が `turns[]` より多くなることがあります）。
-`providers[]` は TUI のタブと同じ並び（窓内にデータのあるプロバイダを使用量順）です。プロバイダ別の `modes` / `working_time` / `context` / `limits` / `credits` は窓内に行がなければ `null`、`turn_length` は常に出力し、完了 turn がなければ百分位が `null` になります。
-`cost.estimated_usd` は `unpriced_tokens > 0` のとき `null` です（部分的な見積りを合計として扱わないため）。
-`sessions[]` はセッションの touch（PARALLEL と同じ行）から作ります。`summary.sessions` は usage / tool 行にしか現れない id も数えます。
-Claude の既定のログ保持期間は 30 日のため、`--days > 30` でも削除済みのログは復元できません。実際に読めた量は `scan.files` で確認できます。
 
 ## 注意
 

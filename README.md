@@ -86,21 +86,11 @@ agent-walker sends your logs nowhere. The only network use is fetching the price
 
 ## JSON
 
-`--json` writes one pretty-printed document with summaries and dated events for local analysis. It is experimental: the schema may change between minor releases until it settles. For LLM input:
+`--json` writes the same numbers as the TUI, plus the dated events behind them, as one JSON document. Experimental: the schema may change between minor releases.
 
 ```sh
 agent-walker --json | jq '{schema_version, window, total}'
 ```
-
-`schema_version: 1` identifies the schema; it moves whenever a field is renamed, removed or changes meaning. Additions are non-breaking, so consumers must ignore unknown fields and tolerate unknown values.
-`null` means unavailable, `[]` a collection with no rows (whether the provider lacks that stream or simply had none in the window), and `0` a measured zero; `reported_usd` is `0` when the logs report no charges.
-Token integers above `2^53 - 1` require a lossless JSON parser for exact JavaScript consumption.
-`reasoning_output_tokens` is included in `output_tokens`; cache-write duration fields are included in `cache_creation_input_tokens`. Do not sum every `_tokens` field.
-Dates use the fixed UTC offset in `time_basis`; the window includes both boundary dates. Raw rows omit undated events; summaries keep them, so `turn_length.turns` can exceed `turns[]`.
-Claude's default 30-day transcript retention can limit `--days > 30`: a wider window cannot recover deleted logs; `scan.files` shows how much was actually read.
-`providers[]` lists the same providers as the TUI tabs (those with data in the window, heaviest first). Per-provider `modes`, `working_time`, `context`, `limits` and `credits` are `null` when the window holds no rows for them; `turn_length` is always present and its percentiles are `null` without a completed turn.
-`cost.estimated_usd` is `null` whenever `unpriced_tokens > 0`, so a partial estimate never passes as a total.
-`sessions[]` follows session touches (the same rows as PARALLEL); `summary.sessions` also counts ids seen only on usage or tool rows.
 
 ## Note
 
