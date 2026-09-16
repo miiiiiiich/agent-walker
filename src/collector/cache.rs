@@ -97,26 +97,37 @@ fn cache_file(dir: &Path, cache_name: &str) -> PathBuf {
     dir.join(format!("{cache_name}.bin"))
 }
 
-/// Before 0.17 the version sat in the file name (`claude-v19.bin`) and no
-/// bump ever removed the previous one, so long-lived installs carried one
-/// full cache per bump. Sweep those on startup.
-fn remove_legacy_caches(dir: &Path, cache_name: &str) {
+/// Remove what no run will read again: caches from before 0.17, when the
+/// version sat in the file name (`claude-v19.bin`) and no bump removed the
+/// previous one, and temp files left by a run killed before its rename.
+/// Runs once at startup, independent of which providers have logs today.
+pub fn sweep_cache_dir() {
+    if let Ok(dir) = crate::paths::cache_dir() {
+        sweep(&dir);
+    }
+}
+
+fn sweep(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let prefix = format!("{cache_name}-v");
+    let own_temp = format!(".tmp{}", std::process::id());
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
         let legacy = name
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(".bin"))
-            .is_some_and(|version| {
+            .strip_suffix(".bin")
+            .and_then(|stem| stem.rsplit_once("-v"))
+            .is_some_and(|(_, version)| {
                 !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit())
             });
-        if legacy {
+        let orphan_temp = !name.ends_with(&own_temp)
+            && name
+                .rsplit_once(".tmp")
+                .is_some_and(|(_, pid)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        if legacy || orphan_temp {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -199,11 +210,8 @@ pub fn parse_files_cached(
     local_offset: UtcOffset,
     parse: impl Fn(&Path) -> Option<FileEvents> + Sync,
 ) -> Vec<(PathBuf, Option<FileEvents>)> {
-    let cache_file = cache_name.and_then(|name| {
-        let dir = crate::paths::cache_dir().ok()?;
-        remove_legacy_caches(&dir, name);
-        Some(cache_file(&dir, name))
-    });
+    let cache_file =
+        cache_name.and_then(|name| Some(cache_file(&crate::paths::cache_dir().ok()?, name)));
     parse_files_with_cache(cache_file.as_deref(), files, local_offset, parse)
 }
 
@@ -298,19 +306,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_versioned_caches_are_swept_but_nothing_else() {
+    fn sweep_removes_legacy_versions_and_orphan_temps_only() {
         let dir = tempfile::tempdir().unwrap();
+        let own = format!("claude.tmp{}", std::process::id());
         for name in [
             "claude-v19.bin",
-            "claude-v20.bin",
+            "codex-v20.bin",
+            "claude.tmp99999",
+            own.as_str(),
             "claude.bin",
-            "codex-v19.bin",
             "claude-vx.bin",
-            "claude-v19.tmp",
+            "pricing.json",
         ] {
             fs::write(dir.path().join(name), b"x").unwrap();
         }
-        remove_legacy_caches(dir.path(), "claude");
+        sweep(dir.path());
         let mut left: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -318,12 +328,7 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            [
-                "claude-v19.tmp",
-                "claude-vx.bin",
-                "claude.bin",
-                "codex-v19.bin"
-            ]
+            ["claude-vx.bin", "claude.bin", own.as_str(), "pricing.json"]
         );
     }
 

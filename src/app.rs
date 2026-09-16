@@ -292,6 +292,9 @@ fn load_report_inner(
     let history_days = u64::from(config::ANALYSIS_WINDOW_DAYS) * 2 + 1;
     let mtime_floor = SystemTime::now().checked_sub(StdDuration::from_secs(history_days * 86_400));
 
+    if config.use_cache {
+        crate::collector::sweep_cache_dir();
+    }
     let collections = collect_all(config, mtime_floor)?;
     // Collection is the slow half; by now the pricing fetch has usually
     // landed. Join regardless so every summary below prices the same way.

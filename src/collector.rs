@@ -19,7 +19,7 @@ mod merge;
 mod project;
 mod walk;
 
-pub use cache::parse_files_cached;
+pub use cache::{parse_files_cached, sweep_cache_dir};
 pub use events::{
     FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent,
     KeyedModeEvent, KeyedPaceEvent, KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent,
