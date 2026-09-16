@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::io;
-use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
@@ -133,18 +132,19 @@ fn run_loop(
         terminal
             .draw(|frame| draw(frame, state))
             .context("draw Agent Walker UI")?;
-        if !event::poll(StdDuration::from_millis(250)).context("poll terminal events")? {
-            continue;
-        }
-
-        let Event::Key(key) = event::read().context("read terminal event")? else {
-            continue;
-        };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        if handle_key(state, key.code, key.modifiers) {
-            return Ok(());
+        // Nothing on screen changes by itself, so block until the terminal
+        // delivers a key or a resize, then draw once.
+        loop {
+            match event::read().context("read terminal event")? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if handle_key(state, key.code, key.modifiers) {
+                        return Ok(());
+                    }
+                    break;
+                }
+                Event::Resize(_, _) => break,
+                _ => {}
+            }
         }
     }
 }
