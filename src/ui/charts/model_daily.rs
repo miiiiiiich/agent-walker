@@ -10,9 +10,7 @@ use crate::ui::{theme, utils};
 
 /// Daily volume as stacked per-model bars, rendered by hand: one column per
 /// day (or per day-bucket on narrow terminals), each half-cell colored by
-/// the segment that owns it. The Chart widget painter-stacking left rounding
-/// artifacts (floating caps, bleeding columns); exact half-cell assignment
-/// cannot.
+/// the segment that owns it, preventing overlapping stacked-bar painting.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -47,7 +45,6 @@ pub(in crate::ui) fn model_chart_lines(
         },
     )];
 
-    // Per-segment per-column mean volume: top models, then the remainder.
     let top_models: Vec<_> = summary
         .models
         .iter()
@@ -111,7 +108,6 @@ pub(in crate::ui) fn model_chart_lines(
         }
     };
 
-    // Cumulative segment boundaries per column, in half-cell units.
     let boundaries: Vec<Vec<usize>> = (0..columns)
         .map(|column| {
             let mut running = 0.0;
@@ -175,7 +171,6 @@ pub(in crate::ui) fn model_chart_lines(
         .filter_map(|fraction| {
             let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
             let day = summary.daily.get(index)?;
-            // Center the label on the exact column that draws this day.
             Some((
                 Y_WIDTH + index / chunk,
                 format!(

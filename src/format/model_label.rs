@@ -1,7 +1,3 @@
-//! Model-label display names and the sanitize boundary: labels can carry
-//! personal-environment strings, and the collapse rules here are what keep
-//! them off the share card. This is a SAFETY surface — a diff touching this
-//! file changes what can leak into shared output (see SECURITY.md).
 pub fn short_model_name(name: &str) -> String {
     sanitize_label(&short_model_name_raw(name))
 }
@@ -14,9 +10,7 @@ pub fn short_model_name(name: &str) -> String {
 /// readable fragments of a smuggled path (`gemini/Users/alice/secret` →
 /// `geminiUsersalicesecret`). So a label containing anything outside the
 /// model-name character set is treated as suspicious and collapsed to a generic
-/// value. Legitimate names (which only use that set) pass through unchanged,
-/// capped for layout; well-known families have already collapsed to a constant
-/// upstream, so this only ever judges an unrecognized passthrough name.
+/// value.
 fn sanitize_label(label: &str) -> String {
     const MAX: usize = 24;
     // Bound the scan: an untrusted name could be megabytes long, and there's no
@@ -29,8 +23,6 @@ fn sanitize_label(label: &str) -> String {
     let allowed = |ch: char| {
         ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | '_' | '(' | ')' | '+' | ':')
     };
-    // Validate on the iterator (no temp allocation): a label is suspicious if
-    // it's empty or any of its first SCAN characters falls outside the set.
     if label.is_empty() || label.chars().take(SCAN).any(|ch| !allowed(ch)) {
         return "Other".to_owned();
     }
@@ -118,9 +110,6 @@ fn short_model_name_raw(name: &str) -> String {
     }
 }
 
-/// `claude-fable-5-1` → `5.1`, `claude-opus-5` → `5`, `claude-sonnet-4-5-20250929` → `4.5`.
-/// The version is the run of short numeric segments right after the family
-/// word; a long trailing segment (a date stamp) is not part of it.
 fn claude_version(lower: &str, family: &str) -> Option<String> {
     let is_ver = |seg: &&str| seg.len() <= 2 && seg.chars().all(|c| c.is_ascii_digit());
     let at = lower.find(&family.to_ascii_lowercase())?;
@@ -133,7 +122,6 @@ fn claude_version(lower: &str, family: &str) -> Option<String> {
     if !after.is_empty() {
         return Some(after.join("."));
     }
-    // Older ids put the version before the family word: `claude-3-5-sonnet-20241022`.
     let mut before: Vec<&str> = lower[..at]
         .rsplit('-')
         .filter(|seg| !seg.is_empty())
@@ -147,7 +135,6 @@ fn claude_version(lower: &str, family: &str) -> Option<String> {
     Some(before.join("."))
 }
 
-/// `gpt-5.5` → `GPT 5.5`, `gpt-5.6-sol` → `GPT 5.6 Sol`, `gpt-6-astra` → `GPT 6 Astra`.
 fn gpt_label(name: &str) -> String {
     let Some(rest) = name.strip_prefix("gpt-") else {
         return name.to_owned();

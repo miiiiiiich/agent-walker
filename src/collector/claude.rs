@@ -66,16 +66,7 @@ fn project_label(path: &Path, root: &Path) -> Option<String> {
 }
 
 fn normalize_project_name(directory: &str) -> String {
-    // Claude Code names its project directories by flattening the cwd with
-    // every path separator replaced by `-`. Strip the home prefix so the label
-    // is a relative project path. Exact on macOS / Linux. Windows-native
-    // Claude Code's flattening rule isn't confirmed (especially whether the
-    // drive-letter `:` is dropped or rewritten), so we sanitize the home like
-    // the directory name itself — replacing `:` as well as the separators —
-    // and trim any trailing separator first so a home such as `/home/me/` or
-    // `D:\` doesn't yield a double-hyphen prefix. When the flattened prefix
-    // still doesn't match we fall back to the leading-`-` trim; the cwd field
-    // in the session is preferred as the project label whenever present.
+    // Trim and normalize the home prefix so a trailing separator cannot produce a double hyphen.
     let home_prefix = crate::paths::home_dir()
         .ok()
         .and_then(|home| home.to_str().map(ToOwned::to_owned))
@@ -100,8 +91,6 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     // directory name is a lossy fallback.
     let mut project = None;
     let fallback_project = project_label(path, root);
-    // Claude logs carry no explicit completion event; derive turn durations
-    // as "human prompt -> last activity before the next human prompt".
     let mut turn = TurnState::default();
     // Resumes and fork prefixes replay earlier rows verbatim, sometimes
     // in the middle of a later turn. A prompt uuid seen before must not
@@ -131,13 +120,8 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         }
         if source_kind == SourceKind::Main {
             if is_interrupt_marker(&value) {
-                // The active turn was aborted: discard it (completion stats
-                // count completed turns only, matching Codex where
-                // `turn_aborted` never reaches the durations) and don't
-                // start a bogus turn from the marker row itself. Recognized
-                // before requiring a timestamp — an undated marker must
-                // still clear the turn, or the abort would flush as a
-                // completed duration at the next prompt or EOF.
+                // Clear an interrupted turn before timestamp validation; an undated
+                // marker must also prevent a completed-duration event.
                 turn = TurnState::default();
             } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
                 if is_human_turn(&value) {
@@ -202,8 +186,6 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                         turn.last_activity = Some(previous.max(timestamp));
                     }
                 } else {
-                    // Between turns after a cutoff: the only row that
-                    // matters is a late answer to a question still open.
                     turn.restart_if_answer(&value, timestamp);
                 }
             }
@@ -224,8 +206,6 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     Some(events)
 }
 
-/// A line that starts a human turn: a user message that is an actual prompt,
-/// not a `tool_result` carrier or meta record.
 fn is_human_turn(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("user") {
         return false;
@@ -259,23 +239,16 @@ fn is_human_turn(value: &Value) -> bool {
     }
 }
 
-/// The turn being assembled: its prompt, the last activity seen, and the
-/// `AskUserQuestion` bookkeeping that separates the human's answer time
-/// from the agent's working time.
 #[derive(Default)]
 struct TurnState {
     start: Option<OffsetDateTime>,
-    /// The prompt row's session, so JSON consumers can join turns to sessions.
     session_id: Option<String>,
     /// The prompt row's uuid — fork children replay the parent's history,
     /// so a turn copied into a child file must dedupe against the original.
     key: Option<String>,
     last_activity: Option<OffsetDateTime>,
     human_wait_ms: u64,
-    /// Time the model was thinking / writing: the gaps that end in an
-    /// assistant row (the rest of a turn is tools running).
     model_ms: u64,
-    /// Pending question tool-call ids and when they were asked.
     pending_questions: HashMap<String, OffsetDateTime>,
     /// End of the last charged wait, so overlapping questions answered in
     /// sequence charge their shared interval once.
@@ -283,7 +256,6 @@ struct TurnState {
 }
 
 impl TurnState {
-    /// Tool-result ids on a user row that answer a pending question.
     fn answered_ids(&self, value: &Value) -> Vec<String> {
         if self.pending_questions.is_empty()
             || value.get("type").and_then(Value::as_str) != Some("user")
@@ -320,9 +292,6 @@ impl TurnState {
         }
     }
 
-    /// The state between turns once the cutoff closed this one: no turn in
-    /// progress, but questions left open carry over so a late answer can
-    /// be recognized and start the next turn.
     fn after_cutoff(self) -> Self {
         Self {
             session_id: self.session_id,
@@ -373,10 +342,8 @@ impl TurnState {
         self.human_wait_ms.saturating_add(wait)
     }
 
-    /// If the row answers pending questions, charge the wait up to it (see
-    /// `waited_until`), retire the answered ids, and report `true`. Rows
-    /// landing between the question and the answer (reminders, hook
-    /// attachments) never shorten the wait: it is measured from the ask.
+    /// Reminders and hook attachments between a question and its answer must not
+    /// shorten the wait, which is measured from the ask.
     fn charge_answer(&mut self, value: &Value, now: OffsetDateTime) -> bool {
         let answered = self.answered_ids(value);
         if answered.is_empty() {
@@ -390,10 +357,7 @@ impl TurnState {
         true
     }
 
-    /// Emit the completed turn (if any): stamped at its END like every other
-    /// provider's turn, keyed by the prompt uuid for cross-file dedup, with
-    /// the human's answer time clamped to the turn length. A question still
-    /// open at the end charges its tail as waiting — the agent stopped
+    /// A question still open at the end charges its tail as waiting — the agent stopped
     /// working when it asked.
     fn flush(&self, events: &mut FileEvents) {
         let (Some(start), Some(end)) = (self.start, self.last_activity) else {
@@ -417,8 +381,6 @@ impl TurnState {
     }
 }
 
-/// Ids of `AskUserQuestion` tool calls on an assistant row — the questions
-/// whose answers will land as tool results later in the same turn.
 fn question_tool_use_ids(value: &Value) -> Vec<String> {
     if value.get("type").and_then(Value::as_str) != Some("assistant") {
         return Vec::new();
@@ -518,16 +480,8 @@ fn parse_line(
         });
     }
 
-    // `usage.iterations` (log-schema addition, 2026-04) breaks one turn into
-    // its underlying API calls. The top level is the turn's BILLED usage for
-    // the serving model: a failed fallback attempt is not billed (fallback
-    // credit refunds the switch) and the turn is billed as the serving model
-    // alone, and on advisor turns the top level already sums the main-model
-    // iterations. So main-model `message` and `fallback_message` entries must
-    // never be re-emitted — only `advisor_message` entries are additional
-    // billed calls, made under their own model and absent from the top-level
-    // counters (ccusage#1115 lost them entirely). Keyed per iteration index
-    // so streamed duplicates of the message still dedupe.
+    // Top-level usage includes main-model iterations; emit only separately billed
+    // advisor iterations, keyed by message and iteration index (ccusage#1115).
     if let Some(iterations) = usage_value
         .and_then(|usage| usage.get("iterations"))
         .and_then(Value::as_array)
@@ -569,10 +523,6 @@ fn parse_line(
     );
 }
 
-/// One mode event per assistant message (keyed by message id): did extended
-/// thinking fire (a `thinking` content block exists — presence only, the text
-/// is never read), and did fast mode serve it (`usage.speed == "fast"`).
-/// Streaming duplicates of the same message merge with OR in `merge_into`.
 fn collect_mode_event(
     value: &Value,
     message: &Value,
@@ -634,18 +584,9 @@ fn collect_permission_event(
     });
 }
 
-/// A main-thread row the harness writes when the user hits esc: a user row
-/// whose content IS one of the two complete marker forms the harness
-/// emits (the only variants across real logs) — a prompt that merely
-/// quotes or starts with the marker text must not count or clear a turn.
-/// `isMeta` rows are excluded because agent messages QUOTING the marker
-/// would otherwise count. `isSidechain` rows are excluded because one esc
-/// against a parallel team fans out as marker echoes into every subagent
-/// transcript (bursts of 10-16 observed — counting them would overstate
-/// interruptions ~1.8x, load-dependently). The trade-off: an esc recorded
-/// only in sidechain files (~14% of esc moments) is deliberately not
-/// counted — the same turn-level ruling as Codex, where `turn_aborted`
-/// is used and `sub_agent_activity: interrupted` is discarded.
+/// Count only exact main-thread interruption markers; exclude `isMeta` rows
+/// (they can quote the marker) and sidechain echoes, accepting that
+/// sidechain-only interruptions are omitted.
 fn is_interrupt_marker(value: &Value) -> bool {
     if value.get("type").and_then(Value::as_str) != Some("user") {
         return false;
@@ -679,11 +620,7 @@ fn is_interrupt_marker(value: &Value) -> bool {
     }
 }
 
-/// One interrupt event per main-thread esc (`interruptedMessageId` rows are
-/// a strict subset of marker rows, so the marker alone carries the count).
-/// Subagent-file rows are excluded by file provenance too, not only by the
-/// row's `isSidechain` flag. Keyed by the row uuid, which resume/fork
-/// copies share.
+/// Count marker rows alone because `interruptedMessageId` rows are a strict subset.
 fn collect_interrupt_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -705,10 +642,6 @@ fn collect_interrupt_event(
     });
 }
 
-/// One effort event per assistant message (keyed by message id), from the
-/// top-level `effort` field Claude Code writes since v2.1.212 (2026-07-17).
-/// Older lines lack the field and contribute nothing; subagent (sidechain)
-/// messages carry it too, so the mix covers delegated turns.
 fn collect_effort_event(
     value: &Value,
     message: &Value,
@@ -949,8 +882,6 @@ mod tests {
         assert_eq!(main.usage.token_volume(), 22 + 12 + 220);
     }
 
-    /// The ordinary shape — one main-model `message` iteration mirroring the
-    /// top-level numbers — must not create a second event.
     #[test]
     fn single_mirror_iteration_adds_nothing() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -987,7 +918,6 @@ mod tests {
             Some("sk:review")
         );
         assert_eq!(collection.usage_events[1].attribution_skill, None);
-        // One mode event per assistant message: thinking+fast, then neither.
         assert_eq!(collection.mode_events.len(), 2);
         assert!(collection.mode_events[0].has_thinking);
         assert!(collection.mode_events[0].fast);
@@ -995,10 +925,6 @@ mod tests {
         assert!(!collection.mode_events[1].fast);
     }
 
-    /// Interrupt markers count once per esc: duplicate uuids (resume/fork
-    /// copies) dedupe, block-content markers count, and a row carrying only
-    /// `interruptedMessageId` without the marker does not count (real logs
-    /// show such rows always carry the marker too).
     #[test]
     fn collects_interrupt_events_from_marker_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1028,8 +954,6 @@ mod tests {
         .expect("fixture should be written");
         let subagent_dir = temp.path().join("project").join("subagents");
         fs::create_dir_all(&subagent_dir).expect("test dirs should be created");
-        // A subagent-file echo that omits the redundant `isSidechain` flag:
-        // file provenance alone must exclude it.
         fs::write(
             subagent_dir.join("agent-abc.jsonl"),
             concat!(
@@ -1072,16 +996,10 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.interrupt_events.len(), 1);
-        // Only the completed turn survives ("try again" 00:05 -> last
-        // activity "done" 00:06 = 60s); the aborted first turn and the
-        // marker row contribute no durations.
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 60_000);
     }
 
-    /// The time between an `AskUserQuestion` call and its answer is the
-    /// human's, not the agent's: it stays inside the turn length but is
-    /// charged to `human_wait_ms`, so `active_ms` excludes it.
     #[test]
     fn ask_user_question_answer_time_is_charged_to_human_wait() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1109,9 +1027,6 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // One completed turn: 00:00 -> last activity 00:12 = 12 min, of
-        // which the 10 min between the question and the answer is the
-        // human's. The turn is stamped at its end, like Codex / Copilot.
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(
             collection.duration_events[0].session_id.as_deref(),
@@ -1163,8 +1078,6 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // 00:00 -> 00:46 = 46 min. Waits: q1 00:01 -> 00:41 (40 min), then
-        // q2 from the cursor 00:41 -> 00:43 (2 min), not 00:01 -> 00:43.
         assert_eq!(collection.duration_events.len(), 1);
         let turn = &collection.duration_events[0];
         assert_eq!(turn.duration_ms, 46 * 60_000);
@@ -1204,10 +1117,7 @@ mod tests {
             .map(|turn| (turn.duration_ms, turn.human_wait_ms))
             .collect();
         turns.sort_unstable();
-        // 00:00 -> 00:01 (the ask ends it, nothing to wait for yet) and
-        // 00:41 -> 00:46 (the answer starts it, all work).
         assert_eq!(turns, vec![(60_000, 0), (300_000, 0)]);
-        // The restarted turn belongs to the session of the row that started it.
         let sessions: Vec<_> = collection
             .duration_events
             .iter()
@@ -1252,8 +1162,6 @@ mod tests {
             .map(|turn| (turn.duration_ms, turn.human_wait_ms))
             .collect();
         turns.sort_unstable();
-        // 00:00 -> 00:01, then 00:41 -> 00:46 of which 00:41 -> 00:43 was
-        // spent answering q2.
         assert_eq!(turns, vec![(60_000, 0), (300_000, 120_000)]);
     }
 
@@ -1287,8 +1195,6 @@ mod tests {
         assert_eq!(turn.human_wait_ms, 10 * 60_000);
     }
 
-    /// The gaps that end in an assistant row are the model working; the
-    /// gap from a tool call to its result is the tool running.
     #[test]
     fn model_time_is_the_gaps_ending_in_assistant_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1313,7 +1219,6 @@ mod tests {
 
         assert_eq!(collection.duration_events.len(), 1);
         let turn = &collection.duration_events[0];
-        // 5 min turn: 1 + 1 min model, 3 min Bash.
         assert_eq!(turn.duration_ms, 5 * 60_000);
         assert_eq!(turn.model_ms, Some(2 * 60_000));
     }
@@ -1351,17 +1256,11 @@ mod tests {
 
         assert_eq!(collection.duration_events.len(), 1);
         let turn = &collection.duration_events[0];
-        // 8 min turn: waiting 00:01→00:03 + 00:03→00:06 = 5, model 00:00→00:01
-        // + 00:07→00:08 = 2 (the 00:03→00:04 assistant row sits inside the
-        // q2 wait), tools = the remaining 1.
         assert_eq!(turn.duration_ms, 8 * 60_000);
         assert_eq!(turn.human_wait_ms, 5 * 60_000);
         assert_eq!(turn.model_ms, Some(2 * 60_000));
     }
 
-    /// The gap from a turn's last activity to the next prompt is the
-    /// human's pace, keyed by the prompt uuid; a prompt after the 30-minute
-    /// cutoff is the human coming back, not their pace.
     #[test]
     fn pace_is_the_gap_before_a_prompt_under_the_cutoff() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1384,7 +1283,6 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // h2 came 2 min after a1; h3 came 46 min after a2 (cutoff, not pace).
         let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
         assert_eq!(gaps, vec![120_000]);
     }
@@ -1425,8 +1323,6 @@ mod tests {
             .map(|turn| (turn.duration_ms, turn.human_wait_ms))
             .collect();
         turns.sort_unstable();
-        // h2 (00:15 -> 00:20) is five working minutes; h1's replayed
-        // question and answer charge nothing to it.
         assert_eq!(turns, vec![(300_000, 0), (720_000, 600_000)]);
     }
 
@@ -1459,8 +1355,6 @@ mod tests {
         assert_eq!(turn.human_wait_ms, 10 * 60_000);
     }
 
-    /// Staggered questions answered out of order charge the union of their
-    /// intervals: the human was busy from the first ask to the last answer.
     #[test]
     fn staggered_questions_charge_the_interval_union() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1490,12 +1384,9 @@ mod tests {
         assert_eq!(collection.duration_events.len(), 1);
         let turn = &collection.duration_events[0];
         assert_eq!(turn.duration_ms, 16 * 60_000);
-        // [00:01, 00:15] = 14 min, not 5 + 5.
         assert_eq!(turn.human_wait_ms, 14 * 60_000);
     }
 
-    /// A question still open when the turn is replaced (or the file ends)
-    /// charges its tail as waiting: the agent stopped working when it asked.
     #[test]
     fn unanswered_question_charges_its_tail_as_wait() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1588,16 +1479,11 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // The undated marker yields an event the analyzer will exclude by
-        // date, and no duration: EOF must not flush the aborted turn.
         assert_eq!(collection.interrupt_events.len(), 1);
         assert!(collection.interrupt_events[0].timestamp.is_none());
         assert_eq!(collection.duration_events.len(), 0);
     }
 
-    /// The top-level `permissionMode` field on user rows becomes one
-    /// permission event per turn; resume/fork copies share the row uuid and
-    /// dedupe, and rows without the field contribute nothing.
     #[test]
     fn collects_permission_events_deduped_by_uuid() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1629,9 +1515,6 @@ mod tests {
         assert_eq!(modes, ["auto", "dontAsk"]);
     }
 
-    /// The top-level `effort` field (present since CLI v2.1.212) becomes one
-    /// effort event per assistant message; duplicate lines for the same
-    /// message dedupe by id, and lines without the field contribute nothing.
     #[test]
     fn collects_effort_events_deduped_by_message_id() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1681,14 +1564,12 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // One deduped usage event: the big line's tokens, the small line's skill.
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.input_tokens, 100);
         assert_eq!(
             collection.usage_events[0].attribution_skill.as_deref(),
             Some("sk:review")
         );
-        // One deduped mode event with OR-merged thinking.
         assert_eq!(collection.mode_events.len(), 1);
         assert!(collection.mode_events[0].has_thinking);
     }

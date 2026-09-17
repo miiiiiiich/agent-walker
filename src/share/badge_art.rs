@@ -1,13 +1,6 @@
-//! Bundled codename silhouettes — the 24 rank badges as inline `<g>` path
-//! groups (`fill="currentColor"`), original art generated for this project and
-//! embedded so the share card can paint the earned animal as a tinted
-//! background watermark with no network or filesystem access. The `currentColor`
-//! fill resolves to whatever `color` the wrapping element sets, so one asset
-//! serves every OPS tint.
+//! Original art generated for this project, embedded to avoid network or filesystem access.
+//! `currentColor` lets one asset serve every OPS tint.
 
-/// Inner SVG `<g>` for the codename `animal`, sized in a `0 0 1024 1024` user
-/// space, or `None` for an unknown animal. Every real rank — down to the "Ant"
-/// floor — has a badge.
 pub(crate) fn badge_inner(animal: &str) -> Option<&'static str> {
     let svg = match animal {
         "Hound" => include_str!("../../assets/badges/hound.svg"),

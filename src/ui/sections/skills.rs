@@ -3,12 +3,6 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// SKILLS: token volume by Claude `attributionSkill` over the analysis
-/// window (attribution fields exist
-/// only in recent logs). Claude-tab only, TUI-only: skill names are
-/// personal-environment labels that must never reach the share card, so this
-/// section reads `summary.skills`, never the `models` path the card renders.
-/// Share is of ATTRIBUTED volume; the subtitle carries the honest denominator.
 pub(in crate::ui) fn skill_lines(
     summary: &Summary,
     width: u16,

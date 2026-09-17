@@ -30,8 +30,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &UiState) {
     ])
     .split(padded);
 
-    // Only the tab bar and footer stay fixed; everything from the hero line
-    // down lives in one scrollable page.
     frame.render_widget(Paragraph::new(hero::header_line(state, width)), rows[0]);
     let lines = page::page_lines(summary, width);
     let scroll = clamp_scroll(state, lines.len(), rows[1].height);
@@ -43,7 +41,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, state: &UiState) {
     }
 }
 
-/// Record how far the sections can scroll and clamp the current offset.
 fn clamp_scroll(state: &UiState, content_lines: usize, viewport_height: u16) -> u16 {
     let max_scroll = u16::try_from(content_lines)
         .unwrap_or(u16::MAX)
@@ -86,7 +83,6 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState, summary: &Sum
     };
 
     frame.render_widget(Paragraph::new(keys.clone()), area);
-    // Right-side stats only when they fit beside the key hints.
     if keys.width() + scan.width() + 3 <= usize::from(area.width) {
         frame.render_widget(Paragraph::new(scan).alignment(Alignment::Right), area);
     }

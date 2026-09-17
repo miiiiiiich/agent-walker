@@ -1,6 +1,3 @@
-//! What the analyzer produces and the UI consumes: per-day stats, panel
-//! histories, and the Summary/AppSummary the dashboard renders. Not part of
-//! the parse cache — changes here affect display, not stored data.
 use std::path::PathBuf;
 
 use time::{Date, OffsetDateTime};
@@ -24,14 +21,9 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
-    /// The subset of `usage` from events that carried NO provider-reported cost,
-    /// i.e. the tokens that must be priced from `LiteLLM`. When a model name is
-    /// shared on the same day by a reporting provider (Cursor) and a
-    /// non-reporting one (Claude Code), this keeps the two cost paths additive.
+    /// Keep unreported usage separate so a model-day shared by reporting and
+    /// non-reporting providers can add both cost paths without double pricing.
     pub unreported_usage: TokenUsage,
-    /// Summed provider-reported cost for this model-day, if any event carried
-    /// one (see `UsageEvent::reported_cost_usd`). Added to the `LiteLLM` price of
-    /// `unreported_usage`.
     pub reported_cost_usd: Option<f64>,
 }
 
@@ -39,12 +31,8 @@ pub struct ModelDailyStat {
 pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
-    /// Subset of `usage` priced from `LiteLLM` (events with no reported cost) —
-    /// see `ModelDailyStat::unreported_usage`.
     pub unreported_usage: TokenUsage,
     pub events: usize,
-    /// Summed provider-reported cost for this model over the period, if any
-    /// event carried one. Added to the `LiteLLM` price of `unreported_usage`.
     pub reported_cost_usd: Option<f64>,
 }
 
@@ -55,17 +43,12 @@ pub struct AgentStat {
     pub calls: usize,
 }
 
-/// Per-skill token volume over the analysis window (Claude
-/// `attributionSkill`). TUI-only — must never reach the share card.
 #[derive(Debug, Clone)]
 pub struct SkillStat {
     pub name: String,
     pub usage: TokenUsage,
 }
 
-/// One day of the LIMITS history. `NoUse` = no provider activity that day;
-/// `NoSample` = activity but the CLI recorded no rate-limit snapshot (older
-/// versions); `Measured` = the day's peak `used_percent`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LimitDay {
     NoUse,
@@ -73,37 +56,25 @@ pub enum LimitDay {
     Measured(f64),
 }
 
-/// Daily-peak history of the plan's 5h window over the analysis window,
-/// oldest day first.
 #[derive(Debug, Clone)]
 pub struct LimitsHistory {
     pub days: Vec<(Date, LimitDay)>,
     pub peak: Option<(Date, f64)>,
 }
 
-/// Daily AI-credit spend over the analysis window (Copilot). Historical
-/// by design — spend that already happened, not a remaining-quota meter.
 #[derive(Debug, Clone)]
 pub struct CreditsHistory {
-    /// One entry per window day; 0.0 = no recorded spend.
     pub days: Vec<(Date, f64)>,
     pub total: f64,
     pub peak: Option<(Date, f64)>,
 }
 
-/// Mode usage over the analysis window: how the user lets the model
-/// think. Claude: thinking-block fire rate (+ fast mode when used) and the
-/// reasoning-effort distribution (top-level `effort`, CLI v2.1.212+);
-/// Codex: reasoning-effort distribution.
 #[derive(Debug, Clone, Default)]
 pub struct ModesSummary {
     pub assistant_turns: usize,
     pub thinking_turns: usize,
     pub fast_turns: usize,
-    /// (effort label, turns), sorted by turns descending.
     pub efforts: Vec<(String, usize)>,
-    /// (permission-mode label, turns), sorted by turns descending — Claude's
-    /// `permissionMode`, Codex's `approval_policy`.
     pub permissions: Vec<(String, usize)>,
 }
 
@@ -121,7 +92,6 @@ pub struct ToolStat {
 
 #[derive(Debug, Clone)]
 pub struct ProjectStat {
-    /// Original project identifier, before display-prefix stripping.
     pub path: String,
     pub name: String,
     pub usage: TokenUsage,
@@ -139,9 +109,6 @@ impl SessionSpan {
     }
 }
 
-/// Completed-turn duration statistics. `Some` on a `Summary` guarantees at
-/// least one completed turn — interruptions live on `Summary::interrupted`,
-/// not here.
 #[derive(Debug, Clone)]
 pub struct DurationSummary {
     pub count: usize,
@@ -158,33 +125,16 @@ pub struct DurationBucket {
     pub count: usize,
 }
 
-/// TIME panel data over the analysis window: how long the agent was
-/// working (turn lengths with the human's answer time removed) and how much
-/// context it read per minute of that. `Some` whenever a turn completed in
-/// the window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActiveTimeSummary {
-    /// Completed turns in the window.
     pub turns: usize,
-    /// Turn lengths minus `human_wait_ms`, summed.
     pub active_ms: u64,
-    /// Time inside those turns spent waiting on the human (`AskUserQuestion`).
     pub human_wait_ms: u64,
-    /// Input-side tokens (uncached input + cache writes + cache reads) over
-    /// the same window — what every call re-reads, so the per-minute rate
-    /// tracks how long a context the agent was dragging.
     pub context_tokens: u64,
-    /// Window length in days, for the per-day average.
     pub window_days: u16,
-    /// Gaps before each human prompt (previous turn's last activity → the
-    /// prompt), sorted ascending, under the 30-minute cutoff. Kept raw so
-    /// the Total tab can take percentiles across providers.
+    /// Keep prompt gaps raw so the Total tab can take percentiles across providers.
     pub pace_gaps_ms: Vec<u64>,
-    /// Working time per local day (turn end date), ascending by date, only
-    /// days with any. Feeds the peak-day row and, later, a daily chart.
     pub daily_active_ms: Vec<(Date, u64)>,
-    /// Of the turns that can tell model time from tool time: the model's
-    /// share, and the working time those turns cover (the denominator).
     pub model_ms: u64,
     pub measured_ms: u64,
 }
@@ -194,16 +144,12 @@ impl ActiveTimeSummary {
         self.active_ms / u64::from(self.window_days.max(1))
     }
 
-    /// What the working time is made of: the model's share (thinking and
-    /// writing) of the turns that can tell; the rest was tools running.
-    /// `None` when no turn could tell.
     #[allow(clippy::cast_precision_loss, reason = "Display-only share.")]
     pub fn model_share(&self) -> Option<f64> {
         (self.measured_ms > 0)
             .then(|| self.model_ms.min(self.measured_ms) as f64 / self.measured_ms as f64)
     }
 
-    /// The day the agent worked longest.
     pub fn peak_day(&self) -> Option<(Date, u64)> {
         self.daily_active_ms
             .iter()
@@ -211,7 +157,6 @@ impl ActiveTimeSummary {
             .max_by_key(|(_, active_ms)| *active_ms)
     }
 
-    /// Your pace, on average — the mean gap before a prompt.
     pub fn pace_mean_ms(&self) -> Option<u64> {
         if self.pace_gaps_ms.is_empty() {
             return None;
@@ -220,8 +165,6 @@ impl ActiveTimeSummary {
         Some(u64::try_from(total / self.pace_gaps_ms.len() as u128).unwrap_or(u64::MAX))
     }
 
-    /// Your pace: the median and p90 gap before a prompt; `None` without
-    /// any recorded gap.
     pub fn pace_percentiles(&self) -> Option<(u64, u64)> {
         if self.pace_gaps_ms.is_empty() {
             return None;
@@ -238,7 +181,6 @@ impl ActiveTimeSummary {
         Some((at(50), at(90)))
     }
 
-    /// Context tokens per active minute; `None` under a minute of activity.
     /// Divides in milliseconds — a 90-second window is 1.5 minutes, not 1.
     pub fn context_per_minute(&self) -> Option<u64> {
         if self.active_ms < 60_000 {
@@ -285,8 +227,6 @@ impl ActiveTimeSummary {
 mod active_time_tests {
     use super::ActiveTimeSummary;
 
-    /// 90K tokens over 90 seconds is 60K/min, not 90K/min; under a minute
-    /// there is no rate; a saturated numerator still divides safely.
     #[test]
     fn context_per_minute_divides_in_milliseconds() {
         let rate = |context_tokens, active_ms| {
@@ -304,7 +244,6 @@ mod active_time_tests {
         assert_eq!(rate(u64::MAX, 60_000), Some(u64::MAX));
     }
 
-    /// Merging skips token-only providers so they can't inflate the rate.
     #[test]
     fn merged_skips_providers_without_turns() {
         let measured = ActiveTimeSummary {
@@ -327,7 +266,6 @@ mod active_time_tests {
         assert_eq!(merged, measured);
         assert!(ActiveTimeSummary::merged([&token_only]).is_none());
 
-        // Two providers on the same day add up; the peak is the summed day.
         let other = ActiveTimeSummary {
             turns: 1,
             active_ms: 60_000,
@@ -352,7 +290,6 @@ mod active_time_tests {
         );
     }
 
-    /// p50 / p90 use the same rank rule as the completion percentiles.
     #[test]
     fn pace_percentiles_follow_the_rank_rule() {
         let summary = ActiveTimeSummary {
@@ -377,49 +314,22 @@ mod active_time_tests {
 
 #[derive(Debug, Clone, Default)]
 pub struct Orchestration {
-    /// Time-weighted mean of simultaneous sessions over active wall-time. Shown
-    /// in the PARALLEL AGENTS panel (display-only — the codename ranks on token
-    /// throughput alone).
     pub avg_concurrency: f64,
-    /// Maximum number of sessions observed running simultaneously.
     pub peak_concurrency: usize,
-    /// Active seconds spent at concurrency level 1, 2, 3, 4–6, 7–9, 10+
-    /// (6 buckets). Drives the PARALLEL AGENTS distribution bar.
     pub time_by_level: [u64; 6],
 }
 
-/// CONTEXT panel data over the analysis window. The token totals (and so
-/// the cached share) cover every dated usage event; the call-level rows —
-/// bands, cold starts, expiries, ordinary uncached input — cover main-chain
-/// calls of providers whose events are calls, and everything else lands in
-/// `unclassified_effective`. `Some` whenever any event carried context;
-/// `calls` may be 0 for aggregate-only providers. The share card quotes the
-/// cached share only on a 30-day report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSummary {
     pub calls: usize,
-    /// Σ (input + cache writes + cache reads) over the window.
     pub context_tokens: u64,
-    /// Σ cache reads.
     pub cached_tokens: u64,
-    /// Σ input-equivalent tokens: input × 1, cache writes × their price
-    /// multiplier, cache reads × theirs — the "what it actually cost" volume.
     pub effective_tokens: u64,
-    /// Fixed context-size bands; a band with zero calls is not rendered.
     pub bands: Vec<ContextBand>,
-    /// Low-reuse calls that resumed a session after the cache retention
-    /// window. `None` when the provider has no session notion.
     pub expired: Option<ContextReason>,
-    /// The first call of each session — the price of starting fresh.
     pub cold_start: Option<ContextReason>,
-    /// Every other uncached input: the suffix a running session appends
-    /// each call, plus calls with no chain to classify. Completes the
-    /// partition so the rows account for the whole effective volume.
     pub uncached: ContextReason,
-    /// Input-equivalent volume from events that are not calls (sidechain
-    /// rows, Copilot / Grok aggregates): counted in the totals and the cached
-    /// share, shown as its own row with no per-call figure, never mixed
-    /// into a row that has a call denominator.
+    /// Non-call volume must not be mixed into rows with a call denominator.
     pub unclassified_effective: u64,
 }
 
@@ -427,15 +337,12 @@ pub struct ContextSummary {
 pub struct ContextBand {
     pub label: String,
     pub calls: usize,
-    /// Input-equivalent tokens spent on cache reads by calls in this band.
     pub cached_effective: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextReason {
     pub calls: usize,
-    /// Input-equivalent tokens of the uncached part of these calls — the
-    /// same scale as the band rows, so per-call figures compare directly.
     pub effective: u64,
 }
 
@@ -444,8 +351,7 @@ impl ContextSummary {
     /// is derived from the rows, so shares add up by construction. If that
     /// sum overflows (a poisoned counter saturated a component) the rows
     /// cannot add up — the whole breakdown is dropped (no bands, no reason
-    /// rows) and only the headline survives. Runs after provider analysis
-    /// and again after `merged()`, which can overflow on its own.
+    /// rows) and only the headline survives.
     pub fn finalize(&mut self) {
         let total = self
             .bands
@@ -531,9 +437,6 @@ impl ContextSummary {
                 }
             }
         }
-        // A part with totals but no calls (Copilot) still counts toward the
-        // Total share; only an all-empty merge is None. The sum can overflow
-        // where no part did, so the partition is re-validated.
         out.filter(|summary| summary.calls > 0 || summary.context_tokens > 0)
             .map(|mut summary| {
                 summary.finalize();
@@ -551,22 +454,13 @@ pub struct Summary {
     pub root: PathBuf,
     pub scan_stats: ScanStats,
     pub total_usage: TokenUsage,
-    /// Token volume over `period_start..=period_end`, counting only events
-    /// that carried tokens. The codename divides this by `period_days`, so
-    /// the rate it ranks on is a per-day figure over whatever span the
-    /// caller asked for.
     pub recent_window_volume: u64,
-    /// Distinct days in the same span that carried tokens (not session
-    /// touches). The codename's data-sufficiency floor reads this.
     pub recent_window_active_days: usize,
     pub daily: Vec<DailyStat>,
     pub daily_sessions: Vec<DailySessions>,
     pub model_daily: Vec<ModelDailyStat>,
     pub models: Vec<ModelStat>,
     pub agents: Vec<AgentStat>,
-    /// Same window as every other section. Attribution fields exist only in
-    /// recent logs, so a long span mixes eras: a skill missing from the older
-    /// half may only mean the field wasn't written yet.
     pub skills: Vec<SkillStat>,
     pub limits: Option<LimitsHistory>,
     pub credits: Option<CreditsHistory>,
@@ -575,8 +469,6 @@ pub struct Summary {
     pub projects: Vec<ProjectStat>,
     pub sessions: usize,
     pub active_days: usize,
-    /// Token volume over the window immediately before this one (same length),
-    /// for period-over-period deltas.
     pub previous_total_volume: u64,
     pub longest_streak_days: usize,
     pub current_streak_days: usize,
@@ -586,17 +478,8 @@ pub struct Summary {
     pub favorite_model: Option<String>,
     pub longest_session: Option<SessionSpan>,
     pub completion_duration: Option<DurationSummary>,
-    /// User-initiated interruptions (Claude esc markers, Codex
-    /// `turn_aborted`) dated inside the window. Independent of
-    /// `completion_duration`: a window can hold interruptions and no
-    /// completed turn.
     pub interrupted: usize,
-    /// Cache reuse over the analysis window: event totals (the cached
-    /// share) plus optional call-level rows; `None` when no event carried
-    /// context. The Total tab holds the sum of the provider summaries.
     pub context: Option<ContextSummary>,
-    /// Working time and context-per-minute over the analysis window;
-    /// `None` when no turn completed there.
     pub active_time: Option<ActiveTimeSummary>,
     pub orchestration: Orchestration,
 }
@@ -645,16 +528,12 @@ mod tests {
         }
     }
 
-    /// The Total tab's summary is the element-wise sum: bands by position,
-    /// reason rows present if any part has them, empty input → None.
     #[test]
     fn merged_context_adds_parts_element_wise() {
         let a = context(10, 1_000, Some(300));
         let b = context(5, 500, None);
         let total = ContextSummary::merged([&a, &b]).expect("merged");
         assert_eq!(total.calls, 15);
-        // `merged()` re-derives the total from the rows: a = 500 + 300 + 250 +
-        // 100, b = 250 + 0 + 125 + 50.
         assert_eq!(total.effective_tokens, 1_575);
         assert_eq!(total.cached_tokens, 13_500);
         assert_eq!(total.bands[0].calls, 15);
@@ -672,14 +551,9 @@ mod tests {
 
         assert!(ContextSummary::merged([]).is_none());
         assert!(ContextSummary::merged([&context(0, 0, None)]).is_none());
-        // Totals without calls (an aggregate-only provider) still merge.
         let totals_only = context(0, 400, None);
         assert!(ContextSummary::merged([&totals_only]).is_some());
 
-        // A merge whose row sum overflows drops the whole breakdown: no band
-        // calls, no reason rows, headline only.
-        // (Built from a small fixture: the helper's `effective * 10` would
-        // itself overflow on u64::MAX.)
         let mut huge = context(1, 1_000, Some(1));
         huge.bands[0].cached_effective = u64::MAX;
         huge.expired = Some(ContextReason {

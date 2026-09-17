@@ -4,7 +4,6 @@ use super::REPO_URL;
 use super::badge_art;
 use super::card::ShareCard;
 
-// Card palette (matches the TUI brand).
 const C_TEXT: &str = "#eeede6";
 const C_MUTED: &str = "#8c9196";
 const C_DIM: &str = "#5c6675";
@@ -24,16 +23,11 @@ const C_MODEL: [&str; 6] = [
 
 const FONT: &str = "'SF Mono','Menlo','DejaVu Sans Mono','Consolas',monospace";
 
-// Layout — the card reads "how you work", not "how many tokens": three charts
-// (activity / by-hour / models) up top, parallel + task-time as plain numbers
-// below. Token totals ride along quietly in the header.
 const W: u32 = 1200;
 const H: u32 = 675;
 const LX: u32 = 58; // content left edge
 const RX: u32 = 1142; // content right edge
 
-// Three-column chart band: activity is compact (a 30-day grid is small), the
-// hourly and model charts take the wide remainder.
 const ACT_X: u32 = 58;
 const HRL_X: u32 = 242;
 const HRL_W: u32 = 470;
@@ -50,7 +44,6 @@ const BODY_H: u32 = BODY_BOT - BODY_TOP;
 /// line would reach the codename on the left.
 const STAT_LINE_BUDGET: usize = 60;
 
-/// Build the share card SVG at 1200x675.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_precision_loss,
@@ -69,7 +62,6 @@ pub fn svg(card: &ShareCard) -> String {
         r#"<defs><linearGradient id="panel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{C_PANEL_TOP}"/><stop offset="1" stop-color="{C_PANEL_BOTTOM}"/></linearGradient></defs>"#
     );
 
-    // Card background + framed panel.
     let _ = write!(s, r#"<rect width="{W}" height="{H}" fill="{C_CARD_BG}"/>"#);
     let _ = write!(
         s,
@@ -96,8 +88,7 @@ pub fn svg(card: &ShareCard) -> String {
     s
 }
 
-/// Time-of-day word → tint. Mirrors the TUI badge mapping (theme colours), so
-/// the card and dashboard agree; "Eclipse"/mixed falls through to purple.
+/// Mirror the TUI tint mapping so the card and dashboard agree.
 fn ops_color(ops: &str) -> &'static str {
     match ops {
         "Aurora" => "#63d6d2",
@@ -164,18 +155,12 @@ fn draw_header(s: &mut String, card: &ShareCard) {
     );
 }
 
-/// The rank as a pill badge above the title, in the slot the "CODENAME" label
-/// used to occupy (the label said nothing the card doesn't already show).
-/// Coloured by the 冠位十二階 ladder via `Rank::display_rgb`; unranked leaves
-/// the slot empty.
 fn draw_rank_badge(s: &mut String, card: &ShareCard) {
     let (Some(letters), Some((r, g, b))) = (card.rank.letters(), card.rank.display_rgb()) else {
         return;
     };
     let color = format!("#{r:02x}{g:02x}{b:02x}");
     let label = format!("RANK {letters}");
-    // Monospace label: ~10px per glyph at 14px + tracking, plus pill padding.
-    // (6–7 ASCII glyphs, so the conversion never hits the fallback.)
     let width = 44 + 10 * u32::try_from(label.len()).unwrap_or(7);
     let _ = write!(
         s,
@@ -330,8 +315,6 @@ fn draw_models(s: &mut String, card: &ShareCard) {
 )]
 fn draw_bottom(s: &mut String, card: &ShareCard) {
     let accent = ops_color(&card.ops);
-    // avg comes from its own field so it shows whenever there's a concurrency
-    // signal, independent of the level breakdown that drives 4+/peak.
     let par_avg = if card.avg_concurrency > 0.0 || card.parallel.is_some() {
         format!("{:.1}", card.avg_concurrency)
     } else {
@@ -360,7 +343,6 @@ fn draw_bottom(s: &mut String, card: &ShareCard) {
         r#"<line x1="{LX}" y1="{line_y}" x2="{RX}" y2="{line_y}" stroke="{C_HAIRLINE}" stroke-width="1"/>"#
     );
 
-    // 7 equal cells, with a wider gap between the two groups.
     let slot = 145_u32;
     let par_x = [LX, LX + slot, LX + 2 * slot];
     let task_x0 = LX + 3 * slot + 69;
@@ -393,7 +375,6 @@ fn draw_bottom(s: &mut String, card: &ShareCard) {
     }
 }
 
-/// One bottom-strip stat: big number with a small caption beneath.
 fn cell(s: &mut String, x: u32, num_y: u32, cap_y: u32, num: &str, cap: &str, color: &str) {
     let _ = write!(
         s,
@@ -406,7 +387,6 @@ fn cell(s: &mut String, x: u32, num_y: u32, cap_y: u32, num: &str, cap: &str, co
     );
 }
 
-/// Section header: muted letter-spaced label, optional right-aligned annotation.
 fn section(s: &mut String, x: u32, right: u32, label: &str, annotation: &str) {
     let _ = write!(
         s,
@@ -421,7 +401,6 @@ fn section(s: &mut String, x: u32, right: u32, label: &str, annotation: &str) {
     }
 }
 
-/// A bare group label for the bottom strip.
 fn section_label(s: &mut String, x: u32, y: u32, label: &str) {
     let _ = write!(
         s,
@@ -429,7 +408,6 @@ fn section_label(s: &mut String, x: u32, y: u32, label: &str) {
     );
 }
 
-/// Escape a string for safe inclusion in SVG element text or attribute values.
 /// Model names come from logs (untrusted), so escape quotes too — otherwise a
 /// `"` in a value would break out of an attribute and fail SVG parsing.
 fn xml_escape(text: &str) -> String {

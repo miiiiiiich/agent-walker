@@ -38,7 +38,6 @@ pub(in crate::ui) fn model_lines(summary: &Summary, width: u16) -> Vec<Line<'sta
         return lines;
     }
 
-    // Claude-usage-style horizontal bars, one color per model.
     let total_volume = summary.total_usage.token_volume();
     let max_volume = top_models
         .first()

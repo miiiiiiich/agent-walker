@@ -1,22 +1,9 @@
-//! OpenCode collector — reads OpenCode's local SQLite store.
-//!
-//! Unlike the JSONL collectors (Claude / Codex / Antigravity), OpenCode keeps
-//! everything in `<root>/opencode.db` (SQLite). Per-assistant-message token
-//! usage lives in the `message` table's `data` JSON
-//! (`tokens.{input,output,reasoning,cache.{read,write}}`, `modelID`,
-//! `path.cwd`, `time.{created,completed}`); tool calls live in `part`
-//! (`type:"tool"`, `tool`). Storage layout is documented at
-//! <https://opencode.ai/docs/troubleshooting/> and the OSS repo (sst/opencode).
-//!
 //! We open the live DB **read-only** and read it directly. The read-only flag
 //! means SQLite can never write the user's store (no checkpoint, no recovery
 //! write); in WAL mode our reads don't block OpenCode's writes, and a brief
 //! `busy_timeout` rides out the rare exclusive moments. Reading directly — rather
 //! than copying the whole DB into memory first — keeps memory proportional to
-//! the recent-window rows we actually parse, not the entire history. Cost is
-//! left to the shared LiteLLM pricing path like every other provider — the
-//! per-message `cost` OpenCode records (and local models such as Ollama, which
-//! report no priced usage) is not used here.
+//! the recent-window rows we actually parse, not the entire history.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -41,8 +28,6 @@ pub fn collect(
 ) -> Collection {
     let mut collection = Collection::new(Provider::OpenCode, root.to_path_buf());
 
-    // Events older than the history window can't be relevant; the timestamps are
-    // epoch milliseconds (`time.created`), so compare in the same unit.
     let floor_ms = mtime_floor
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
@@ -81,18 +66,12 @@ pub fn collect(
     collection
 }
 
-/// The OpenCode DB file(s) to read. Reads the `OPENCODE_DB` override from the
-/// environment, then defers to [`resolve_db_paths`] (kept env-free so it stays
-/// testable, like `paths::resolve_root`).
+/// Keep path resolution env-free so it stays testable.
 fn db_paths(root: &Path) -> Vec<PathBuf> {
     resolve_db_paths(root, std::env::var_os("OPENCODE_DB"))
 }
 
-/// Mirror OpenCode's own resolver: `OPENCODE_DB` wins (an absolute path used
-/// as-is, a relative one joined under the data dir; `:memory:` can't be read
-/// from another process, so it's skipped). Otherwise read every `opencode*.db`
-/// in the data dir, which covers both the default `opencode.db` and the
-/// per-channel `opencode-<channel>.db` a non-stable install writes.
+/// Skip `:memory:` because another process cannot read it.
 fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> {
     if let Some(db) = override_db {
         if db == *OsStr::new(":memory:") {
@@ -104,7 +83,6 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
         } else {
             root.join(path)
         };
-        // A missing override is "absent", not "unreadable" — skip it silently.
         return if path.exists() {
             vec![path]
         } else {
@@ -126,7 +104,6 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("opencode"));
-            // A directory matching the pattern isn't a DB — don't try to open it.
             is_db && named_opencode && path.is_file()
         })
         .collect();
@@ -146,8 +123,6 @@ fn open_readonly(db: &Path) -> Option<Connection> {
     Some(conn)
 }
 
-/// One usage + duration event per assistant message (the per-turn totals live on
-/// the message), plus a session touch per message for concurrency / active days.
 fn parse_messages(
     conn: &Connection,
     floor_ms: i64,
@@ -183,7 +158,6 @@ fn parse_messages(
             collection.stats.parse_errors += 1;
             continue;
         };
-        // Already counted from another DB file (a copied store) — skip the dup.
         if !seen.insert(id) {
             continue;
         }
@@ -258,8 +232,6 @@ fn parse_messages(
     }
 }
 
-/// Tool calls are `part` rows of `type:"tool"`; the real tool name is the `tool`
-/// field (`glob` / `read` / `edit` / `bash` / an MCP name).
 fn parse_tool_parts(
     conn: &Connection,
     floor_ms: i64,
@@ -306,7 +278,6 @@ fn parse_tool_parts(
         let Some(tool_name) = value.get("tool").and_then(Value::as_str) else {
             continue;
         };
-        // Already counted from another DB file (a copied store) — skip the dup.
         if !seen.insert(id) {
             continue;
         }
@@ -331,7 +302,6 @@ fn token(value: &Value, pointer: &str) -> u64 {
     value.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
 }
 
-/// Epoch-milliseconds → local-offset `OffsetDateTime`.
 fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
         .ok()
@@ -389,14 +359,10 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 1);
         let event = &collection.usage_events[0];
         assert_eq!(event.usage.input_tokens, 100);
-        // OpenCode's stored output (20) excludes reasoning (5); we fold reasoning
-        // in, so output_tokens is the inclusive 25 and reasoning is also kept.
         assert_eq!(event.usage.output_tokens, 25);
         assert_eq!(event.usage.reasoning_output_tokens, 5);
         assert_eq!(event.usage.cache_read_input_tokens, 40);
         assert_eq!(event.usage.cache_creation_input_tokens, 10);
-        // token_volume = input + output(incl. reasoning) + cache_create +
-        // cache_read = 100 + 25 + 10 + 40.
         assert_eq!(event.usage.token_volume(), 175);
         assert_eq!(event.model.as_deref(), Some("qwen3:8b"));
         assert_eq!(event.project.as_deref(), Some("somewhere/proj"));
@@ -408,14 +374,11 @@ mod tests {
         let expected = u64::try_from(ASSISTANT_DONE_MS - ASSISTANT_MS).unwrap();
         assert_eq!(collection.duration_events[0].duration_ms, expected);
 
-        // A touch per message (user + assistant), for concurrency / active days.
         assert_eq!(collection.session_touches.len(), 2);
     }
 
     #[test]
     fn channel_db_is_collected() {
-        // A non-stable install writes `opencode-<channel>.db` instead of the
-        // default name; the glob must still pick it up.
         let dir = TempDir::new().expect("tempdir");
         write_db_at(&dir.path().join("opencode-dev.db"));
         let collection = collect(dir.path(), None, false, UtcOffset::UTC);
@@ -428,7 +391,6 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         write_db_at(&dir.path().join("opencode.db"));
         write_db_at(&dir.path().join("opencode-beta.db"));
-        // A `-wal` sidecar must not be mistaken for a DB file.
         std::fs::write(dir.path().join("opencode.db-wal"), b"").expect("wal");
         let paths = resolve_db_paths(dir.path(), None);
         assert_eq!(
@@ -445,7 +407,6 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let custom = dir.path().join("custom.db");
         write_db_at(&custom);
-        // Even with a default db present, the absolute override wins exclusively.
         write_db_at(&dir.path().join("opencode.db"));
         let paths = resolve_db_paths(dir.path(), Some(custom.clone().into_os_string()));
         assert_eq!(paths, vec![custom]);
@@ -479,7 +440,6 @@ mod tests {
     fn mtime_floor_drops_events_before_the_window() {
         let dir = TempDir::new().expect("tempdir");
         write_db(dir.path());
-        // Floor sits after every event in the fixture.
         #[allow(clippy::duration_suboptimal_units)] // millis is a unix timestamp, not a span
         let floor = std::time::UNIX_EPOCH + Duration::from_millis(1_781_542_500_000);
         let collection = collect(dir.path(), Some(floor), false, UtcOffset::UTC);
@@ -490,14 +450,11 @@ mod tests {
 
     #[test]
     fn duplicate_rows_across_db_files_are_counted_once() {
-        // A copied store left beside the default (same row ids) must not double
-        // count the same turn.
         let dir = TempDir::new().expect("tempdir");
         write_db_at(&dir.path().join("opencode.db"));
         write_db_at(&dir.path().join("opencode-prod.db"));
         let collection = collect(dir.path(), None, false, UtcOffset::UTC);
         assert_eq!(collection.stats.files_seen, 2);
-        // One assistant message and one tool part, despite two identical DBs.
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.tool_events.len(), 1);
         assert_eq!(collection.session_touches.len(), 2);
@@ -542,7 +499,6 @@ mod tests {
              CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);",
         )
         .expect("create schema");
-        // A tool part with no state.time.start.
         let tool = r#"{"type":"tool","tool":"read"}"#;
         conn.execute(
             "INSERT INTO part VALUES ('p1','m1','s1',1781542400000,1781542400000,?1)",
@@ -553,15 +509,11 @@ mod tests {
 
         let collection = collect(dir.path(), None, false, UtcOffset::UTC);
         assert_eq!(collection.tool_events.len(), 1);
-        // The event keeps a timestamp (from time_created) so the analyzer doesn't
-        // drop it.
         assert!(collection.tool_events[0].timestamp.is_some());
     }
 
     #[test]
     fn null_session_id_keeps_the_row() {
-        // A corrupt DB with a NULL session_id must not drop the row (and its
-        // tokens) as a parse error — it defaults to an empty session instead.
         let dir = TempDir::new().expect("tempdir");
         let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
         conn.execute_batch(
@@ -585,8 +537,6 @@ mod tests {
 
     #[test]
     fn backwards_clock_duration_is_zero() {
-        // A corrupt / skewed `time.completed` earlier than `time.created` must
-        // not overflow or produce a garbage duration — it falls to 0.
         let dir = TempDir::new().expect("tempdir");
         let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
         conn.execute_batch(

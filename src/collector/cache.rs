@@ -1,5 +1,3 @@
-//! The per-file parse cache: (mtime, size)-keyed, versioned, local-offset
-//! aware. Parsing semantics changes MUST bump `CACHE_VERSION` (see its doc).
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,44 +10,7 @@ use tracing::debug;
 
 use super::events::FileEvents;
 
-/// Bump whenever the serialized layout OR the parsing semantics (event
-/// extraction, dedup keys) of a cached `FileEvents` change — stale caches
-/// would otherwise deserialize into garbage, or replay outdated keys that
-/// defeat a dedup fix.
-/// - 7: session-touch compression moved from UTC to local-day bucketing (cached
-///   touches depend on the local offset; a cache is invalidated by EITHER a
-///   version bump OR a changed `local_offset`, recorded in
-///   `CacheFile::offset_seconds`, so a machine-TZ change rebuilds automatically).
-/// - 8: `UsageEvent` gained `reported_cost_usd`, changing its bincode layout.
-/// - 9: v0.9 events — `UsageEvent.attribution_skill`, plus rate-limit /
-///   effort / mode event lists on `FileEvents`.
-/// - 10: Codex dedup keys became content-based (fork-replay dedup, GH-36) —
-///   same layout, but cached events carry the old positional keys.
-/// - 11: Claude `usage.iterations` parsing (fallback/advisor calls) — cached
-///   `FileEvents` lack the iteration events.
-/// - 12: `FileEvents` gained `credit_samples` (Copilot CREDITS), changing its
-///   bincode layout.
-/// - 13: duration events became keyed (`KeyedDurationEvent`, Grok fork
-///   dedup), changing the `FileEvents` layout.
-/// - 14: Claude top-level `effort` extraction — v13 caches deserialize fine
-///   but carry empty effort events for already-parsed sessions.
-/// - 15: `FileEvents` gained `permission_events` (autonomy mix), changing
-///   its bincode layout.
-/// - 16: `FileEvents` gained `interrupt_events` (esc / `turn_aborted` counts),
-///   changing its bincode layout.
-/// - 17: interrupt admission tightened (exact Claude marker forms as the
-///   sole content block, subagent file provenance, Codex
-///   `reason == "interrupted"` + required `turn_id`) — v16 caches carry
-///   over-counted interrupt events.
-/// - 18: `DurationEvent` gained `human_wait_ms` (Claude `AskUserQuestion`
-///   answer time inside a turn) and `FileEvents` gained `pace_events` (the
-///   gap before each prompt), changing the bincode layout; Claude turns are
-///   now stamped at their end and keyed by prompt uuid for fork dedup.
-/// - 19: `DurationEvent` gained `model_ms` (the model's own share of a
-///   turn vs tool runs), changing its bincode layout.
-/// - 20: Claude turns carry their `session_id` (same layout, new values).
-///
-/// The per-file key remains (mtime, size); `--no-cache` is never required.
+/// Parsing or attribution changes require a version bump so cached events do not retain old semantics.
 const CACHE_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,15 +59,8 @@ fn cache_file(dir: &Path, cache_name: &str) -> PathBuf {
     dir.join(format!("{cache_name}.bin"))
 }
 
-/// A temp file older than this was left by a run that died mid-write; a
-/// live writer finishes in well under a second.
 const ORPHAN_TEMP_AGE: Duration = Duration::from_hours(1);
 
-/// Remove what no run will read again: caches from before 0.17, when the
-/// version sat in the file name (`claude-v19.bin`, plus the `claude-v19.tmp`
-/// its interrupted writes left), and `<name>.tmp<pid>` files whose writer
-/// died before the rename. Runs once at startup, independent of which
-/// providers have logs today.
 pub fn sweep_cache_dir() {
     if let Ok(dir) = crate::paths::cache_dir() {
         sweep(&dir, SystemTime::now());
@@ -153,8 +107,6 @@ fn cache_is_reusable(cache: &CacheFile, offset_seconds: i32) -> bool {
     cache.version == CACHE_VERSION && cache.offset_seconds == offset_seconds
 }
 
-/// `None` when nothing reusable is on disk (missing, corrupt, or built under
-/// another version / offset), so the caller knows it must write.
 fn load_cache(path: &Path, offset_seconds: i32) -> Option<CacheFile> {
     let bytes = fs::read(path).ok()?;
     match bincode::deserialize::<CacheFile>(&bytes) {
@@ -201,22 +153,12 @@ fn store_cache(path: &Path, cache: &CacheFile) {
     // Per-process name: two concurrent runs must never share a temp inode.
     let temp = path.with_extension(format!("tmp{}", std::process::id()));
     if write_private(&temp, &bytes).is_ok() {
-        // `std::fs::rename` is atomic on Unix and uses
-        // `MoveFileExW + MOVEFILE_REPLACE_EXISTING` on Windows, so the
-        // destination is overwritten on both platforms without an explicit
-        // unlink. Removing the file first would break the Unix atomicity
-        // guarantee and momentarily leave the cache missing for concurrent
-        // readers.
+        // Replace by rename without unlinking first, preserving atomic replacement on Unix.
         let _ = fs::rename(&temp, path);
     }
 }
 
-/// Parse `files` through `parse`, reusing cached per-file results when the
-/// file is byte-identical to the last run ((mtime, size) match) AND the cache
-/// was built under the same `local_offset` (compressed touches are
-/// offset-dependent). Cache misses are parsed in parallel; results are returned
-/// in `files` order so that downstream deduplication stays deterministic.
-/// `cache_name: None` disables the on-disk cache (tests, ad-hoc directories).
+/// Preserve input file order so downstream deduplication stays deterministic.
 pub fn parse_files_cached(
     cache_name: Option<&str>,
     files: &[PathBuf],
@@ -239,7 +181,6 @@ fn parse_files_with_cache(
     let reusable = loaded.is_some();
     let cache = loaded.unwrap_or_default();
 
-    // (path, events, stamp, served from cache)
     let parsed: Vec<(PathBuf, Option<FileEvents>, Option<FileStamp>, bool)> = files
         .par_iter()
         .map(|path| {
@@ -310,11 +251,8 @@ mod tests {
     fn cache_invalidated_on_offset_or_version_change() {
         let jst = 9 * 3600; // +09:00 in seconds
 
-        // Same version and offset: reusable.
         assert!(cache_is_reusable(&cache_with(CACHE_VERSION, jst), jst));
-        // Offset changed (e.g. the machine moved timezones): discard.
         assert!(!cache_is_reusable(&cache_with(CACHE_VERSION, jst), 0));
-        // Version changed: discard regardless of offset.
         assert!(!cache_is_reusable(&cache_with(CACHE_VERSION - 1, jst), jst));
     }
 
@@ -333,8 +271,6 @@ mod tests {
         ] {
             fs::write(dir.path().join(name), b"x").unwrap();
         }
-        // One temp is fresh (a concurrent run may still be writing it), the
-        // other is long dead.
         let now = SystemTime::now();
         fs::File::options()
             .write(true)
@@ -376,8 +312,6 @@ mod tests {
         );
     }
 
-    /// An unchanged file set is served from the cache without rewriting it;
-    /// a changed file re-parses and rewrites. The file is owner-only on Unix.
     #[test]
     fn unchanged_runs_do_not_rewrite_the_cache() {
         use std::sync::atomic::{AtomicUsize, Ordering};

@@ -4,7 +4,6 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use super::state::{SHARE_ACTIONS, UiState};
 use super::theme::{BLACK, DIM, GOLD, MUTED, TEXT};
 
-/// Centered share modal: pick a target.
 pub(super) fn draw_share_modal(frame: &mut Frame<'_>, area: Rect, state: &UiState) {
     let Some(modal) = state.share.as_ref() else {
         return;

@@ -21,9 +21,7 @@ use crate::model::{
 use self::aggregates::Aggregates;
 pub(crate) use self::concurrency::session_day_bounds;
 
-/// Summarize a collection over the trailing window. All timestamps are
-/// normalized to `local_offset` before day/hour bucketing so that daily and
-/// hourly stats follow the user's clock, not UTC.
+/// Normalize timestamps to the local offset so day/hour buckets follow the user's clock.
 #[allow(
     clippy::too_many_lines,
     reason = "Flat assembly of the Summary struct; splitting adds indirection without logic."
@@ -160,9 +158,7 @@ pub fn summarize(
     let (longest_streak_days, current_streak_days) =
         streak::streaks(&aggregates.active_dates, period_start, period_end);
 
-    // Everything below reads the same window as the charts above. The codename
-    // divides this volume by the window length, so its rate stays comparable
-    // whatever span the caller asked for.
+    // Use the requested window for codename volume so its rate stays comparable across spans.
     let mut recent_window_volume = 0_u64;
     let mut recent_active_days = std::collections::HashSet::new();
     let mut skill_map: BTreeMap<String, TokenUsage> = BTreeMap::new();
@@ -311,9 +307,6 @@ mod tests {
         Collection, InterruptEvent, Provider, SessionTouch, SourceKind, TokenUsage, UsageEvent,
     };
 
-    /// Interruptions are independent of completed-turn stats: a window with
-    /// interruptions but no completed turn reports the count and no duration
-    /// summary; undated or out-of-window interrupts are excluded.
     #[test]
     fn interruptions_are_counted_independently_of_durations() {
         let now = datetime!(2026-06-08 12:00 UTC);
@@ -332,8 +325,6 @@ mod tests {
 
         let summary = summarize(&collection, now, 7, UtcOffset::UTC);
 
-        // No completed turn → no duration stats; the interruption count is
-        // its own metric and stays visible regardless.
         assert!(summary.completion_duration.is_none());
         assert_eq!(summary.interrupted, 1);
     }
@@ -418,8 +409,6 @@ mod tests {
         assert_eq!(summary.agents[0].calls, 1);
         assert_eq!(summary.tools[0].name, "Agent");
         assert_eq!(summary.current_streak_days, 2);
-        // Session spans are bounded to a single local day: s1 spans
-        // 10:00-14:00 on Jun 8 even though it also touched Jun 7.
         assert_eq!(
             summary
                 .longest_session
@@ -429,13 +418,8 @@ mod tests {
         );
     }
 
-    /// The analyzer takes its window as an argument. The CLI always asks for
-    /// `ANALYSIS_WINDOW_DAYS`, but a machine-readable caller can ask for any
-    /// span — and EVERY section follows it, the codename's volume included.
-    /// Keep this contract: it is what a future JSON output rides on.
     #[test]
     fn every_section_follows_the_requested_window() {
-        // Four usage events at 0, 1, 5, and 40 days before period_end.
         let now = datetime!(2026-06-30 12:00 UTC);
         let event = |at: OffsetDateTime, tokens: u64| UsageEvent {
             timestamp: Some(at),
@@ -465,22 +449,14 @@ mod tests {
         let week = summarize(&collection(events.clone()), now, 7, UtcOffset::UTC);
         let quarter = summarize(&collection(events), now, 90, UtcOffset::UTC);
 
-        // One window: the codename volume and the display total cover the
-        // same span, so both move with the requested days (3B vs 12B).
         assert_eq!(week.recent_window_volume, 3_000_000_000);
         assert_eq!(quarter.recent_window_volume, 12_000_000_000);
         assert_eq!(week.total_usage.token_volume(), 3_000_000_000);
         assert_eq!(quarter.total_usage.token_volume(), 12_000_000_000);
         assert_eq!(week.period_days, 7);
         assert_eq!(quarter.period_days, 90);
-        // The rank's eligibility floor counts token-bearing days in the same
-        // span, and the codename reads the pair — restoring a constant
-        // divisor would show up here.
         assert_eq!(week.recent_window_active_days, 3);
         assert_eq!(quarter.recent_window_active_days, 4);
-        // 3B over 7 days is 428M/day (S); 12B over 90 is 133M/day (B). The
-        // ranks are pinned, not merely compared: dividing by a constant 30
-        // instead would yield C / S — also two different ranks.
         assert_eq!(
             crate::codename::for_summary(&week).rank,
             crate::codename::Rank::S
@@ -493,9 +469,6 @@ mod tests {
 
     #[test]
     fn reported_and_unreported_costs_split_per_model() {
-        // Same model name on the same day: one event reports a cost (Cursor),
-        // one doesn't (Claude Code). The model's reported cost and its
-        // LiteLLM-priced (unreported) token subset must stay separable.
         let now = datetime!(2026-06-08 12:00 UTC);
         let usage = |input: u64| TokenUsage {
             input_tokens: input,
@@ -525,7 +498,6 @@ mod tests {
             .expect("model present");
         assert_eq!(model.usage.input_tokens, 400);
         assert_eq!(model.reported_cost_usd, Some(0.5));
-        // Only the unreported 300 tokens should be priced from LiteLLM.
         assert_eq!(model.unreported_usage.input_tokens, 300);
 
         let day = summary
@@ -566,33 +538,24 @@ mod v09_tests {
         }
     }
 
-    /// SKILLS / LIMITS / MODES cut on the requested window, and LIMITS days
-    /// are tri-state (measured / no sample / no use).
     #[test]
     #[allow(clippy::too_many_lines)]
     fn v09_sections_follow_the_window_with_tristate_days() {
         let now = datetime!(2026-06-30 12:00 UTC);
         let collection = Collection {
             usage_events: vec![
-                // In the 30d window (06-01..06-30) with a skill.
                 skill_event(
                     datetime!(2026-06-25 10:00 UTC),
                     Some("sk:review"),
                     1_000_000,
                 ),
-                // In the 90d display window but OUTSIDE the fixed 30d window:
-                // must not appear in SKILLS.
                 skill_event(
                     datetime!(2026-05-20 10:00 UTC),
                     Some("sk:review"),
                     2_000_000,
                 ),
-                // Active day without any rate-limit sample -> NoSample.
                 skill_event(datetime!(2026-06-22 09:00 UTC), None, 500),
             ],
-            // CONTEXT reads cache_read off usage; WORKING TIME reads turns;
-            // CREDITS reads the ledger. One of each inside the 30-day window
-            // and one outside it, so a wider window has to pick both up.
             duration_events: vec![
                 DurationEvent {
                     timestamp: Some(datetime!(2026-06-25 10:00 UTC)),
@@ -626,12 +589,10 @@ mod v09_tests {
                     timestamp: datetime!(2026-06-22 08:00 UTC),
                     used_percent: 40.0,
                 },
-                // Same day, later, higher: the day keeps its PEAK.
                 RateLimitSample {
                     timestamp: datetime!(2026-06-22 09:01 UTC),
                     used_percent: 100.0,
                 },
-                // Outside the 30d window: ignored.
                 RateLimitSample {
                     timestamp: datetime!(2026-05-20 09:00 UTC),
                     used_percent: 90.0,
@@ -662,7 +623,6 @@ mod v09_tests {
                     has_thinking: false,
                     fast: false,
                 },
-                // Outside the 30d window: ignored.
                 ModeEvent {
                     timestamp: Some(datetime!(2026-05-20 10:00 UTC)),
                     has_thinking: true,
@@ -682,25 +642,20 @@ mod v09_tests {
                     timestamp: Some(datetime!(2026-06-25 12:00 UTC)),
                     mode: "auto".to_owned(),
                 },
-                // Outside the 30d window: ignored.
                 PermissionEvent {
                     timestamp: Some(datetime!(2026-05-20 10:00 UTC)),
                     mode: "default".to_owned(),
                 },
             ],
-            // Claude: CONTEXT skips the Combined tab by design, and the other
-            // sections don't gate on provider here.
             ..Collection::new(Provider::Claude, "/tmp".into())
         };
 
         let summary = summarize(&collection, now, 30, UtcOffset::UTC);
 
-        // SKILLS: only the in-window 1M event counts.
         assert_eq!(summary.skills.len(), 1);
         assert_eq!(summary.skills[0].name, "sk:review");
         assert_eq!(summary.skills[0].usage.token_volume(), 1_000_000);
 
-        // LIMITS: 30 tri-state days, daily PEAK, window-filtered.
         let limits = summary.limits.expect("limits history should exist");
         assert_eq!(limits.days.len(), 30);
         assert_eq!(limits.peak, Some((date!(2026 - 06 - 22), 100.0)));
@@ -716,7 +671,6 @@ mod v09_tests {
         assert_eq!(day(date!(2026 - 06 - 25)), LimitDay::NoSample);
         assert_eq!(day(date!(2026 - 06 - 03)), LimitDay::NoUse);
 
-        // MODES: window-filtered turns and effort distribution.
         assert_eq!(summary.modes.assistant_turns, 2);
         assert_eq!(summary.modes.thinking_turns, 1);
         assert_eq!(summary.modes.fast_turns, 0);
@@ -729,16 +683,12 @@ mod v09_tests {
             vec![("xhigh".to_owned(), 2), ("low".to_owned(), 1)]
         );
 
-        // CREDITS / CONTEXT / WORKING TIME cut on the same window, and the
-        // working-time average divides by it.
         let time = summary.active_time.as_ref().expect("active time");
         assert_eq!(summary.credits.as_ref().expect("credits").days.len(), 30);
         assert_eq!(summary.context.as_ref().expect("context").calls, 2);
         assert_eq!((time.turns, time.window_days), (1, 30));
         assert_eq!(time.active_per_day_ms(), 600_000 / 30);
 
-        // Ask for a wider window and every one of them widens with it — the
-        // May events that a 30-day window excluded now count.
         let wide = summarize(&collection, now, 90, UtcOffset::UTC);
         let wide_time = wide.active_time.as_ref().expect("active time");
         assert_eq!(wide.skills[0].usage.token_volume(), 3_000_000);

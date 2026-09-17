@@ -1,31 +1,8 @@
-//! Antigravity token usage from the CLI's per-conversation SQLite stores.
-//!
-//! Antigravity's text logs carry activity but no token counts; the real usage
-//! lives in `<root>/conversations/<uuid>.db`, table `gen_metadata` — one row per
-//! generation, each an **unlabeled protobuf** (no field names). There's no
-//! public schema, so this reads the wire format directly and pulls only the
-//! fields it needs. The field numbers were reverse-engineered (cross-checked
-//! against the `tokscale` project, which maps them the same way):
-//!
-//! ```text
-//! gen_metadata.#1                  chatModel message
-//!   #4                             usage message
-//!     #1  varint  fixed system-prompt tokens (~1132, billable input)
-//!     #2  varint  newly-processed (non-cached) input tokens
-//!     #3  varint  output total (== #9 + #10) — used only as a self-check
-//!     #5  varint  cacheRead tokens (only once a cached prefix exists)
-//!     #9  varint  output (visible text) tokens
-//!     #10 varint  thinking / reasoning tokens
-//!     #11 string  response id (dedup key)
-//!   #9.#4                          per-generation {#1 sec, #2 nanos} timestamp
-//!   #19 string                     internal model id (e.g. "gemini-3-flash-a")
-//!   #21 string                     display name (e.g. "Gemini 3.5 Flash (High)")
-//! trajectory_metadata_blob.#1.#1   workspace URI (project)
-//! trajectory_metadata_blob.#2      {#1 sec, #2 nanos} session-created timestamp
-//! ```
-//!
+//! With no public schema, read the wire format directly and pull only the needed fields.
+//! The field map was cross-checked against the `tokscale` project.
 //! Because the numbers are unofficial and could shift on an Antigravity update,
-//! every row is self-verified against the precomputed output total `#3`: it must
+//! every row is self-verified against the precomputed output total `#3` (fields:
+//! `#3` output total, `#9` text, `#10` thinking, `#11` response id): it must
 //! equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped and
 //! counted as a parse error. A row that omits `#3` can't be verified, so it's
 //! skipped too, but quietly (some healthy rows omit it — not an error).
@@ -40,9 +17,6 @@ use time::{OffsetDateTime, UtcOffset};
 use crate::collector::project_from_cwd;
 use crate::model::{ScanStats, SourceKind, TokenUsage, UsageEvent};
 
-/// Read every `conversations/*.db` under `root` and return real token usage
-/// events. `stats` accumulates files/rows/parse-errors. Falls back gracefully
-/// (empty) when the directory or a DB is unreadable.
 pub(super) fn collect_usage(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -92,7 +66,6 @@ pub(super) fn collect_usage(
     events
 }
 
-/// Newest mtime (ms) across the DB and its `-wal` / `-shm` sidecars.
 fn newest_mtime_ms(db: &Path) -> Option<i64> {
     ["", "-wal", "-shm"]
         .iter()
@@ -208,12 +181,6 @@ fn parse_gen(
     let output_text = to_u64(v(9));
     let thinking = to_u64(v(10));
 
-    // Self-verify the field map against the stored output total (#3):
-    // - present and == text + thinking → trusted.
-    // - present but != → the layout drifted; flag it (Drift → parse error).
-    // - absent → can't verify this row, so don't trust it, but absence happens in
-    //   healthy data (some rows omit #3), so skip it quietly rather than as an
-    //   error.
     match varint_field(usage, 3) {
         Some(total) if to_u64(total) == output_text.saturating_add(thinking) => {}
         Some(_) => return ParseGen::Drift,
@@ -225,7 +192,6 @@ fn parse_gen(
         return ParseGen::Empty;
     }
 
-    // Skip a retried generation already counted (same response id, field #11).
     if let Some(id) = string_field(usage, 11).filter(|id| !id.trim().is_empty())
         && !seen.insert(id.to_owned())
     {
@@ -271,8 +237,6 @@ fn parse_gen(
     }))
 }
 
-/// `trajectory_metadata_blob` carries the session-created timestamp (`#2`) and
-/// the workspace URI (`#1.#1`, used as the project label).
 fn trajectory_meta(conn: &Connection) -> (i64, Option<String>) {
     let blob: Option<Vec<u8>> = conn
         .query_row(
@@ -293,12 +257,8 @@ fn trajectory_meta(conn: &Connection) -> (i64, Option<String>) {
     (ts, project)
 }
 
-/// `file:///Users/me/x` → `/Users/me/x`; `file:///C:/Users/me/x` →
-/// `C:/Users/me/x` (drop the slash Windows leaves before the drive letter).
 fn file_uri_to_path(uri: &str) -> String {
     let path = uri.trim_start_matches("file://");
-    // A Windows drive path is `/C:/...`; strip the leading slash so it reads as
-    // `C:/...`. Unix paths (`/Users/...`) keep their leading slash.
     let bytes = path.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' && bytes[1].is_ascii_alphabetic() {
         path[1..].to_owned()
@@ -324,14 +284,11 @@ fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
         .map(|time| time.to_offset(local_offset))
 }
 
-/// A protobuf `{#1: seconds, #2: nanos}` Timestamp → epoch milliseconds.
 fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
     let seconds = i64::try_from(varint_field(ts, 1)?).ok()?;
     let nanos = i64::try_from(varint_field(ts, 2).unwrap_or(0)).ok()?;
     seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
-
-// ── Minimal protobuf wire reader (no prost / schema) ───────────────────────
 
 enum Wire<'a> {
     Varint(u64),
@@ -500,7 +457,6 @@ mod tests {
 
     #[test]
     fn prefers_display_name_over_internal_id() {
-        // chat_model with both #19 (internal id) and #21 (display name).
         let mut usage = Vec::new();
         usage.extend(varint(9, 10));
         usage.extend(varint(10, 0));
@@ -519,15 +475,12 @@ mod tests {
 
     #[test]
     fn self_verify_rejects_drifted_total() {
-        // #3 (999) != #9 + #10 (300 + 40) → layout drift → Drift, not garbage.
         let blob = gen_blob(1132, 500, 0, 300, 40, Some(999), "r1");
         assert!(matches!(parse(&blob), ParseGen::Drift));
     }
 
     #[test]
     fn missing_output_total_is_skipped_quietly() {
-        // No #3 at all → can't self-verify → skip (not trusted), but quietly:
-        // some healthy rows omit it, so it's not an error.
         let blob = gen_blob(1132, 500, 0, 300, 40, None, "r1");
         assert!(matches!(parse(&blob), ParseGen::Empty));
     }
@@ -540,7 +493,6 @@ mod tests {
             parse_gen(&blob, "s1", 1, None, UtcOffset::UTC, &mut seen),
             ParseGen::Event(_)
         ));
-        // Same response id again (a retry) → not counted twice.
         assert!(matches!(
             parse_gen(&blob, "s1", 1, None, UtcOffset::UTC, &mut seen),
             ParseGen::Empty

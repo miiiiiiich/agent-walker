@@ -5,8 +5,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 use crate::model::{Collection, Orchestration};
 
 /// Bound session spans per (session, local day): a resumed id reused across
-/// days must not collapse into one giant span. The same rows feed PARALLEL
-/// and the JSON `sessions[]` export.
+/// days must not collapse into one giant span.
 pub(crate) fn session_day_bounds(
     collection: &Collection,
     period_start: Date,
@@ -30,12 +29,6 @@ pub(crate) fn session_day_bounds(
     bounds
 }
 
-/// Reconstruct session spans from touches and sweep them for concurrency.
-///
-/// `avg_concurrency` is the time-weighted mean of simultaneous sessions and
-/// `peak_concurrency` is the largest simultaneous count. This is the
-/// "orchestration" primitive: running many sessions at once, measurable on any
-/// agent, not a Claude-specific subagent feature.
 #[allow(
     clippy::cast_precision_loss,
     reason = "avg_concurrency is a display-only weighted mean, never fed back into integer math."
@@ -48,7 +41,6 @@ pub(super) fn orchestration(
 ) -> Orchestration {
     let bounds = session_day_bounds(collection, period_start, period_end, local_offset);
 
-    // Only spans with real width can overlap; a single-touch session is a point.
     let mut events: Vec<(OffsetDateTime, i32)> = Vec::with_capacity(bounds.len() * 2);
     for (start, end) in bounds.into_values() {
         if end <= start {
@@ -85,9 +77,6 @@ pub(super) fn orchestration(
         prev = Some(time);
     }
 
-    // Weighted concurrency: time-weighted mean of simultaneous sessions, using
-    // each band's midpoint (4–6→5, 7–9→8, 10+→11). A display stat — higher = more
-    // sustained parallelism, no arbitrary "≥N" cut-off.
     let avg_concurrency = if active_secs > 0 {
         let midpoints = [1.0_f64, 2.0, 3.0, 5.0, 8.0, 11.0];
         let weighted: f64 = level_secs
@@ -107,8 +96,6 @@ pub(super) fn orchestration(
     }
 }
 
-/// Bucket a live concurrency count into the 6 distribution slots
-/// (1 / 2 / 3 / 4–6 / 7–9 / 10+); `None` for idle stretches.
 fn level_bucket(active: i32) -> Option<usize> {
     match active {
         1 => Some(0),
@@ -144,7 +131,6 @@ mod tests {
 
     #[test]
     fn two_fully_overlapping_sessions_score_full_parallel() {
-        // a: 10:00-12:00, b: 10:30-11:30 (entirely inside a).
         let c = collection(vec![
             touch("a", datetime!(2026-06-08 10:00 UTC)),
             touch("a", datetime!(2026-06-08 12:00 UTC)),
@@ -158,9 +144,7 @@ mod tests {
             time::UtcOffset::UTC,
         );
         assert_eq!(result.peak_concurrency, 2);
-        // 1h at solo (two 30m a-only stretches) + 1h at level 2.
         assert_eq!(result.time_by_level, [3600, 3600, 0, 0, 0, 0]);
-        // weighted avg = (3600*1 + 3600*2) / 7200 = 1.5
         assert!((result.avg_concurrency - 1.5).abs() < 1e-9);
     }
 
@@ -179,7 +163,6 @@ mod tests {
             time::UtcOffset::UTC,
         );
         assert_eq!(result.peak_concurrency, 1);
-        // No stretch ever reaches two concurrent sessions.
         assert_eq!(result.time_by_level[1..], [0, 0, 0, 0, 0]);
     }
 }

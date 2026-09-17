@@ -1,4 +1,3 @@
-//! Dashboard aggregates, separate from detailed event rows.
 use std::collections::BTreeMap;
 
 use serde::Serialize;

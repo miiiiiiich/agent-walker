@@ -1,7 +1,5 @@
-//! The codename badge: braille-art icons for each PW24 animal (20×10, source
-//! PNGs pre-thresholded to pure black/white so faint gray frame artifacts
-//! don't fill the box when downscaled), plus the badge line renderer and the
-//! OPS color mapping that paint it next to the ACTIVITY grass.
+//! Source PNGs are pre-thresholded to black/white so faint gray frame artifacts
+//! do not fill the box when downscaled.
 
 use ratatui::prelude::*;
 
@@ -362,9 +360,6 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
     }
 }
 
-/// Codename badge: title (OPS in its colour, animal in white) above the
-/// braille animal in the OPS colour, with the rank as a nameplate under the
-/// art — `────  RANK S  ────` — like the plaque on a statue's pedestal.
 pub(super) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
     let color = ops_color(codename.ops);
     let icon: Vec<&str> = braille_for(codename.animal)

@@ -15,7 +15,6 @@ pub(super) const FAINT: Color = Color::Rgb(45, 49, 52);
 pub(super) const TEXT: Color = Color::Rgb(238, 237, 230);
 pub(super) const BLACK: Color = Color::Rgb(12, 12, 12);
 
-// GitHub dark-theme contribution-graph greens, plus the empty-cell shade.
 pub(super) const HEAT_RAMP: [Color; 4] = [
     Color::Rgb(14, 68, 41),
     Color::Rgb(0, 109, 50),

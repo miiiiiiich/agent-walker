@@ -1,9 +1,4 @@
-//! The ONLY network egress in the cost pipeline (and, besides the opt-in
-//! Cursor collector, in the whole binary): fetching LiteLLM's community
-//! pricing table. Anything that changes what leaves the machine or where it
-//! goes lives in this file — a diff touching `cost/remote.rs` is an egress
-//! change by definition. Only pricing metadata is fetched; no usage data is
-//! ever sent.
+//! Keep network egress here so changes to what leaves the machine can be audited by file.
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -14,16 +9,11 @@ use tracing::debug;
 
 use super::{Pricing, Snapshot, loaded, parse_snapshot_json, replace_loaded};
 
-/// Decoded-body cap; the table is a few MB.
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 const PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
-/// Fetch the upstream `LiteLLM` database and reduce it to the snapshot
-/// format: bare model ids (any provider) with per-token costs. No provider
-/// allowlist — a model is priced if its id is in the table; unknown ids stay
-/// $0. Provider/region duplicates and absurd rates are the actual guards.
 fn fetch_snapshot_json() -> Option<String> {
     // No env proxy: ureq 3 would pick up `HTTPS_PROXY` & co. by default,
     // which would silently change where this request leaves the machine.
@@ -53,7 +43,7 @@ fn fetch_snapshot_json() -> Option<String> {
         // Provider/region variants are dropped in favor of bare model ids —
         // EXCEPT `xai/`: LiteLLM registers Grok models only under the
         // provider prefix (`xai/grok-4.5`, no bare key), so the prefix is
-        // stripped instead, or Grok Build usage would price at $0.
+        // stripped so those models can resolve to a price.
         let key = key.strip_prefix("xai/").unwrap_or(key);
         if key.contains('/')
             || key.starts_with("anthropic.")
@@ -65,9 +55,6 @@ fn fetch_snapshot_json() -> Option<String> {
         {
             continue; // provider/region variants; keep bare model ids only
         }
-        // Keep only conversational models. This drops embedding / image / audio /
-        // rerank entries and non-model spec rows (e.g. `sample_spec`) that would
-        // otherwise enter the table once the provider allowlist is gone.
         if !matches!(
             entry.get("mode").and_then(serde_json::Value::as_str),
             Some("chat" | "completion" | "responses")
@@ -127,10 +114,7 @@ fn store_snapshot(path: &Path, serialized: &str) {
 }
 
 enum Refreshed {
-    /// Came off the network this call.
     Fetched(Snapshot),
-    /// Read from disk: either fetched earlier today, or the fallback after
-    /// a failed fetch.
     Stored(Snapshot),
     Nothing,
 }
@@ -168,9 +152,7 @@ fn refresh(file: Option<&Path>, today: &str, fetch: impl FnOnce() -> Option<Stri
 /// Refresh active pricing from `LiteLLM`. A snapshot off the network always
 /// wins; one read from disk only fills an empty table, so a reload that
 /// falls back to disk never downgrades prices already in memory. Nothing
-/// usable leaves the last good snapshot in place — a transient network blip
-/// on a reload must not blank the cost panel, zero out share cards, or flip
-/// provider ordering.
+/// usable leaves the last good snapshot in place.
 pub(super) fn refresh_pricing() {
     let file = pricing_file();
     let today = time::OffsetDateTime::now_utc().date().to_string();

@@ -1,6 +1,3 @@
-//! CONTEXT panel data: cache reuse per call, input-equivalent cost by context
-//! size, and the two behaviours that pay full price for a whole prefix —
-//! starting a session and resuming one after the cache expired.
 use std::collections::HashMap;
 
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
@@ -10,8 +7,7 @@ use crate::model::{
     Collection, ContextBand, ContextReason, ContextSummary, Provider, SourceKind, UsageEvent,
 };
 
-/// Context-size bands shared by every tab so the Total tab can add provider
-/// summaries element-wise. Upper bounds are exclusive.
+/// Shared context-size bands let the Total tab add provider summaries element-wise.
 const BANDS: [(&str, u64); 4] = [
     ("<100K", 100_000),
     ("100-200K", 200_000),
@@ -19,21 +15,16 @@ const BANDS: [(&str, u64); 4] = [
     ("500K+", u64::MAX),
 ];
 
-/// Fallback input-equivalent multipliers when the model has no `LiteLLM`
-/// price: Anthropic's and `OpenAI`'s published cache pricing.
 const DEFAULT_READ_MULTIPLIER: f64 = 0.1;
 const DEFAULT_WRITE_5M_MULTIPLIER: f64 = 1.25;
 const DEFAULT_WRITE_1H_MULTIPLIER: f64 = 2.0;
 
-/// How long the serving model keeps a cached prefix alive after its last
-/// use. A low-reuse call after a longer silence paid for the whole prefix
-/// again. Providers that route arbitrary models (OpenCode, Cursor, …) infer
-/// it from the model family; an unknown family gets `None`, and no call is
-/// then labelled expired — better a missing row than a fabricated one.
+/// Infer retention from the serving model; leave unknown families unclassified
+/// rather than fabricating expiry rows.
 fn retention(provider: Provider, model: Option<&str>) -> Option<Duration> {
     // Claude Code uses the 1h ttl (the 5m default would misfile calls
-    // resumed within the hour as expired); GPT-5.6+ keeps a prefix for 30
-    // minutes after the last write or reuse.
+    // resumed within the hour as expired); OpenAI keeps a prefix 30 minutes
+    // after the last write or reuse.
     const CLAUDE: Duration = Duration::hours(1);
     const OPENAI: Duration = Duration::minutes(30);
     match provider {
@@ -62,13 +53,6 @@ struct Multipliers {
 }
 
 fn multipliers(model: Option<&str>) -> Multipliers {
-    // The fallback covers an unresolved model or a table without an input
-    // price. A resolved model keeps its table ratios as they are — a zero
-    // cache-write rate (OpenAI) is a real price, and overriding it would put
-    // this panel at odds with COST. The ratios are in units of that model's
-    // own input tokens; summing across models with different input prices
-    // mixes units — accepted, since the panel reports volume-shaped cost,
-    // not dollars, and each provider tab is dominated by one price tier.
     let fallback = Multipliers {
         read: DEFAULT_READ_MULTIPLIER,
         write_5m: DEFAULT_WRITE_5M_MULTIPLIER,
@@ -104,8 +88,6 @@ fn band_index(context: u64) -> usize {
         .unwrap_or(BANDS.len() - 1)
 }
 
-/// One call's token accounting: raw context / cached / uncached plus the
-/// input-equivalent (price-weighted) volumes.
 struct CallAccount {
     context: u64,
     cached: u64,
@@ -148,12 +130,8 @@ fn account_call(event: &UsageEvent) -> CallAccount {
     }
 }
 
-/// Whether a provider's usage events are individual model calls. Where a
-/// collector emits aggregates — Copilot's per-shutdown deltas of cumulative
-/// counters, Grok's per-turn sums over `modelCalls` — the events still feed
-/// the token totals (and so the cached share) but never the call-level
-/// rows, whose per-call figures would otherwise divide a session's volume
-/// by its record count. This is the one place that ruling lives.
+/// Aggregate usage events feed totals but not call-level rows: dividing session
+/// or multi-call volume by aggregate record counts would misstate per-call figures.
 fn call_level(provider: Provider) -> bool {
     !matches!(provider, Provider::Copilot | Provider::Grok)
 }
@@ -171,8 +149,6 @@ fn empty_summary() -> ContextSummary {
     }
 }
 
-/// Raw token totals only — `effective_tokens` is derived from the rows at
-/// the end so the breakdown always partitions it.
 fn add_totals(summary: &mut ContextSummary, call: &CallAccount) {
     summary.context_tokens = summary.context_tokens.saturating_add(call.context);
     summary.cached_tokens = summary.cached_tokens.saturating_add(call.cached);
@@ -183,25 +159,8 @@ fn add_reason(reason: &mut ContextReason, call: &CallAccount) {
     reason.effective = reason.effective.saturating_add(call.uncached_effective);
 }
 
-/// Summarize cache reuse over the fixed window.
-///
-/// Every dated event feeds the token totals (so the cached share matches
-/// the tab's all-token volume). Call-level rows — bands, cold starts,
-/// expiries, ordinary uncached input — use main-chain calls of providers
-/// whose events are calls (`call_level`): sidechain rows share the parent's
-/// session id and would interleave parallel call chains. A session whose
-/// previous call predates the collection history floor (≥ 31 days idle)
-/// files its in-window call as a cold start rather than an expiry — both
-/// are "paid for the whole prefix" rows, and the floor sits a day beyond
-/// the window, so nothing inside the window is misfiled.
-/// One usage event is treated as one call; the one known exception is a
-/// Claude advisor turn, whose top-level event sums its main-model
-/// iterations (a handful per corpus) — accepted rather than threaded
-/// through the collector, since splitting it would need a cache layout
-/// change for a rounding-level effect. Predecessors are found before the
-/// window filter so the first in-window call of a running session is not
-/// a false cold start. The combined collection gets `None` — the Total tab
-/// sums the providers.
+/// Exclude sidechains from call rows because shared session IDs would interleave parallel chains.
+/// Find predecessors before filtering the window; missing history can make a resumed session appear cold.
 pub(super) fn context_summary(
     collection: &Collection,
     window_start: Date,
@@ -233,10 +192,6 @@ pub(super) fn context_summary(
                 .or_default()
                 .push(event);
         } else if in_window(timestamp) {
-            // Totals only: the volume counts toward the cached share and the
-            // uncached row's volume, but not toward any call count — an
-            // aggregate record is not a call, so per-call figures must not
-            // divide by it.
             add_totals(&mut summary, &call);
             summary.unclassified_effective = summary
                 .unclassified_effective
@@ -278,13 +233,6 @@ pub(super) fn context_summary(
             band.calls += 1;
             band.cached_effective = band.cached_effective.saturating_add(call.cached_effective);
 
-            // Cold start = every session's first call, whatever the cache
-            // did (a sibling session may have warmed the prefix; the
-            // uncached part is still the price of starting). Expired =
-            // low reuse (uncached ≥ half the context) after a silence
-            // longer than the serving model keeps a prefix. Everything else
-            // uncached is ordinary new input — the suffix a running session
-            // appends each call.
             let low_reuse = call.uncached.saturating_mul(2) >= call.context;
             let retention = retention(collection.provider, event.model.as_deref());
             let expired_gap = retention.is_some_and(|keep| gap.is_some_and(|gap| gap >= keep));
@@ -347,9 +295,6 @@ mod tests {
         }
     }
 
-    /// A session's first call is a cold start; a low-reuse call after the
-    /// retention window is expired; a low-reuse call inside the window is
-    /// neither; high-reuse calls only feed the bands and cache totals.
     #[test]
     fn classifies_cold_start_and_expiry_per_session() {
         let t0 = datetime!(2026-06-08 10:00 UTC);
@@ -375,27 +320,17 @@ mod tests {
 
         assert_eq!(summary.calls, 4);
         assert_eq!(summary.cached_tokens, 65_000);
-        // Reason rows carry the input-equivalent uncached cost: input × 1 plus
-        // 5m cache writes × 1.25 (unpriced model → fallback multipliers).
         let cold = summary.cold_start.expect("cold start");
         assert_eq!((cold.calls, cold.effective), (1, 1_000 + 73_750));
         let expired = summary.expired.expect("expired");
         assert_eq!((expired.calls, expired.effective), (1, 87_500));
-        // The remaining uncached input — the high-reuse suffix (500 + 2,000
-        // × 1.25) and the in-window low-reuse call (65,000 × 1.25) — lands in
-        // the ordinary row, completing the partition.
         assert_eq!(summary.uncached.calls, 2);
         assert_eq!(summary.uncached.effective, 3_000 + 81_250);
-        // Every call sits below 100K context → one band populated.
         assert_eq!(summary.bands[0].calls, 4);
         assert!(summary.bands[1..].iter().all(|band| band.calls == 0));
-        // Unpriced model → fallback multipliers: 60K cached reads ≈ 6K effective
-        // in the high-reuse call, 5K → 500 in the last.
         assert_eq!(summary.bands[0].cached_effective, 6_000 + 500);
     }
 
-    /// A session's first call counts as a cold start even when a sibling
-    /// session had warmed the prefix — only its uncached part is charged.
     #[test]
     fn warm_first_call_is_still_a_cold_start() {
         let t0 = datetime!(2026-06-08 10:00 UTC);
@@ -411,8 +346,6 @@ mod tests {
         assert_eq!((cold.calls, cold.effective), (1, 2_000));
     }
 
-    /// Codex keeps a prefix for 30 minutes: a 40-minute gap is expired there
-    /// but not on Claude, whose retention is an hour.
     #[test]
     fn retention_threshold_is_per_provider() {
         let t0 = datetime!(2026-06-08 10:00 UTC);
@@ -440,9 +373,6 @@ mod tests {
         assert_eq!(claude.expired.expect("claude expired").calls, 0);
     }
 
-    /// The predecessor is found before the window filter: the first in-window
-    /// call of a session that started earlier is not a cold start. Sidechain
-    /// rows and the combined provider contribute nothing.
     #[test]
     fn window_and_source_gates() {
         let before = datetime!(2026-05-20 10:00 UTC);
@@ -461,14 +391,10 @@ mod tests {
         )
         .expect("summary");
         assert_eq!(summary.calls, 1);
-        // The sidechain row feeds the totals (so the share matches the tab's
-        // volume) but not the call rows.
         assert_eq!(summary.context_tokens, 100_000);
         assert_eq!(summary.cold_start.expect("cold start").calls, 0);
         assert_eq!(summary.expired.expect("expired").calls, 1);
 
-        // Copilot keeps its in-window token totals for the Total share but no
-        // call-level rows: calls stays 0 so its own tab shows nothing.
         let copilot = context_summary(
             &collection(Provider::Copilot, events.clone()),
             date!(2026 - 06 - 01),
@@ -478,10 +404,8 @@ mod tests {
         .expect("copilot totals");
         assert_eq!((copilot.calls, copilot.context_tokens), (0, 100_000));
         assert!(copilot.expired.is_none() && copilot.cold_start.is_none());
-        // Volume, not calls: nothing for a per-call figure to divide by.
         assert_eq!((copilot.uncached.calls, copilot.uncached.effective), (0, 0));
         assert_eq!(copilot.unclassified_effective, 100_000);
-        // Grok's per-turn sums over several model calls get the same ruling.
         let grok = context_summary(
             &collection(Provider::Grok, events.clone()),
             date!(2026 - 06 - 01),
@@ -504,9 +428,6 @@ mod tests {
         );
     }
 
-    /// Cache writes split by ttl: the 1h share is weighted 2×, the rest
-    /// 1.25× (fallback multipliers); a broken split (1h share exceeding the
-    /// total) prices every write at the 5m rate, exactly as COST does.
     #[test]
     fn long_ttl_writes_weigh_more() {
         let mut e = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 10_000, 0);
@@ -518,7 +439,6 @@ mod tests {
             UtcOffset::UTC,
         )
         .expect("summary");
-        // 6,000 × 1.25 + 4,000 × 2 = 15,500
         assert_eq!(summary.effective_tokens, 15_500);
 
         let mut clamped = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 10_000, 0);
@@ -533,14 +453,10 @@ mod tests {
         assert_eq!(summary.effective_tokens, 12_500);
     }
 
-    /// A priced model takes its multipliers from the pricing table instead
-    /// of the fallback constants.
     #[test]
     fn priced_model_uses_table_multipliers() {
         crate::cost::tests::install_test_pricing();
-        // Test table: claude-opus-4-8 input $5, cache_read $0.5 (0.1×),
-        // write 5m $6.25 (1.25×), write 1h $10 (2×) — same as the fallback,
-        // so pin a model whose ratios differ: gpt-5.5 has no write price.
+        // Use nonfallback cache ratios so this test distinguishes the pricing-table path.
         let mut e = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 10_000, 100_000);
         e.model = Some("gpt-5.5".to_owned());
         let summary = context_summary(
@@ -550,12 +466,9 @@ mod tests {
             UtcOffset::UTC,
         )
         .expect("summary");
-        // cache_read $0.5 / $5 = 0.1× → 10,000; the table prices writes at
-        // $0 for this model, so they weigh nothing — the same call COST makes.
         assert_eq!(summary.effective_tokens, 10_000);
     }
 
-    /// A poisoned row with saturated counters neither panics nor wraps.
     #[test]
     fn saturated_counters_do_not_overflow() {
         let e = event(
@@ -574,14 +487,10 @@ mod tests {
         .expect("summary");
         assert_eq!(summary.context_tokens, u64::MAX);
         assert_eq!(summary.effective_tokens, u64::MAX);
-        // The row sum overflowed, so the whole breakdown is dropped rather
-        // than shown as shares past 100%; the headline survives.
         assert!(summary.bands.iter().all(|band| band.calls == 0));
         assert!(summary.cold_start.is_none() && summary.expired.is_none());
     }
 
-    /// Providers that route arbitrary models take retention from the model
-    /// family; an unknown family never files a call as expired.
     #[test]
     fn retention_follows_the_serving_model_elsewhere() {
         let t0 = datetime!(2026-06-08 10:00 UTC);
@@ -603,14 +512,11 @@ mod tests {
         };
         assert_eq!(run("gpt-5.5").expired.expect("expired").calls, 1);
         assert_eq!(run("claude-opus-4-8").expired.expect("expired").calls, 0);
-        // Unknown retention: expiry is unavailable, not zero.
         assert!(run("qwen3:8b").expired.is_none());
         assert_eq!(run("qwen3:8b").cold_start.expect("cold start").calls, 1);
         assert_eq!(run("qwen3:8b").uncached.calls, 1);
     }
 
-    /// The expiry gap is tracked per serving model inside a session: a call
-    /// on another model in between neither refreshes nor expires a prefix.
     #[test]
     fn expiry_gap_is_per_serving_model() {
         let t0 = datetime!(2026-06-08 10:00 UTC);
@@ -627,13 +533,10 @@ mod tests {
             UtcOffset::UTC,
         )
         .expect("summary");
-        // gpt_b's gap to the previous GPT call is 60m ≥ 30m → expired, even
-        // though a Qwen call happened one minute earlier.
         assert_eq!(summary.expired.expect("expired").calls, 1);
         assert_eq!(summary.cold_start.expect("cold start").calls, 1);
     }
 
-    /// Session-less providers (Cursor) get bands but no reason rows.
     #[test]
     fn sessionless_events_skip_reasons() {
         let mut e = event("x", datetime!(2026-06-08 10:00 UTC), 50_000, 0, 0);

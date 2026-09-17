@@ -1,14 +1,4 @@
-//! CLI arguments, resolved configuration, and the default log-location
-//! probes — what the app reads and which mode it runs in (report, share,
-//! render, completions), separate from how the report is assembled.
-/// The analysis window, in days. Every section reads the same span — one
-/// window, so nothing on screen silently covers a different period.
-///
-/// This is fixed for the TUI on purpose: the day charts draw one column per
-/// day, and squeezing a longer span into them would fold the trend away. The
-/// analyzer itself takes the window as an argument (`summarize(..., days,
-/// ...)`), so JSON output can request a different span without changing
-/// the TUI window.
+/// Fix the TUI window because day charts allocate one column per day.
 pub const ANALYSIS_WINDOW_DAYS: u16 = 30;
 
 use std::env;
@@ -58,9 +48,8 @@ pub struct Args {
     pub copilot_dir: Option<PathBuf>,
 
     /// Override the OpenCode data directory (default `~/.local/share/opencode`,
-    /// or `$OPENCODE_HOME` / `$XDG_DATA_HOME/opencode`). Auto-detected: its tab
-    /// appears only when `opencode.db` is present. Tokens are read from the
-    /// local SQLite store.
+    /// or `$OPENCODE_HOME` / `$XDG_DATA_HOME/opencode`). Reads matching OpenCode
+    /// SQLite databases; the tab appears only when collected activity is present.
     #[arg(long, value_name = "DIR")]
     pub opencode_dir: Option<PathBuf>,
 
@@ -125,39 +114,20 @@ pub struct Config {
     pub demo: bool,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
-    /// Antigravity log directory, or `None` when it can't be resolved (e.g.
-    /// `dirs::home_dir()` fails in a sandbox). Resolution failure is swallowed
-    /// rather than fatal, since Antigravity is optional — its tab only shows up
-    /// when logs are actually found there.
+    /// Home-resolution failure is nonfatal because Antigravity is optional.
     pub agy_dir: Option<PathBuf>,
-    /// Grok Build root, or `None` when it can't be resolved. Optional and
-    /// auto-detected like the other secondary providers.
     pub grok_dir: Option<PathBuf>,
-    /// GitHub Copilot CLI root, or `None` when it can't be resolved. Optional
-    /// and auto-detected like Antigravity: the tab appears only when session
-    /// logs exist under `session-state/`.
     pub copilot_dir: Option<PathBuf>,
-    /// OpenCode data directory, or `None` when it can't be resolved. Optional and
-    /// auto-detected like Antigravity: the tab appears only when `opencode.db`
-    /// exists there.
     pub opencode_dir: Option<PathBuf>,
-    /// Cursor settings, or `None` when there's nothing to read (no Cursor store
-    /// and no `CURSOR_TOKEN`). `Some` carries the resolved `state.vscdb` path,
-    /// the CLI-config path, and an optional token override. Auto-detected, but
-    /// the one collector that reaches the network.
     pub cursor: Option<CursorConfig>,
     pub use_cache: bool,
-    /// Local UTC offset captured at startup (single-threaded moment), used to
-    /// bucket all timestamps into the user's local days and hours.
     pub local_offset: UtcOffset,
 }
 
-/// Resolved Cursor settings (see `Config::cursor`).
 #[derive(Clone)]
 pub struct CursorConfig {
     pub state_db: PathBuf,
     pub cli_config: PathBuf,
-    /// Token override from `CURSOR_TOKEN`; `None` reads the local `state.vscdb`.
     pub token: Option<String>,
 }
 
@@ -189,17 +159,8 @@ pub(super) fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
 }
 
-/// Build the Cursor config. Cursor is **auto-detected** like the other providers
-/// — it runs whenever there's something to read (an explicit `CURSOR_TOKEN`, or a
-/// local `state.vscdb` that exists) — but because it's the one collector that
-/// reaches the network, `--no-cursor` turns it off entirely. With nothing to
-/// detect it's skipped. Signed out (store exists but no token) it stays silent
-/// and never hits the network — handled in the collector. Path resolution
-/// failures fall back to empty paths so an explicit token still works in CI /
-/// sandboxes where the home dir can't be resolved.
 pub(super) fn cursor_config(args: &Args) -> Option<CursorConfig> {
-    // The one network-reaching collector is opt-out: honor --no-cursor before
-    // touching the env or disk so nothing is read and no request is made.
+    // Checked first so `--no-cursor` reads neither `CURSOR_TOKEN` nor the store.
     if args.no_cursor {
         return None;
     }
@@ -210,13 +171,11 @@ pub(super) fn cursor_config(args: &Args) -> Option<CursorConfig> {
         .cursor_state_db
         .clone()
         .or_else(|| crate::paths::cursor_state_db().ok());
-    // Nothing to collect unless there's a token source: an explicit token, or a
-    // Cursor store present on disk. (A present store with no token — signed out —
-    // is handled in the collector: it reads no token and makes no request.)
     let store_present = state_db.as_ref().is_some_and(|path| path.exists());
     if token.is_none() && !store_present {
         return None;
     }
+    // Empty paths let an explicit token work when home resolution fails.
     Some(CursorConfig {
         state_db: state_db.unwrap_or_default(),
         cli_config: crate::paths::cursor_cli_config().unwrap_or_default(),

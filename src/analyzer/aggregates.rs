@@ -9,13 +9,7 @@ pub(super) struct Aggregates {
     pub(super) total_usage: TokenUsage,
     pub(super) daily_usage: BTreeMap<Date, TokenUsage>,
     pub(super) model_daily_usage: BTreeMap<(Date, String), TokenUsage>,
-    /// Provider-reported cost summed per (date, model). A key is present only
-    /// when at least one event for it carried a reported cost; absence means
-    /// "price from `LiteLLM`".
     pub(super) model_daily_reported: BTreeMap<(Date, String), f64>,
-    /// Per (date, model) usage from events with NO reported cost — the portion
-    /// still priced from `LiteLLM` even when the same model-day also has reported
-    /// cost from another provider.
     pub(super) model_daily_unreported: BTreeMap<(Date, String), TokenUsage>,
     pub(super) model_map: HashMap<String, ModelAccumulator>,
     pub(super) agent_map: HashMap<String, AgentAccumulator>,
@@ -181,7 +175,6 @@ impl ProjectAccumulator {
 #[derive(Default)]
 pub(super) struct ModelAccumulator {
     usage: TokenUsage,
-    /// Usage from events with no reported cost (priced via `LiteLLM`).
     unreported_usage: TokenUsage,
     events: usize,
     reported_cost: Option<f64>,

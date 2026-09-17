@@ -1,8 +1,3 @@
-//! What collectors emit: per-call events and session touches (serialized
-//! into the parse cache via `FileEvents`, together with `TokenUsage` and
-//! `SourceKind` from the parent module — changing any of those layouts
-//! bumps `CACHE_VERSION` in collector/cache.rs), plus the runtime-only
-//! `Collection` aggregate and `ScanStats`, which are never cached.
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,11 +12,7 @@ pub struct UsageEvent {
     pub model: Option<String>,
     pub source_kind: SourceKind,
     pub attribution_agent: Option<String>,
-    /// Skill active when this message was produced (Claude `attributionSkill`).
-    /// Feeds the SKILLS section only — never the share card.
     pub attribution_skill: Option<String>,
-    /// Repository / working-directory label derived from the log location
-    /// (Claude: project directory name; Codex: `session_meta` cwd).
     pub project: Option<String>,
     pub usage: TokenUsage,
     /// Provider-reported cost in USD for this event, when the source gives an
@@ -48,86 +39,55 @@ pub struct SessionTouch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationEvent {
-    /// When the turn ENDED (Claude, Codex, Copilot, Grok); OpenCode stamps
-    /// the start. Windows attribute a turn by this stamp.
     pub timestamp: Option<OffsetDateTime>,
     pub session_id: Option<String>,
     pub duration_ms: u64,
-    /// Milliseconds inside the turn spent waiting on the human — Claude's
-    /// `AskUserQuestion` round-trips, which land mid-turn as tool results and
-    /// so never split the turn. Subtracted wherever the turn length stands
-    /// for "the agent was working"; 0 for providers without the notion.
     pub human_wait_ms: u64,
-    /// Milliseconds of the turn the model itself was working (thinking and
-    /// writing) as opposed to a tool running — Claude: the gaps that end
-    /// in an assistant row; Codex: the turn minus its tool-run items.
-    /// `None` where the log can't tell (Copilot, OpenCode, Grok — whose
-    /// `apiDurationMs` excludes tools and logs no tool spans).
     pub model_ms: Option<u64>,
     pub status: Option<String>,
 }
 
 impl DurationEvent {
-    /// The turn length with the human's answer time removed.
     pub fn active_ms(&self) -> u64 {
         self.duration_ms.saturating_sub(self.human_wait_ms)
     }
 }
 
-/// One `rate_limits` snapshot from a Codex rollout: the plan's primary
-/// (5-hour) window utilization at that moment. History-only material — the
-/// dashboard shows past utilization, never a "current" meter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitSample {
     pub timestamp: OffsetDateTime,
     pub used_percent: f64,
 }
 
-/// One interval's AI-credit spend: the delta of Copilot's cumulative
-/// `totalNanoAiu` between consecutive usage checkpoints / shutdowns.
-/// 1 credit = 1e9 nano-AIU.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditSample {
     pub timestamp: OffsetDateTime,
     pub nano_aiu: u64,
 }
 
-/// One Codex turn's reasoning-effort setting (`turn_context.payload.effort`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffortEvent {
     pub timestamp: Option<OffsetDateTime>,
     pub effort: String,
 }
 
-/// One turn's granted-autonomy setting: Claude's `permissionMode` per user
-/// turn (default / auto / acceptEdits / dontAsk / plan / bypassPermissions),
-/// Codex's `approval_policy` per `turn_context` (never / on-request / …).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionEvent {
     pub timestamp: Option<OffsetDateTime>,
     pub mode: String,
 }
 
-/// One user-initiated interruption: Claude's `[Request interrupted …]`
-/// marker rows (esc during a turn), Codex's `turn_aborted` events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterruptEvent {
     pub timestamp: Option<OffsetDateTime>,
 }
 
-/// The gap before a human prompt: from the previous turn's last activity
-/// to the prompt — reading, thinking, typing. Only gaps under the turn
-/// cutoff (30 minutes) are recorded; longer ones are the human being away,
-/// not their pace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaceEvent {
     pub timestamp: Option<OffsetDateTime>,
     pub gap_ms: u64,
 }
 
-/// Per-assistant-message mode flags for Claude: whether extended thinking
-/// fired (a `thinking` content block exists — block presence only, text is
-/// never read) and whether fast mode served it (`usage.speed == "fast"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModeEvent {
     pub timestamp: Option<OffsetDateTime>,

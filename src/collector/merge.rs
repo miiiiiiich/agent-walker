@@ -1,4 +1,3 @@
-//! Cross-file merge and keyed deduplication of collected events.
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -51,9 +50,6 @@ fn older_timestamp(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Opti
     }
 }
 
-/// Insert one keyed event into `sink`: unkeyed events pass through, the first
-/// occurrence of a key is kept, and later duplicates fold into it via `merge`
-/// (metadata fill, OR flags, earliest timestamp).
 fn dedupe_into<E>(
     sink: &mut Vec<E>,
     seen: &mut HashMap<String, usize>,
@@ -79,11 +75,7 @@ fn absorb_file_stats(collection: &mut Collection, events: &FileEvents) {
     collection.stats.parse_errors += events.parse_errors;
 }
 
-/// Merge ordered per-file events into the collection, applying cross-file
-/// deduplication. Keyed usage duplicates keep the variant with the larger
-/// token volume but fill missing metadata from the loser; keyed tool /
-/// rate-limit / effort duplicates are dropped; keyed mode duplicates merge
-/// their flags with OR. Every keyed duplicate keeps the EARLIEST observed
+/// Every keyed duplicate keeps the EARLIEST observed
 /// timestamp: a fork replay is stamped at the fork instant, and file scan
 /// order doesn't put originals first (`archived_sessions` sorts before
 /// `sessions` wholesale), so first-seen-wins would let a replay shift an
@@ -284,9 +276,6 @@ mod tests {
         }
     }
 
-    /// Keyed duration copies: the longer observation wins whole (a fork
-    /// prefix vs the complete turn); equal ones keep the earlier stamp
-    /// regardless of scan order (Grok fork copies rewrite the stamp).
     #[test]
     fn keyed_durations_keep_longer_then_earlier() {
         let later_first = || {
@@ -337,10 +326,6 @@ mod tests {
         );
     }
 
-    /// A keyed usage duplicate (Claude streaming fragments of one message,
-    /// or a Codex fork replay) keeps the larger token volume, the EARLIEST
-    /// timestamp, and metadata from both sides — whichever file order they
-    /// arrive in.
     #[test]
     fn keyed_usage_merge_keeps_larger_volume_and_earliest_timestamp() {
         use crate::model::{Provider, TokenUsage};
@@ -365,8 +350,6 @@ mod tests {
                     reported_cost_usd: None,
                 },
             };
-        // Small fragment first with the early timestamp and a project; the
-        // larger fragment arrives later with the model but no project.
         let small_early = event(early, 10, None, Some("proj"));
         let large_late = event(late, 20, Some("claude"), None);
 

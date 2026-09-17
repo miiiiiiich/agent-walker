@@ -35,6 +35,9 @@ pub enum SourceKind {
     Subagent,
 }
 
+/// Input excludes cache reads and writes. Reasoning is included in output;
+/// ephemeral cache-write counters are subsets of total cache creation.
+/// Do not add these subset counters again when calculating volume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,

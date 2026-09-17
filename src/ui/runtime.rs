@@ -83,8 +83,6 @@ pub fn run(config: Config) -> Result<()> {
     run_result.and(restore_result)
 }
 
-/// Restore the terminal on panic before the message is printed.
-///
 /// crossterm's raw mode and alternate screen survive an unwind, so a panic
 /// inside the draw/event loop would otherwise drop the user back to a dead
 /// shell — no echo, no prompt. The hook leaves the alternate screen first, then

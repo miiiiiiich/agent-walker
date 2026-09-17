@@ -1,4 +1,3 @@
-//! Versioned local JSON export. DTOs are independent of cache and UI layouts.
 use std::io::{self, ErrorKind, Write};
 
 use anyhow::{Context, Result};
@@ -31,7 +30,6 @@ pub(crate) fn write_json(
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush());
     match written {
-        // `agent-walker --json | head` is a normal way to peek at the document.
         Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
         other => other.context("write JSON report"),
     }

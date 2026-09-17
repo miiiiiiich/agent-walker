@@ -41,8 +41,8 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     // Codename animal as a braille badge. Side-by-side in the right column next
     // to the ACTIVITY grass (aligned with BY HOUR / COST on the shared boundary)
     // only when the grass actually fits in the left column — otherwise the
-    // gutter would collapse and the badge would collide with the grass. Skip the
-    // ACTIVITY title/legend row (index 0) since the badge's first row is blank.
+    // gutter would collapse and the badge would collide with the grass. Ignore
+    // the ACTIVITY title/legend row only when measuring grass width.
     let activity = activity::activity_lines(summary);
     let badge = badge::codename_badge_lines(&crate::codename::for_summary(summary));
     let grass_width = activity.iter().skip(1).map(Line::width).max().unwrap_or(0);
@@ -68,9 +68,6 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.extend(charts::hourly_chart_lines(summary, width, CHART_BODY));
         } else {
-            // Every left-rail chart takes the full left column; the shared
-            // one-char-per-column standard inside charts.rs keeps TOKENS PER
-            // DAY, LIMITS, and CREDITS at identical widths.
             let left = charts::model_chart_lines(summary, left_u16, CHART_BODY);
             let right = charts::hourly_chart_lines(summary, right_u16, CHART_BODY);
             lines.extend(join_columns(&left, &right, left_width + 2));
@@ -90,9 +87,6 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // CREDITS history is Copilot-only for the same reason LIMITS is
-    // Codex-only: the AI-credit ledger is that provider's own accounting,
-    // and it is deliberately historical.
     if summary.provider == Provider::Copilot {
         let chart_width = if two_column { left_u16 } else { width };
         let credits = charts::credits_chart_lines(summary, chart_width, CHART_BODY);
@@ -102,16 +96,13 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // Per-tab v0.9 sections: SKILLS is Claude-only (attribution is a Claude
-    // log feature), MODES renders each provider's own dial. The Total tab
-    // shows neither — they are not cross-provider metrics.
+    // SKILLS and MODES stay off Total because attribution and dials are not
+    // cross-provider metrics.
     let skills = if summary.provider == Provider::Claude {
         sections::skill_lines(summary, if two_column { left_u16 } else { width }, 6)
     } else {
         Vec::new()
     };
-    // TIME (working time, context per minute) and CONTEXT (cache reuse)
-    // render on every tab, Total included — both add up across providers.
     let time = sections::time_lines(summary, if two_column { right_u16 } else { width });
     let context = sections::context_lines(summary, if two_column { right_u16 } else { width });
     let modes = if matches!(summary.provider, Provider::Claude | Provider::Codex) {
@@ -120,10 +111,6 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         Vec::new()
     };
 
-    // Section order (user decision 2026-09-13), read row by row in the
-    // two-column layout: MODELS | PARALLEL AGENTS, TURN LENGTH | WORKING TIME,
-    // SKILLS | CONTEXT, then MODES, PROJECTS, TOOLS, (SUBAGENTS), COST,
-    // SIGNAL. The narrow layout keeps that reading order in one column.
     if width < TWO_COLUMN_MIN_WIDTH {
         let mut blocks: Vec<Vec<Line<'static>>> = vec![
             sections::model_lines(summary, width),
@@ -148,11 +135,6 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
         return lines;
     }
 
-    // Pair sections column-wise so each row of sections starts on the same
-    // line in both columns. Left: MODELS, TURN LENGTH, (SKILLS), PROJECTS,
-    // TOOLS. Right: PARALLEL AGENTS, TIME, CONTEXT, MODES, (SUBAGENTS),
-    // COST, SIGNAL. Rows pair positionally — MODELS | PARALLEL, TURN LENGTH
-    // | TIME, SKILLS | CONTEXT on the Claude tab.
     let mut left_blocks = vec![sections::model_lines(summary, left_u16)];
     if summary.completion_duration.is_some() || summary.interrupted > 0 {
         left_blocks.push(sections::duration_lines(summary, left_u16));
@@ -188,8 +170,7 @@ pub(super) fn page_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
 
 /// Like `join_columns`, but aligns *section boundaries*: each (left, right)
 /// block pair is padded to the taller of the two before the next pair begins,
-/// so the second section in each column (PROJECTS / SIGNAL) starts on the same
-/// row even when the first sections differ in height.
+/// so subsequent pairs start on the same row even when block heights differ.
 fn join_section_columns(
     left_blocks: &[Vec<Line<'static>>],
     right_blocks: &[Vec<Line<'static>>],
@@ -209,8 +190,6 @@ fn join_section_columns(
     out
 }
 
-/// Zip two column line-lists into full-width lines: the left column is
-/// padded to `right_start`, then the right column's spans are appended.
 fn join_columns(
     left: &[Line<'static>],
     right: &[Line<'static>],
@@ -230,7 +209,6 @@ fn join_columns(
         .collect()
 }
 
-/// Left-pad each non-blank line so the block is centred within `width`.
 fn centre_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     lines
         .into_iter()
@@ -306,12 +284,6 @@ mod tests {
         summary
     }
 
-    /// SKILLS renders on the Claude tab only; LIMITS on the Codex tab only;
-    /// MODES on each provider tab; the Total tab shows none of them even when
-    /// the combined summary carries the data.
-    /// Wrapper-level frame pins: LIMITS and CREDITS render in the shared
-    /// column frame (7-char gutter + one char per window day) with their own
-    /// y-axis labels, and the canonical stat row keeps its exact shape.
     #[test]
     fn column_chart_wrappers_share_the_frame() {
         let text = |line: &ratatui::text::Line<'_>| -> String {
@@ -386,7 +358,6 @@ mod tests {
         assert!(!total.contains("CREDITS"));
     }
 
-    /// Narrow terminals stack the sections; the per-tab rules still hold.
     #[test]
     fn v09_sections_render_in_narrow_layout() {
         let claude = rendered(&v09_summary(Provider::Claude), 60);
@@ -398,12 +369,8 @@ mod tests {
         assert!(!codex.contains("SKILLS"));
     }
 
-    /// The demo (`AGENT_WALKER_DEMO=1`) must actually exercise the new
-    /// sections end-to-end: synthetic collections through the real analyzer
-    /// through the real page renderer. Guards against demo fixtures that
-    /// compile but never fire (e.g. a skill pick rate that rounds to zero).
-    /// The demo persona runs Claude and Codex only, so CREDITS (Copilot) is
-    /// covered by the fixture tests instead.
+    /// Exercise demo fixtures through the analyzer and renderer to catch
+    /// fixtures that compile but never fire, such as a pick rate rounding to zero.
     #[test]
     fn demo_report_renders_v09_sections() {
         let config = crate::app::Config {
@@ -447,9 +414,6 @@ mod tests {
         assert!(!total_page.contains("CREDITS"));
     }
 
-    /// The demo persona runs Claude and Codex only, so CREDITS (Copilot) is
-    /// exercised here through its own synthetic collection — still the real
-    /// analyzer and the real page renderer.
     #[test]
     fn copilot_collection_renders_credits_end_to_end() {
         let now = time::OffsetDateTime::now_utc();
@@ -459,17 +423,12 @@ mod tests {
         assert!(page.contains("CREDITS"));
         assert!(page.contains("30d total"));
         assert!(page.contains("TURN LENGTH"));
-        // Same reading order as the wide layout's rows: MODELS, then
-        // TURN LENGTH, then WORKING TIME, then CONTEXT.
         let at = |title: &str| page.find(title).expect(title);
         assert!(at("▍ MODELS") < at("▍ TURN LENGTH"), "{page}");
         assert!(at("▍ TURN LENGTH") < at("▍ WORKING TIME"), "{page}");
         assert!(at("▍ WORKING TIME") < at("▍ CONTEXT"), "{page}");
     }
 
-    /// Right-column order: the "how you drive it" panels lead (CONTEXT next
-    /// to MODELS, then MODES) and the bookkeeping panels close (COST, then
-    /// SIGNAL).
     #[test]
     fn rows_pair_turn_length_with_working_time_and_skills_with_context() {
         let text = rendered(&v09_summary(Provider::Claude), 120);
@@ -488,7 +447,6 @@ mod tests {
         assert!(at("▍ MODES") < at("▍ COST"));
         assert!(at("▍ COST") < at("▍ SIGNAL"));
 
-        // Without MODES (Total / other providers) COST still precedes SIGNAL.
         let mut total = v09_summary(Provider::Combined);
         total.modes = ModesSummary::default();
         let text = rendered(&total, 120);

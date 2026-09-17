@@ -1,21 +1,6 @@
-//! Codename: a playful vanity title derived from a usage `Summary`.
-//!
-//! Shown as `[OPS] [ANIMAL]`, e.g. "Eclipse Puma". The title is earned on a
-//! single absolute axis — token throughput over the most recent 30 days — so
-//! it needs no accounts and no population data. RANK is the letter tier (SS at
-//! the top, then S/A/B/C/D/E; below E is unranked); STEP is the position
-//! inside the rank's token band, and each step is one animal. The 24 animals
-//! form one ladder from Ant (the unranked floor) to Lion (the final SS step):
-//! keep using your agents and you pass through every animal on the way up.
-//! OPS is the dominant time-of-day prefix.
-//!
+//! Absolute token throughput needs no accounts or population data.
 //! Steps subdivide their rank's band on a log scale, so progress feels even
-//! within a rank. Higher ranks hold more steps (4 at the top, 1 at the floor),
-//! so the climb gets longer as the air gets thinner. SS has no hard upper
-//! edge; the band is anchored so its final step (Lion) begins at
-//! [`SS_LION_MIN`] — 1B tokens/day, 30B over the 30-day window — and anything
-//! past the extrapolated edge clamps to Lion.
-//!
+//! within a rank. More steps in higher ranks make the climb longer.
 //! The exact thresholds live in the one block below, are easy to retune, and
 //! are never surfaced in the UI — only the rank and the title are — so the
 //! formula stays opaque even though the source is public.
@@ -29,8 +14,6 @@
 
 use crate::model::Summary;
 
-/// Letter tier of the ladder. `Unranked` is everything below the E band (or a
-/// sample too thin to rank) — always shown as the floor animal with no letter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rank {
     SS,
@@ -44,7 +27,6 @@ pub enum Rank {
 }
 
 impl Rank {
-    /// Display letters; `None` for unranked (surfaces draw no rank badge).
     pub fn letters(self) -> Option<&'static str> {
         match self {
             Rank::SS => Some("SS"),
@@ -58,12 +40,6 @@ impl Rank {
         }
     }
 
-    /// Canonical rank colour as RGB, following the 冠位十二階 ladder (603 AD —
-    /// the oldest colour-coded rank system): deep purple at the top, then pale
-    /// purple / blue / red / yellow / white down to ink-black, with hues
-    /// lifted for the dark card. `None` for unranked. Renderers must go
-    /// through [`Self::display_rgb`] instead — the raw ink-black E sinks on
-    /// the dark surfaces.
     pub fn color_rgb(self) -> Option<(u8, u8, u8)> {
         match self {
             Rank::SS => Some((0xa6, 0x78, 0xf0)), // 濃紫 (大徳)
@@ -90,33 +66,18 @@ impl Rank {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Codename {
-    /// Time-of-day word: "Aurora" / "Sol" / "Luna" / "Eclipse".
     pub ops: &'static str,
-    /// Ladder animal; `FLOOR_ANIMAL` ("Ant") when unranked. The animal already
-    /// encodes the step inside the rank, so surfaces show only rank letters —
-    /// never a step counter.
+    /// The animal already encodes the step, so surfaces show rank letters without a step counter.
     pub animal: &'static str,
-    /// Letter tier.
     pub rank: Rank,
 }
 
 impl Codename {
-    /// The displayed title, always `"<OPS> <animal>"`.
     pub fn title(&self) -> String {
         format!("{} {}", self.ops, self.animal)
     }
 }
 
-// ===== Tunable thresholds — single source of truth =========================
-// One axis only: tokens/day over the window. All numbers are provisional and
-// meant to be recalibrated against real-world reports. Retune here only.
-
-/// The ladder, top rank first: minimum tokens/day over the window, plus the
-/// rank's animals as ascending steps toward the next rank. Steps split the
-/// band log-uniformly, so each step is the same *ratio* of growth. Every
-/// animal is a milestone on one climb — all 24 are reachable.
-/// (Monthly equivalents: SS ≥22.5B, S ≥12B, A ≥6.6B, B ≥3.6B, C ≥1.35B,
-/// D ≥360M, E ≥90M — these ÷30.)
 const LADDER: [(Rank, f64, &[&str]); 7] = [
     (Rank::SS, 750_000_000.0, &["Orca", "Hawk", "Puma", "Lion"]),
     (Rank::S, 400_000_000.0, &["Whale", "Raven", "Bear", "Wolf"]),
@@ -131,27 +92,16 @@ const LADDER: [(Rank, f64, &[&str]); 7] = [
     (Rank::E, 3_000_000.0, &["Firefly", "Butterfly"]),
 ];
 
-/// Tokens/day where the top SS step (Lion) begins — 30B over the 30-day
-/// window. Retuned 2026-07-13: the old band-ratio extrapolation put Lion near
-/// 5B/day (148B monthly), which no real operator could reach.
 const SS_LION_MIN: f64 = 1_000_000_000.0;
 
-/// The floor below the ladder — the unranked animal.
 const FLOOR_ANIMAL: &str = "Ant";
 
-/// Under this many active days in the window the sample is too thin to rank.
 const FLOOR_MIN_DAYS: usize = 3;
 
-/// OPS is decided when the top time-band leads the second by this many points;
-/// otherwise the day is "mixed" → Eclipse.
 const OPS_DOMINANCE_PT: f64 = 15.0;
-
-// ===========================================================================
 
 /// Public entry: derive the codename for a summary. Computed on demand at
 /// display time, never stored, so the analyzer stays free of vanity logic.
-/// Every summary ranks on its own volume — a provider tab shows the rank that
-/// tab's throughput earns by itself.
 pub fn for_summary(summary: &Summary) -> Codename {
     let ops = ops(&summary.hourly_usage);
     let tokens_per_day =
@@ -184,7 +134,6 @@ pub fn for_summary(summary: &Summary) -> Codename {
     }
 }
 
-/// Every ladder animal, floor first — badge assets must cover exactly this set.
 #[cfg(test)]
 pub(crate) fn all_animals() -> impl Iterator<Item = &'static str> {
     std::iter::once(FLOOR_ANIMAL).chain(
@@ -203,10 +152,6 @@ fn unranked(ops: &'static str) -> Codename {
     }
 }
 
-/// Upper edge of the band at `position`. The top band (SS) is open-ended, so
-/// it is anchored to [`SS_LION_MIN`]: the log-uniform step ratio is chosen so
-/// the last step (Lion) begins exactly there, and the ceiling sits one step
-/// above it.
 fn band_ceiling(position: usize) -> f64 {
     if position == 0 {
         let (_, min, animals) = LADDER[0];
@@ -221,8 +166,6 @@ fn band_ceiling(position: usize) -> f64 {
     }
 }
 
-/// 0-based step inside `[band_min, band_max)` split log-uniformly into
-/// `steps` parts; values past the top edge clamp to the last step.
 fn step_index(tokens_per_day: f64, band_min: f64, band_max: f64, steps: usize) -> usize {
     debug_assert!(steps > 0, "every rank band must hold at least one animal");
     let position = (tokens_per_day / band_min).ln() / (band_max / band_min).ln();
@@ -230,7 +173,6 @@ fn step_index(tokens_per_day: f64, band_min: f64, band_max: f64, steps: usize) -
     index.min(steps - 1)
 }
 
-/// Dominant time-of-day word from the hourly token histogram.
 fn ops(hourly: &[u64; 24]) -> &'static str {
     let mut aurora = 0u64; // 05–10
     let mut sol = 0u64; // 11–17
@@ -263,8 +205,6 @@ fn ops(hourly: &[u64; 24]) -> &'static str {
 mod tests {
     use super::*;
 
-    /// A summary with the given tokens/day over the codename window and a
-    /// healthy number of active days.
     fn summary_at(tokens_per_day: u64) -> Summary {
         let mut summary = crate::share::fixtures::sample_summary();
         summary.recent_window_volume = tokens_per_day * u64::from(summary.period_days);
@@ -313,8 +253,6 @@ mod tests {
 
     #[test]
     fn steps_advance_log_uniformly_within_a_band() {
-        // B band = 120M..220M with 4 steps; log-uniform boundaries land near
-        // 140M / 163M / 189M.
         assert_eq!(codename_at(130_000_000).animal, "Eel");
         let swallow = codename_at(150_000_000);
         assert_eq!(swallow.animal, "Swallow");
@@ -325,24 +263,18 @@ mod tests {
 
     #[test]
     fn ss_band_is_anchored_so_lion_begins_at_1b_per_day() {
-        // SS is anchored to SS_LION_MIN (1B/day = 30B per 30-day window):
-        // 750M / ~825M / ~909M / 1B.
         assert_eq!(codename_at(800_000_000).animal, "Orca");
         assert_eq!(codename_at(850_000_000).animal, "Hawk");
         assert_eq!(codename_at(950_000_000).animal, "Puma");
-        // The anchor is inclusive: exactly on it is Lion, one below is not.
         assert_eq!(codename_at(999_999_999).animal, "Puma");
         let lion = codename_at(1_000_000_000);
         assert_eq!(lion.animal, "Lion");
         assert_eq!(lion.rank, Rank::SS);
-        // Past the extrapolated edge the top step holds — Lion is the summit.
         assert_eq!(codename_at(100_000_000_000).animal, "Lion");
     }
 
     #[test]
     fn every_animal_is_reachable() {
-        // 全名回収: sweep the volume axis and confirm the ladder passes through
-        // all 24 animals — no dead cells.
         let mut reached: Vec<&str> = vec![codename_at(1_000_000).animal];
         let mut tokens_per_day = 3_000_000_f64;
         while tokens_per_day < 20_000_000_000.0 {
@@ -359,8 +291,6 @@ mod tests {
 
     #[test]
     fn tabs_rank_on_their_own_volume() {
-        // No whole-person style inheritance anymore: a provider tab earns the
-        // rank its own throughput clears.
         let combined = summary_at(800_000_000);
         let mut tab = combined.clone();
         tab.provider = crate::model::Provider::Claude;

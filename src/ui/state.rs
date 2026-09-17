@@ -15,9 +15,7 @@ pub(super) struct UiState {
     /// Scroll offset for the sections area (alt-screen TUIs have no terminal
     /// scrollback, so overflow must scroll in-app).
     pub(super) scroll: u16,
-    /// Largest valid scroll offset, measured during the last draw.
     pub(super) max_scroll: Cell<u16>,
-    /// Present when the share modal is open.
     pub(super) share: Option<ShareModal>,
 }
 

@@ -1,13 +1,9 @@
-//! CREDITS panel data: daily AI-credit spend from Copilot's nano-AIU ledger.
 use std::collections::BTreeMap;
 
 use time::{Date, Duration, UtcOffset};
 
 use crate::model::{Collection, CreditsHistory};
 
-/// Daily AI-credit spend over the analysis window: the sum of Copilot's
-/// `totalNanoAiu` deltas per local day, in credits (1e9 nano-AIU). `None`
-/// when the provider records no credit samples at all.
 #[allow(
     clippy::cast_precision_loss,
     reason = "Credits are a display quantity; nano-AIU never approaches 2^52."
