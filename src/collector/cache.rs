@@ -60,6 +60,7 @@ fn cache_file(dir: &Path, cache_name: &str) -> PathBuf {
 }
 
 const ORPHAN_TEMP_AGE: Duration = Duration::from_hours(1);
+const OLD_EXPORT_AGE: Duration = Duration::from_hours(24);
 
 pub fn sweep_cache_dir() {
     if let Ok(dir) = crate::paths::cache_dir() {
@@ -85,16 +86,26 @@ fn sweep(dir: &Path, now: SystemTime) {
             .or_else(|| name.strip_suffix(".tmp"))
             .and_then(|stem| stem.rsplit_once("-v"))
             .is_some_and(|(_, version)| all_digits(version));
-        let orphan_temp = name
-            .rsplit_once(".tmp")
-            .is_some_and(|(_, pid)| all_digits(pid))
-            && entry
+        let age = || {
+            entry
                 .metadata()
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age > ORPHAN_TEMP_AGE);
-        if legacy || orphan_temp {
+        };
+        let orphan_temp = name
+            .rsplit_once(".tmp")
+            .is_some_and(|(_, pid)| all_digits(pid))
+            && age().is_some_and(|age| age > ORPHAN_TEMP_AGE);
+        // Cursor exports outlive their usefulness after a day (see
+        // `cursor::CSV_STALE_FOR`); an account switch would otherwise leave
+        // the old account's usage on disk for good.
+        let old_export = name
+            .strip_prefix("cursor-")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(_, ext)| matches!(ext, "csv" | "failed"))
+            && age().is_some_and(|age| age > OLD_EXPORT_AGE);
+        if legacy || orphan_temp || old_export {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -121,7 +132,7 @@ fn load_cache(path: &Path, offset_seconds: i32) -> Option<CacheFile> {
 /// The cache holds project paths and session ids derived from the logs, so
 /// it is written owner-only where the platform can express that.
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     fs::OpenOptions::new()
@@ -136,7 +147,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
@@ -265,6 +276,8 @@ mod tests {
             "codex-v20.bin",
             "claude.tmp111",
             "claude.tmp222",
+            "cursor-aa.csv",
+            "cursor-bb.csv",
             "claude.bin",
             "claude-vx.bin",
             "pricing.json",
@@ -278,6 +291,12 @@ mod tests {
             .unwrap()
             .set_modified(now - ORPHAN_TEMP_AGE * 2)
             .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("cursor-bb.csv"))
+            .unwrap()
+            .set_modified(now - OLD_EXPORT_AGE * 2)
+            .unwrap();
         sweep(dir.path(), now);
         let mut left: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
@@ -290,6 +309,7 @@ mod tests {
                 "claude-vx.bin",
                 "claude.bin",
                 "claude.tmp111",
+                "cursor-aa.csv",
                 "pricing.json"
             ]
         );

@@ -13,6 +13,7 @@ mod merge;
 mod project;
 mod walk;
 
+pub(crate) use cache::write_private;
 pub use cache::{parse_files_cached, sweep_cache_dir};
 pub use events::{
     FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent,

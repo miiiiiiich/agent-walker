@@ -123,6 +123,7 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                         &cursor.cli_config,
                         cursor.token.as_deref(),
                         mtime_floor,
+                        config.use_cache,
                         config.local_offset,
                     )
                 })

@@ -1,5 +1,7 @@
+use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine;
@@ -27,6 +29,7 @@ pub fn collect(
     cli_config: &Path,
     token_override: Option<&str>,
     mtime_floor: Option<SystemTime>,
+    use_cache: bool,
     local_offset: UtcOffset,
 ) -> Collection {
     let mut collection = Collection::new(Provider::Cursor, state_db.to_path_buf());
@@ -64,7 +67,14 @@ pub fn collect(
     // Auth expiry, a network failure, or an endpoint change all land here;
     // surface it as an unreadable source rather than a panic, and log the reason
     // since this is an undocumented endpoint that's hard to debug blind.
-    let csv = match fetch_csv(&cookie) {
+    let cache = use_cache
+        .then(|| crate::paths::cache_dir().ok())
+        .flatten()
+        .map(|dir| CsvCache::new(&dir, &user_id, &jwt));
+    let csv = match cache.as_ref().map_or_else(
+        || fetch_csv(&cookie),
+        |cache| cache.csv(SystemTime::now(), || fetch_csv(&cookie)),
+    ) {
         Ok(csv) => csv,
         Err(reason) => {
             debug!("cursor: usage fetch failed: {reason}");
@@ -165,6 +175,91 @@ fn is_safe_subject_part(part: &str) -> bool {
 }
 
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The dashboard answers in a quarter of a second even to refuse, which
+/// would put every start-up behind the network. Keep the last export per
+/// account for a while, and after a failure do not knock again right away.
+const CSV_FRESH_FOR: Duration = Duration::from_mins(10);
+const RETRY_AFTER: Duration = Duration::from_mins(5);
+/// How old an export may be and still stand in for a failed fetch.
+const CSV_STALE_FOR: Duration = Duration::from_hours(24);
+
+struct CsvCache {
+    csv: PathBuf,
+    failed: PathBuf,
+}
+
+impl CsvCache {
+    /// The export is keyed by account; the failure marker also by token, so
+    /// signing in again (a new token) is tried at once instead of waiting
+    /// out a backoff earned by the old one.
+    fn new(dir: &Path, user_id: &str, jwt: &str) -> Self {
+        // Account id and token are credential fragments; only hashes name files.
+        let hash = |parts: &[&str]| {
+            let mut hasher = DefaultHasher::new();
+            parts.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        };
+        Self {
+            csv: dir.join(format!("cursor-{}.csv", hash(&[user_id]))),
+            failed: dir.join(format!("cursor-{}.failed", hash(&[user_id, jwt]))),
+        }
+    }
+
+    fn age(path: &Path, now: SystemTime) -> Option<Duration> {
+        let modified = fs::metadata(path).ok()?.modified().ok()?;
+        // A file stamped after `now` (clock skew) counts as brand new.
+        Some(now.duration_since(modified).unwrap_or(Duration::ZERO))
+    }
+
+    /// A fresh export is used as is. Otherwise fetch — unless the last
+    /// attempt failed recently — and keep the result; a failed fetch falls
+    /// back to the stale export, if any.
+    fn csv(
+        &self,
+        now: SystemTime,
+        fetch: impl FnOnce() -> Result<String, String>,
+    ) -> Result<String, String> {
+        if Self::age(&self.csv, now).is_some_and(|age| age < CSV_FRESH_FOR)
+            && let Ok(csv) = fs::read_to_string(&self.csv)
+        {
+            return Ok(csv);
+        }
+        let stale = || {
+            Self::age(&self.csv, now)
+                .filter(|age| *age < CSV_STALE_FOR)
+                .and_then(|_| fs::read_to_string(&self.csv).ok())
+        };
+        if Self::age(&self.failed, now).is_some_and(|age| age < RETRY_AFTER) {
+            return stale()
+                .ok_or_else(|| "usage fetch failed recently; not retrying yet".to_owned());
+        }
+        match fetch() {
+            Ok(csv) => {
+                let _ = fs::create_dir_all(self.csv.parent().unwrap_or(Path::new(".")));
+                let temp = self
+                    .csv
+                    .with_extension(format!("tmp{}", std::process::id()));
+                if crate::collector::write_private(&temp, csv.as_bytes()).is_ok() {
+                    let _ = fs::rename(&temp, &self.csv);
+                }
+                let _ = fs::remove_file(&self.failed);
+                Ok(csv)
+            }
+            Err(reason) => {
+                let _ = fs::create_dir_all(self.failed.parent().unwrap_or(Path::new(".")));
+                let _ = crate::collector::write_private(&self.failed, b"");
+                match stale() {
+                    Some(csv) => {
+                        debug!("cursor: usage fetch failed: {reason}; serving the last export");
+                        Ok(csv)
+                    }
+                    None => Err(reason),
+                }
+            }
+        }
+    }
+}
 
 fn fetch_csv(cookie: &str) -> Result<String, String> {
     fetch_csv_from(CSV_URL, cookie)
@@ -621,5 +716,92 @@ mod tests {
         );
         let error = fetch_csv_from(&url, "x").unwrap_err();
         assert!(error.contains("session expired"), "{error}");
+    }
+
+    fn aged(path: &Path, now: SystemTime, age: Duration) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(now - age)
+            .unwrap();
+    }
+
+    /// A fresh export is served without a fetch; a stale one is refetched
+    /// and rewritten.
+    #[test]
+    fn fresh_export_skips_the_fetch() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CsvCache::new(dir.path(), "user_1", "jwt");
+        let now = SystemTime::now();
+        fs::write(&cache.csv, "old").unwrap();
+        aged(&cache.csv, now, CSV_FRESH_FOR / 2);
+        let fetched = Cell::new(0);
+        let got = cache.csv(now, || {
+            fetched.set(fetched.get() + 1);
+            Ok("new".to_owned())
+        });
+        assert_eq!((got.as_deref(), fetched.get()), (Ok("old"), 0));
+
+        aged(&cache.csv, now, CSV_FRESH_FOR * 2);
+        let got = cache.csv(now, || {
+            fetched.set(fetched.get() + 1);
+            Ok("new".to_owned())
+        });
+        assert_eq!((got.as_deref(), fetched.get()), (Ok("new"), 1));
+        assert_eq!(fs::read_to_string(&cache.csv).unwrap(), "new");
+    }
+
+    /// A failed fetch falls back to the stale export and is not retried
+    /// until the backoff passes; with nothing stored it is an error.
+    #[test]
+    fn failed_fetch_backs_off_and_uses_the_stale_export() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CsvCache::new(dir.path(), "user_1", "jwt");
+        let now = SystemTime::now();
+        let fetched = Cell::new(0);
+        let fail = || {
+            fetched.set(fetched.get() + 1);
+            Err("HTTP 307".to_owned())
+        };
+        assert!(cache.csv(now, fail).is_err());
+        assert!(cache.failed.exists());
+        aged(&cache.failed, now, RETRY_AFTER / 2);
+        assert!(
+            cache.csv(now, fail).is_err(),
+            "no stale export to fall back to"
+        );
+        assert_eq!(
+            fetched.get(),
+            1,
+            "second attempt is skipped during the backoff"
+        );
+
+        fs::write(&cache.csv, "stale").unwrap();
+        aged(&cache.csv, now, CSV_FRESH_FOR * 2);
+        assert_eq!(cache.csv(now, fail).as_deref(), Ok("stale"));
+        assert_eq!(fetched.get(), 1, "stale export served without a fetch");
+        aged(&cache.failed, now, RETRY_AFTER * 2);
+        assert_eq!(cache.csv(now, fail).as_deref(), Ok("stale"));
+        assert_eq!(fetched.get(), 2, "retried once the backoff passed");
+
+        aged(&cache.csv, now, CSV_STALE_FOR * 2);
+        aged(&cache.failed, now, RETRY_AFTER * 2);
+        assert!(cache.csv(now, fail).is_err(), "too old to stand in");
+    }
+
+    #[test]
+    fn cache_files_are_named_by_a_hash_of_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = CsvCache::new(dir.path(), "google-oauth2|123", "jwt-a");
+        let b = CsvCache::new(dir.path(), "user_456", "jwt-b");
+        let a2 = CsvCache::new(dir.path(), "google-oauth2|123", "jwt-c");
+        assert_ne!(a.csv, b.csv);
+        assert_eq!(a.csv, a2.csv, "export shared across the account's tokens");
+        assert_ne!(a.failed, a2.failed, "a new token gets a fresh try");
+        assert!(!a.csv.to_string_lossy().contains("123"));
+        assert!(!a.failed.to_string_lossy().contains("jwt"));
     }
 }

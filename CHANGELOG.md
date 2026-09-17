@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor's usage export is reused for a few minutes between runs, and shown
+  as-is for a day when a fetch fails, so start-up no longer waits on
+  cursor.com every time.
+
 ### Fixed
 
 - Cursor is auto-detected again, as it was before 0.18.0. `--cursor` is gone.
