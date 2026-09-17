@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
+use rayon::prelude::*;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
@@ -261,19 +262,25 @@ fn load_report_inner(
     // Join the pricing refresh so every summary below prices the same way.
     let _ = pricing_refresh.join();
 
-    let providers = collections
-        .iter()
-        .map(|collection| summarize(collection, now, days, config.local_offset))
-        .collect::<Vec<_>>();
-    let combined = finish_combined(
-        summarize(
-            &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
-            now,
-            days,
-            config.local_offset,
-        ),
-        &providers,
+    // The per-provider summaries and the combined one are independent, and
+    // together they are the only work left once every collector is back.
+    let (providers, combined) = rayon::join(
+        || {
+            collections
+                .par_iter()
+                .map(|collection| summarize(collection, now, days, config.local_offset))
+                .collect::<Vec<_>>()
+        },
+        || {
+            summarize(
+                &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
+                now,
+                days,
+                config.local_offset,
+            )
+        },
     );
+    let combined = finish_combined(combined, &providers);
 
     Ok((
         AppSummary {
