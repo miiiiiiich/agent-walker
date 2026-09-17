@@ -4,8 +4,8 @@
 
 `~/.grok/sessions/<encoded-cwd>/<session-id>/updates.jsonl` — one directory
 per session, written by Grok Build (xAI's agentic CLI, OSS at
-`xai-org/grok-build`). The root is overridable with `GROK_HOME` or
-`--grok-dir`. Auto-detected: the Grok tab appears only when session logs
+`xai-org/grok-build`). The root is overridable with `GROK_HOME`.
+Auto-detected: the Grok tab appears only when session logs
 exist. Everything is read locally; nothing leaves the machine.
 
 ## What's captured

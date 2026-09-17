@@ -51,13 +51,13 @@ Your rank and animal change with token volume. The colour changes with the hours
 
 ## Supported agents
 
-Claude Code / Codex CLI / OpenCode / Cursor / GitHub Copilot CLI / Grok Build / Antigravity. All auto-detected.
+Claude Code / Codex CLI / OpenCode / GitHub Copilot CLI / Grok Build / Antigravity, all auto-detected. Cursor with `--cursor`.
 
 Each one has a page on what is read and how: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Cursor](docs/cursor.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
 
 ## Privacy
 
-agent-walker sends your logs nowhere. The only network use is fetching the price table (kept for the day once it lands), and fetching Cursor's usage when you're signed in.
+agent-walker sends your logs nowhere. The only network use is fetching the price table (kept for the day once it lands), and Cursor's usage when you pass `--cursor`.
 
 ## Keys
 
@@ -76,11 +76,8 @@ agent-walker sends your logs nowhere. The only network use is fetching the price
 | `--share <path>` | write the share image to a PNG and exit |
 | `--json` | export the summary and dated events as JSON (experimental) |
 | `--days <N>` (with `--json` only) | window in days (default 30); TUI stays at 30 |
+| `--cursor` | read Cursor's usage from its dashboard (sends your Cursor session cookie to cursor.com; off by default) |
 | `--no-cache` | reread every log |
-| `--no-cursor` | skip Cursor (no network at all) |
-| `--claude-dir` / `--codex-dir` / `--agy-dir` / `--opencode-dir` / `--copilot-dir` / `--grok-dir` | where the logs are |
-| `--cursor-state-db` | Cursor's `state.vscdb` |
-| `--completions <shell>` | print shell completions |
 
 </details>
 

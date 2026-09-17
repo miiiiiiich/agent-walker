@@ -7,7 +7,7 @@ use agent_walker::{Args, run};
 fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(args.verbose);
-    run(args)
+    run(&args)
 }
 
 fn init_tracing(verbose: bool) {
