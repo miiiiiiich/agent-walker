@@ -7,21 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-17
+
 ### Removed
 
-- The log-directory overrides and `--completions`: `--help` is down to five
-  flags. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `GROK_HOME` and
-  `OPENCODE_HOME` still relocate the logs the tools themselves relocate.
+- Most command-line flags. `--help` is down to five; logs are read from
+  wherever each tool keeps them.
 
 ### Changed
 
-- Cursor is opt-in: pass `--cursor` to read its usage, otherwise nothing is
-  sent to cursor.com. `--no-cursor` is gone.
-- The TUI redraws only on a key or a resize, instead of rebuilding every
-  section four times a second while idle.
-- HTTP client moved to ureq 3. Same hosts and headers (names now lowercase
-  on the wire), no proxy from the environment, and redirects from the
-  Cursor endpoint are still refused rather than followed.
+- Cursor is opt-in: pass `--cursor` to read its usage.
+- The TUI no longer redraws while idle.
+- README trimmed to match.
 
 ## [0.17.0] - 2026-09-16
 
@@ -475,6 +472,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.18.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.14.0...v0.15.0
