@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.18.1] - 2026-09-17
+## [0.18.1] - 2026-09-18
+
+### Changed
+
+- Per-provider and total summaries are computed in parallel once the logs
+  are read, taking a little off start-up.
 
 ### Fixed
 
