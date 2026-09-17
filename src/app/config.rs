@@ -20,13 +20,6 @@ use time::UtcOffset;
     reason = "Each bool is an independent CLI flag, not a state machine."
 )]
 pub struct Args {
-    /// Read Cursor's usage from its dashboard. This is the one request that
-    /// carries a credential (your local Cursor session cookie, sent to
-    /// cursor.com), so it is off unless asked for. `CURSOR_TOKEN` supplies
-    /// the session JWT directly.
-    #[arg(long)]
-    pub cursor: bool,
-
     /// Ignore the per-file parse cache and rescan everything.
     #[arg(long)]
     pub no_cache: bool,
@@ -114,12 +107,7 @@ pub(super) fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
 }
 
-pub(super) fn cursor_config(args: &Args) -> Option<CursorConfig> {
-    // Checked first so a run without `--cursor` reads neither `CURSOR_TOKEN`
-    // nor the store.
-    if !args.cursor {
-        return None;
-    }
+pub(super) fn cursor_config() -> Option<CursorConfig> {
     let token = env::var("CURSOR_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
@@ -170,20 +158,6 @@ mod tests {
         }
     }
 
-    /// Cursor is the one collector that sends a credential, so it is opt-in:
-    /// without the flag no Cursor config exists, whatever the environment holds.
-    #[test]
-    fn cursor_is_off_unless_asked() {
-        let args = Args::try_parse_from(["agent-walker"]).unwrap();
-        assert!(!args.cursor);
-        assert!(cursor_config(&args).is_none());
-        assert!(
-            Args::try_parse_from(["agent-walker", "--cursor"])
-                .unwrap()
-                .cursor
-        );
-    }
-
     #[test]
     fn removed_flags_are_rejected() {
         for gone in [
@@ -191,6 +165,7 @@ mod tests {
             "--claude-dir=x",
             "--cursor-state-db=x",
             "--no-cursor",
+            "--cursor",
         ] {
             assert!(
                 Args::try_parse_from(["agent-walker", gone]).is_err(),

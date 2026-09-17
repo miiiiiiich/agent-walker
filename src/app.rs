@@ -21,7 +21,7 @@ pub fn run(args: &Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let cursor = cursor_config(args);
+    let cursor = cursor_config();
     let config = Config {
         demo: demo_enabled(),
         claude_dir: default_claude_dir()?,
@@ -114,8 +114,8 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                     config.local_offset,
                 )
             });
-            // Cursor (opt-in via --cursor) is the only collector that hits the
-            // network, so it runs in its own thread alongside the local ones.
+            // Cursor is the only collector that hits the network, so it runs in
+            // its own thread alongside the local ones.
             let cursor_handle = scope.spawn(|| {
                 config.cursor.as_ref().map(|cursor| {
                     cursor::collect(

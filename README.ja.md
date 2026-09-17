@@ -51,13 +51,13 @@ bunx agent-walker
 
 ## 対応エージェント
 
-Claude Code / Codex CLI / OpenCode / GitHub Copilot CLI / Grok Build / Antigravity は自動検出。Cursor は `--cursor` を付けたときだけ。
+Claude Code / Codex CLI / OpenCode / Cursor / GitHub Copilot CLI / Grok Build / Antigravity。全部自動検出です。
 
 エージェントごとに、何をどう読んでいるかのドキュメントがあります: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Cursor](docs/cursor.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
 
 ## プライバシー
 
-agent-walker はログをどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得（取れたらその日は再利用）と、`--cursor` を付けたときの Cursor の利用状況の取得だけです。
+agent-walker はログをどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得（取れたらその日は再利用）と、Cursor にサインインしているときの利用状況の取得だけです。
 
 ## 操作
 
@@ -76,7 +76,6 @@ agent-walker はログをどこのサーバーにも送りません。ネット�
 | `--share <path>` | share 画像を PNG に書き出して終了 |
 | `--json` | 集計と日時付きイベントを JSON に出力（試験的） |
 | `--days <N>`（`--json` のみ） | 集計日数（既定 30）。TUI は 30 日固定 |
-| `--cursor` | Cursor の利用状況を dashboard から取る（Cursor のセッション cookie を cursor.com に送る。既定はオフ） |
 | `--no-cache` | ログを全部読み直す |
 
 </details>

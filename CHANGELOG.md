@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Cursor is auto-detected again, as it was before 0.18.0. `--cursor` is gone.
+
 ## [0.18.0] - 2026-09-17
 
 ### Removed

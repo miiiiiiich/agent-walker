@@ -24,9 +24,9 @@ aggregate statistics.
      agent-walker reads your local Cursor session cookie and sends it to
      `cursor.com` to fetch *your own* usage figures — the same request the
      dashboard makes. This is the one collector that transmits a credential off
-     the machine, so it runs only when you pass `--cursor` (and are signed
-     in) — the only egress that carries a credential is opt-in (the anonymous
-     LiteLLM pricing fetch above still runs). The cookie goes
+     the machine. It runs when you're signed into Cursor locally and is
+     skipped when you're signed out (the anonymous LiteLLM pricing fetch
+     above still runs either way). The cookie goes
      only to `cursor.com` (redirects are not followed) and is never written to
      disk, logs, or the shareable card.
 - Log lines and usage records are treated as untrusted input: malformed data is
