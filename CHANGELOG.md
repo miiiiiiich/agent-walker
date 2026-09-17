@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Start-up no longer waits on Cursor before doing everything else: the
+  other providers are read and summarized while cursor.com answers.
+
 ### Fixed
 
 - Cursor is auto-detected again, as it was before 0.18.0. `--cursor` is gone.

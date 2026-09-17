@@ -96,15 +96,7 @@ fn load_report_with_collections(
 }
 
 fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<Collection>> {
-    let (
-        codex_result,
-        agy_result,
-        opencode_result,
-        copilot_result,
-        grok_result,
-        cursor_result,
-        claude_collection,
-    ) =
+    let (codex_result, agy_result, opencode_result, copilot_result, grok_result, claude_collection) =
         std::thread::scope(|scope| {
             let codex_handle = scope.spawn(|| {
                 codex::collect(
@@ -113,19 +105,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                     config.use_cache,
                     config.local_offset,
                 )
-            });
-            // Cursor is the only collector that hits the network, so it runs in
-            // its own thread alongside the local ones.
-            let cursor_handle = scope.spawn(|| {
-                config.cursor.as_ref().map(|cursor| {
-                    cursor::collect(
-                        &cursor.state_db,
-                        &cursor.cli_config,
-                        cursor.token.as_deref(),
-                        mtime_floor,
-                        config.local_offset,
-                    )
-                })
             });
             let agy_handle = scope.spawn(|| {
                 config.agy_dir.as_ref().map(|dir| {
@@ -159,7 +138,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                 opencode_handle.join(),
                 copilot_handle.join(),
                 grok_handle.join(),
-                cursor_handle.join(),
                 claude_collection,
             )
         });
@@ -179,9 +157,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
     }
     if let Some(gk) = grok_result.map_err(|_| anyhow!("Grok collector thread panicked"))? {
         collections.push(gk);
-    }
-    if let Some(cursor) = cursor_result.map_err(|_| anyhow!("Cursor collector thread panicked"))? {
-        collections.push(cursor);
     }
     Ok(collections)
 }
@@ -257,23 +232,63 @@ fn load_report_inner(
     if config.use_cache {
         crate::collector::sweep_cache_dir();
     }
-    let collections = collect_all(config, mtime_floor)?;
-    // Join the pricing refresh so every summary below prices the same way.
-    let _ = pricing_refresh.join();
+    // Cursor is the only collector that hits the network, and its round-trip
+    // is longer than everything else together. Everything that does not need
+    // its rows — the other collectors, their summaries, the combined event
+    // list — runs while the request is in flight; only the combined summary
+    // waits for it.
+    let (providers, combined, collections) = std::thread::scope(|scope| {
+        let cursor_handle = config.cursor.as_ref().map(|cursor| {
+            scope.spawn(move || {
+                cursor::collect(
+                    &cursor.state_db,
+                    &cursor.cli_config,
+                    cursor.token.as_deref(),
+                    mtime_floor,
+                    config.local_offset,
+                )
+            })
+        });
+        let mut collections = match collect_all(config, mtime_floor) {
+            Ok(collections) => collections,
+            Err(error) => {
+                // Join Cursor here rather than letting the scope do it: a
+                // Cursor panic on this path would replace the error we have.
+                if let Some(handle) = cursor_handle {
+                    let _ = handle.join();
+                }
+                return Err(error);
+            }
+        };
+        // Join the pricing refresh so every summary below prices the same way.
+        let _ = pricing_refresh.join();
 
-    let providers = collections
-        .iter()
-        .map(|collection| summarize(collection, now, days, config.local_offset))
-        .collect::<Vec<_>>();
-    let combined = finish_combined(
-        summarize(
-            &Collection::combined(PathBuf::from("combined local agent logs"), &collections),
-            now,
-            days,
-            config.local_offset,
-        ),
-        &providers,
-    );
+        let mut providers = collections
+            .iter()
+            .map(|collection| summarize(collection, now, days, config.local_offset))
+            .collect::<Vec<_>>();
+        let mut everything =
+            Collection::combined(PathBuf::from("combined local agent logs"), &collections);
+        let mut combined = summarize(&everything, now, days, config.local_offset);
+
+        if let Some(handle) = cursor_handle {
+            let cursor = handle
+                .join()
+                .map_err(|_| anyhow!("Cursor collector thread panicked"))?;
+            providers.push(summarize(&cursor, now, days, config.local_offset));
+            everything.absorb(&cursor);
+            // Only rows change the combined numbers; a probe that came back
+            // empty (signed out, refused) just adds its scan stats.
+            if cursor.is_empty() {
+                combined.scan_stats = everything.stats.clone();
+            } else {
+                combined = summarize(&everything, now, days, config.local_offset);
+            }
+            collections.push(cursor);
+        }
+        let combined = finish_combined(combined, &providers);
+        Ok::<_, anyhow::Error>((providers, combined, collections))
+    })?;
 
     Ok((
         AppSummary {
