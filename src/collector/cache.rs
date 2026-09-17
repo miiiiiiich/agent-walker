@@ -151,11 +151,21 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
+/// The cache directory, created owner-only: file names in it are derived
+/// from account ids, so even the listing stays private.
+pub(crate) fn private_dir() -> Option<PathBuf> {
+    let dir = crate::paths::cache_dir().ok()?;
+    fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
+    Some(dir)
+}
+
 fn store_cache(path: &Path, cache: &CacheFile) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if fs::create_dir_all(parent).is_err() {
+    if private_dir().is_none() {
         return;
     }
     let Ok(bytes) = bincode::serialize(cache) else {

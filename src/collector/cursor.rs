@@ -29,7 +29,6 @@ pub fn collect(
     cli_config: &Path,
     token_override: Option<&str>,
     mtime_floor: Option<SystemTime>,
-    use_cache: bool,
     local_offset: UtcOffset,
 ) -> Collection {
     let mut collection = Collection::new(Provider::Cursor, state_db.to_path_buf());
@@ -67,10 +66,7 @@ pub fn collect(
     // Auth expiry, a network failure, or an endpoint change all land here;
     // surface it as an unreadable source rather than a panic, and log the reason
     // since this is an undocumented endpoint that's hard to debug blind.
-    let cache = use_cache
-        .then(|| crate::paths::cache_dir().ok())
-        .flatten()
-        .map(|dir| CsvCache::new(&dir, &user_id, &jwt));
+    let cache = crate::collector::private_dir().map(|dir| CsvCache::new(&dir, &user_id, &jwt));
     let csv = match cache.as_ref().map_or_else(
         || fetch_csv(&cookie),
         |cache| cache.csv(SystemTime::now(), || fetch_csv(&cookie)),
@@ -234,9 +230,17 @@ impl CsvCache {
             return stale()
                 .ok_or_else(|| "usage fetch failed recently; not retrying yet".to_owned());
         }
-        match fetch() {
+        // A 2xx with the wrong body (an HTML page, an error blob) must not
+        // replace a good export.
+        let fetched = fetch().and_then(|csv| {
+            if looks_like_export(&csv) {
+                Ok(csv)
+            } else {
+                Err("response is not a usage export".to_owned())
+            }
+        });
+        match fetched {
             Ok(csv) => {
-                let _ = fs::create_dir_all(self.csv.parent().unwrap_or(Path::new(".")));
                 let temp = self
                     .csv
                     .with_extension(format!("tmp{}", std::process::id()));
@@ -247,7 +251,6 @@ impl CsvCache {
                 Ok(csv)
             }
             Err(reason) => {
-                let _ = fs::create_dir_all(self.failed.parent().unwrap_or(Path::new(".")));
                 let _ = crate::collector::write_private(&self.failed, b"");
                 match stale() {
                     Some(csv) => {
@@ -315,6 +318,17 @@ fn fetch_csv_from(url: &str, cookie: &str) -> Result<String, String> {
 }
 
 /// Resolve CSV columns by header name because Cursor inserts columns over time.
+/// The header row names the columns `parse_csv` needs.
+fn looks_like_export(csv: &str) -> bool {
+    let Some(header) = csv.lines().next() else {
+        return false;
+    };
+    let columns = split_csv_line(header.trim_start_matches('\u{feff}'));
+    ["Date", "Model", "Output Tokens"]
+        .iter()
+        .all(|name| columns.iter().any(|column| column.trim() == *name))
+}
+
 fn parse_csv(
     csv: &str,
     floor: Option<OffsetDateTime>,
@@ -740,17 +754,23 @@ mod tests {
         let fetched = Cell::new(0);
         let got = cache.csv(now, || {
             fetched.set(fetched.get() + 1);
-            Ok("new".to_owned())
+            Ok("Date,Model,Output Tokens\nnew".to_owned())
         });
         assert_eq!((got.as_deref(), fetched.get()), (Ok("old"), 0));
 
         aged(&cache.csv, now, CSV_FRESH_FOR * 2);
         let got = cache.csv(now, || {
             fetched.set(fetched.get() + 1);
-            Ok("new".to_owned())
+            Ok("Date,Model,Output Tokens\nnew".to_owned())
         });
-        assert_eq!((got.as_deref(), fetched.get()), (Ok("new"), 1));
-        assert_eq!(fs::read_to_string(&cache.csv).unwrap(), "new");
+        assert_eq!(
+            (got.as_deref(), fetched.get()),
+            (Ok("Date,Model,Output Tokens\nnew"), 1)
+        );
+        assert_eq!(
+            fs::read_to_string(&cache.csv).unwrap(),
+            "Date,Model,Output Tokens\nnew"
+        );
     }
 
     /// A failed fetch falls back to the stale export and is not retried
@@ -790,6 +810,20 @@ mod tests {
         aged(&cache.csv, now, CSV_STALE_FOR * 2);
         aged(&cache.failed, now, RETRY_AFTER * 2);
         assert!(cache.csv(now, fail).is_err(), "too old to stand in");
+    }
+
+    /// A 2xx that is not an export (an HTML page, say) neither replaces the
+    /// stored export nor counts as a success.
+    #[test]
+    fn a_response_that_is_not_an_export_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CsvCache::new(dir.path(), "user_1", "jwt");
+        let now = SystemTime::now();
+        fs::write(&cache.csv, "Date,Model,Output Tokens\nold").unwrap();
+        aged(&cache.csv, now, CSV_FRESH_FOR * 2);
+        let got = cache.csv(now, || Ok("<html>sign in</html>".to_owned()));
+        assert_eq!(got.as_deref(), Ok("Date,Model,Output Tokens\nold"));
+        assert!(cache.failed.exists());
     }
 
     #[test]
