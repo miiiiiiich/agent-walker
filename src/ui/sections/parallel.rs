@@ -2,8 +2,6 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// Concurrency distribution: how much active time ran 1 / 2 / 3 / 4–6 / 7–9 / 10+
-/// sessions at once. Cool→hot per level (solo = cool, heavy parallel = bright).
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -26,7 +24,6 @@ pub(in crate::ui) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'
         .copied()
         .max()
         .unwrap_or(0);
-    // Weighted avg concurrency (computed once in the analyzer) = parallelism stat.
     let avg = orchestration.avg_concurrency;
     let labels = ["1", "2", "3", "4-6", "7-9", "10+"];
     let colors = [
@@ -40,7 +37,6 @@ pub(in crate::ui) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'
     // Each bar carries both the concrete time and its share ("  6d 20h  30%"),
     // so reserve extra room after the track.
     let bar_width = usize::from(width).saturating_sub(30).clamp(6, 22);
-    // Title + a single avg line (mirrors TURN LENGTH's stat row for alignment).
     let mut lines = vec![
         utils::section_title(
             "PARALLEL AGENTS",
@@ -82,7 +78,6 @@ pub(in crate::ui) fn parallel_lines(summary: &Summary, width: u16) -> Vec<Line<'
     lines
 }
 
-/// Compact duration for inline bar labels: at most the two largest units.
 fn compact_duration(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = secs % 86_400 / 3_600;

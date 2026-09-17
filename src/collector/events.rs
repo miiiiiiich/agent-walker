@@ -1,4 +1,3 @@
-//! The per-file event bundle collectors produce and the cache serializes.
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -9,8 +8,6 @@ use crate::model::{
     PermissionEvent, RateLimitSample, SessionTouch, ToolEvent, UsageEvent,
 };
 
-/// Events extracted from a single log file. The unit of caching: parsed once,
-/// reused as long as (mtime, size) of the source file are unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileEvents {
     pub usage_events: Vec<KeyedUsageEvent>,
@@ -28,8 +25,6 @@ pub struct FileEvents {
     pub parse_errors: usize,
 }
 
-/// Usage event with an optional cross-file deduplication key
-/// (e.g. Claude message id appearing in both a session file and a fork).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyedUsageEvent {
     pub key: Option<String>,
@@ -54,9 +49,7 @@ pub struct KeyedCreditSample {
     pub event: CreditSample,
 }
 
-/// Duration event with an optional cross-file dedup key. Most collectors
-/// leave it `None` (their durations never appear twice); Grok keys turn
-/// durations by `prompt_id` because fork copies replay the parent's turns.
+/// Grok keys durations by `prompt_id` because fork copies replay the parent's turns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyedDurationEvent {
     pub key: Option<String>,
@@ -99,16 +92,11 @@ pub struct KeyedModeEvent {
 }
 
 impl FileEvents {
-    /// Compress raw session touches: per (session, local date) only the first
-    /// and last touch matter for sessions / active-day / span aggregation.
-    /// Keeps memory and cache size bounded for 100k-line session files.
+    /// Keep only each session-day's endpoints to bound memory and cache size
+    /// without changing sessions, active days, or span aggregation.
     ///
     /// Bucketing uses the local-offset date to match the analyzer, which buckets
-    /// concurrency / longest-session / daily-sessions by local day. The result
-    /// therefore depends on `local_offset`; cached `FileEvents` embed this
-    /// interpretation, and the cache records the offset it was built with
-    /// (`CacheFile::offset_seconds`) so a machine-TZ change rebuilds
-    /// automatically — no `--no-cache` needed.
+    /// concurrency / longest-session / daily-sessions by local day.
     pub fn compress_touches(&mut self, local_offset: UtcOffset) {
         if self.session_touches.len() <= 2 {
             return;

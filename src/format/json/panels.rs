@@ -1,4 +1,3 @@
-//! Duration, working-time, context, and parallelism DTOs.
 use serde::Serialize;
 use time::Date;
 
@@ -28,8 +27,6 @@ pub(in crate::format::json) struct CountDto {
 }
 
 impl TurnLengthDto {
-    /// Interruptions are counted independently of completed turns, so a
-    /// window with interrupts but no finished turn still reports them.
     pub(in crate::format::json) fn new(
         duration: Option<&DurationSummary>,
         interrupted: usize,

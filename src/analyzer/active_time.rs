@@ -4,10 +4,6 @@ use time::{Date, UtcOffset};
 
 use crate::model::{ActiveTimeSummary, Collection};
 
-/// Working time over the fixed window: completed turns with the human's
-/// answer time removed, plus the input-side tokens read in the same window
-/// so the panel can quote context per active minute. `None` when no turn
-/// completed in the window — a token-only window has no time to divide by.
 pub(super) fn active_time_summary(
     collection: &Collection,
     window_start: Date,

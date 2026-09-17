@@ -3,13 +3,7 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// MODES: how the model is allowed to think and act, per provider dial —
-/// Claude shows the thinking fire rate (plus fast mode once it has data),
-/// and both Claude and Codex show their reasoning-effort mix and their
-/// granted-autonomy mix (the `autonomy` row: `permissionMode` /
-/// `approval_policy`). Deliberately
-/// small (a few rows): the dials are asymmetric across providers, so each
-/// tab renders only its own rows.
+/// Each tab renders only its own dials because they are asymmetric across providers.
 pub(in crate::ui) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let modes = &summary.modes;
     if modes.is_empty() {
@@ -73,9 +67,6 @@ pub(in crate::ui) fn modes_lines(summary: &Summary, width: u16) -> Vec<Line<'sta
     lines
 }
 
-/// One label-plus-entries row (`effort    xhigh 98.2% · max 0.3%`): top
-/// `max_entries` labels with their share. Keep the first entry even if oversized;
-/// stop before any later entry that would overflow `width`.
 fn mix_line(
     label: &'static str,
     entries: &[(String, usize)],
@@ -138,8 +129,6 @@ mod tests {
             .collect()
     }
 
-    /// The 80-column layout gives the right rail ~34 columns; long Codex
-    /// labels must drop the second entry instead of clipping mid-label.
     #[test]
     fn permission_row_fits_a_narrow_rail_by_dropping_entries() {
         let summary = summary_with_permissions(vec![

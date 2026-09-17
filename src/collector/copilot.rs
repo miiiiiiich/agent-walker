@@ -17,11 +17,6 @@ use crate::model::{
     ToolEvent, UsageEvent,
 };
 
-/// GitHub Copilot CLI (`@github/copilot`) 1.0.73 schema:
-/// `<root>/session-state/<uuid>/events.jsonl` contains per-session events.
-/// Clean shutdowns contain cumulative per-model counters; emit deltas at each
-/// shutdown timestamp, counting a reset snapshot in full.
-/// Usage since the last shutdown is unavailable until another clean exit.
 pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -87,7 +82,6 @@ pub fn collect(
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let file = File::open(path).ok()?;
-    // The directory name is the session id (also carried in session.start).
     let session_id = path
         .parent()
         .and_then(Path::file_name)
@@ -141,9 +135,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             Some("tool.execution_start") => {
                 collect_tool_event(&value, timestamp, session_id.as_ref(), &mut events);
             }
-            // Explicit turn boundaries (unlike Claude, whose turn durations
-            // are inferred from prompt-to-activity gaps) — pair start/end by
-            // turnId for the TURN LENGTH panel.
             Some("assistant.turn_start") => {
                 if let (Some(turn_id), Some(timestamp)) = (turn_id(&value), timestamp) {
                     turn_starts.insert(turn_id, timestamp);
@@ -158,10 +149,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     &mut events,
                 );
             }
-            // `totalNanoAiu` is a cumulative AI-credit ledger carried on both
-            // periodic checkpoints and shutdowns — unlike tokens it exists
-            // even for sessions that never exit cleanly. Deltas feed the
-            // CREDITS history.
             Some("session.usage_checkpoint") => {
                 collect_credit_delta(
                     &value,
@@ -200,8 +187,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     Some(events)
 }
 
-/// Raw cumulative counters from one `modelMetrics` entry, as logged:
-/// `input` includes `cache_read`, `output` includes `reasoning`.
 #[derive(Clone, Copy, Default)]
 struct RawCounters {
     input: u64,
@@ -231,7 +216,6 @@ impl RawCounters {
     }
 }
 
-/// Fresh input is input minus cached input; reasoning is already included in output.
 #[allow(
     clippy::too_many_arguments,
     reason = "Per-line parse context; bundling into a struct adds noise for one caller."
@@ -300,8 +284,6 @@ fn collect_shutdown_usage(
             cache_creation_input_tokens: delta.cache_write,
             ..TokenUsage::default()
         };
-        // A re-emitted identical snapshot (an exit with no new activity)
-        // deltas to zero and adds nothing.
         if usage.token_volume() == 0 {
             continue;
         }
@@ -322,8 +304,6 @@ fn collect_shutdown_usage(
     }
 }
 
-/// Close a turn: pair the `turn_end` with its recorded `turn_start` by
-/// turnId and emit the explicit duration.
 fn collect_turn_duration(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -359,9 +339,6 @@ fn turn_id(value: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// AI-credit spend since the previous checkpoint of this session, from the
-/// cumulative `totalNanoAiu`. A value going backwards (CLI update / epoch
-/// reset) counts the fresh cumulative in full, mirroring the token rule.
 fn collect_credit_delta(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -374,7 +351,7 @@ fn collect_credit_delta(
         return;
     };
     // Untrusted log data: clamp like token counts so downstream daily sums
-    // can never overflow (1<<50 nano-AIU ≈ a million credits).
+    // can never overflow.
     let Some(current) = value
         .get("data")
         .and_then(|data| data.get("totalNanoAiu"))
@@ -477,13 +454,10 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 1);
         let event = &collection.usage_events[0];
         assert_eq!(event.model.as_deref(), Some("gpt-5-mini"));
-        // inputTokens includes cacheReadTokens: fresh = 14,166 - 1,536.
         assert_eq!(event.usage.input_tokens, 12_630);
         assert_eq!(event.usage.cache_read_input_tokens, 1_536);
         assert_eq!(event.usage.token_volume(), 14_166 + 150);
         assert_eq!(event.usage.reasoning_output_tokens, 128);
-        // `/Users/me` is not this machine's home, so only the leading slash
-        // is trimmed — home stripping is covered by project_from_cwd tests.
         assert_eq!(event.project.as_deref(), Some("Users/me/code/app"));
         assert_eq!(collection.tool_events.len(), 1);
         assert_eq!(collection.tool_events[0].tool_name, "web_fetch");
@@ -515,16 +489,13 @@ mod tests {
         let first = &collection.usage_events[0];
         let second = &collection.usage_events[1];
         assert_eq!(first.usage.token_volume(), 14_166 + 150);
-        // Second segment: 28,406 − 14,166 input and 286 − 150 output.
         assert_eq!(second.usage.token_volume(), 14_240 + 136);
-        // Summing raw cumulatives would have reported 42,572 input.
         let total: u64 = collection
             .usage_events
             .iter()
             .map(|event| event.usage.token_volume())
             .sum();
         assert_eq!(total, 28_406 + 286);
-        // Each segment keeps its own exit timestamp.
         let t1 = OffsetDateTime::parse("2026-07-27T12:41:08.275Z", &Rfc3339)
             .expect("test timestamp should parse");
         let t2 = OffsetDateTime::parse("2026-07-27T12:42:15.207Z", &Rfc3339)
@@ -533,9 +504,6 @@ mod tests {
         assert_eq!(second.timestamp, Some(t2));
     }
 
-    /// A cumulative counter going backwards (CLI update / metric reset)
-    /// starts a new epoch: the snapshot counts in full, never a negative or
-    /// zero delta.
     #[test]
     fn cumulative_reset_counts_new_epoch_in_full() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -561,8 +529,6 @@ mod tests {
         assert_eq!(total, 1_100 + 440);
     }
 
-    /// An exit with no new activity re-emits the identical snapshot — the
-    /// delta is zero and nothing is added.
     #[test]
     fn identical_snapshot_reemission_adds_nothing() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -575,7 +541,6 @@ mod tests {
         assert_eq!(collection.usage_events[0].usage.token_volume(), 1_100);
     }
 
-    /// Cache writes are billed volume even when input/output stay zero.
     #[test]
     fn cache_write_only_snapshot_is_counted() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -608,8 +573,7 @@ mod tests {
         assert_eq!(collection.tool_events.len(), 2);
     }
 
-    /// A malformed line is skipped without aborting the file — the shutdown
-    /// after it still counts.
+    /// A malformed line must not abort the file and lose a later shutdown.
     #[test]
     fn malformed_line_does_not_abort_the_file() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -629,8 +593,6 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 1);
     }
 
-    /// A session that never exited cleanly has no shutdown — and no token
-    /// data. It must contribute activity only, not usage.
     #[test]
     fn session_without_shutdown_has_no_usage() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -649,13 +611,10 @@ mod tests {
 
         assert_eq!(collection.usage_events.len(), 0);
         assert!(!collection.session_touches.is_empty());
-        // Credits exist even without a clean exit — the checkpoint ledger.
         assert_eq!(collection.credit_samples.len(), 1);
         assert_eq!(collection.credit_samples[0].nano_aiu, 1_958_555_000);
     }
 
-    /// Credits accrue as deltas of the cumulative nano-AIU ledger across
-    /// checkpoints and shutdown, attributed to each record's own time.
     #[test]
     fn credit_deltas_accrue_across_checkpoints_and_shutdown() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -735,10 +694,6 @@ mod tests {
         assert_eq!(total, 1_100 + 110);
     }
 
-    /// The nano-AIU ledger resetting (decrease) starts a new epoch counted
-    /// in full: 100→40→70 counts 100+40+30, and a reset through zero
-    /// (100→0→30) counts 100+30. A shutdown carrying the same cumulative as
-    /// the last checkpoint deltas to zero and adds nothing.
     #[test]
     fn credit_resets_and_equal_snapshots() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -764,7 +719,6 @@ mod tests {
             .iter()
             .map(|sample| sample.nano_aiu)
             .sum();
-        // 100 (first) + 40 (reset epoch) + 30 (delta) + 0 (equal shutdown).
         assert_eq!(total, 170);
         assert_eq!(collection.credit_samples.len(), 3);
     }
@@ -793,8 +747,6 @@ mod tests {
         assert_eq!(collection.duration_events[0].duration_ms, 10_000);
     }
 
-    /// Turn durations pair `assistant.turn_start` / `turn_end` by turnId —
-    /// explicit boundaries, no heuristics.
     #[test]
     fn turn_durations_pair_start_and_end_by_turn_id() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -821,7 +773,6 @@ mod tests {
         );
     }
 
-    /// Multi-model sessions split per model under one session key space.
     #[test]
     fn multi_model_shutdown_splits_per_model() {
         let temp = TempDir::new().expect("test tempdir should be created");

@@ -3,10 +3,7 @@ use crate::model::{DurationSummary, Summary};
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// The TURN LENGTH section: duration stats when a turn completed, plus the
-/// window's interruption count in the title. A window with interruptions
-/// but no completed turn renders the title alone — the count stays visible
-/// without zero percentiles or empty bars.
+/// An interrupt-only window keeps its count visible without zero percentiles or empty bars.
 pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let duration = summary.completion_duration.as_ref();
     if duration.is_none() && summary.interrupted == 0 {
@@ -60,10 +57,7 @@ pub(in crate::ui) fn duration_lines(summary: &Summary, width: u16) -> Vec<Line<'
     lines
 }
 
-/// The section annotation, width-fitted: the interruption count appends in
-/// its long form when the rail has room, falls back to a compact "esc"
-/// label, and drops entirely on rails too narrow for either — never
-/// clipped mid-word. The prefix budget covers "▍ TURN LENGTH  ".
+/// Drop annotations that do not fit rather than clipping them mid-word.
 fn completion_annotation(
     duration: Option<&DurationSummary>,
     interrupted: usize,
@@ -126,8 +120,6 @@ mod tests {
             .collect()
     }
 
-    /// The 80-column layout's rail must not clip the title mid-word: the
-    /// interruption count falls back to "esc" and then drops entirely.
     #[test]
     fn completion_title_fits_narrow_rails() {
         let summary = summary_with_interrupts(12);
@@ -146,8 +138,6 @@ mod tests {
         assert!(!title.contains("esc") && !title.contains("interrupted"));
     }
 
-    /// An interrupt-only window (every turn aborted, none completed) keeps
-    /// the count visible as a bare title — no zero percentiles or empty bars.
     #[test]
     fn interrupt_only_window_renders_title_only() {
         let mut summary = summary_with_interrupts(3);
@@ -160,14 +150,11 @@ mod tests {
         assert!(title.contains("3 interrupted"), "{title:?}");
         assert!(!title.contains("turns"), "{title:?}");
 
-        // The width ladder applies here too — no mid-word clipping on
-        // rails narrower than the long form.
         let narrow = duration_lines(&summary, 20);
         let title = rendered(&narrow[0]);
         assert!(title.chars().count() <= 20, "{title:?}");
         assert!(!title.contains("interrupted"), "{title:?}");
 
-        // Nothing at all to say → no section.
         let mut silent = summary_with_interrupts(0);
         silent.completion_duration = None;
         assert!(duration_lines(&silent, 100).is_empty());

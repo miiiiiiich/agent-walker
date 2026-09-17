@@ -3,22 +3,16 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// Format elapsed time as hours and minutes, without converting to days.
 fn format_hours(duration_ms: u64) -> String {
     let minutes = duration_ms / 60_000;
     format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
-/// WORKING TIME: turn time minus human answers, context per working minute,
-/// between-turn pace, and the model/tool split where measured.
 pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let Some(time) = &summary.active_time else {
         return Vec::new();
     };
     let label_width = utils::kv_label_width(width);
-    // Width-fitted like the TURN LENGTH title: the cutoff note in its long
-    // form when the rail has room, shorter otherwise, never clipped
-    // mid-word. The prefix budget covers "▍ WORKING TIME  ".
     let budget = usize::from(width).saturating_sub("▍ WORKING TIME  ".chars().count());
     let window = utils::window_label(summary);
     let annotation = [
@@ -101,8 +95,6 @@ pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     lines
 }
 
-/// What the working time is made of: the model's share vs tools running,
-/// qualified with the measured hours when some provider can't tell.
 fn made_of_line(
     time: &crate::model::ActiveTimeSummary,
     label_width: usize,
@@ -132,8 +124,6 @@ fn made_of_line(
             Span::styled(pct(1.0 - model), Style::default().fg(theme::TEXT)),
         ]));
     }
-    // The split excludes unmeasured turns. Try coverage-qualified variants;
-    // if none fits, fall back to the model percentage alone.
     let measured = format_hours(time.measured_ms);
     let budget = usize::from(width).saturating_sub(label_width);
     let full = format!(
@@ -165,7 +155,6 @@ fn made_of_line(
     ]))
 }
 
-/// Your pace as one row: p50 / p90 / average gap before a prompt.
 fn pace_line(time: &crate::model::ActiveTimeSummary, label_width: usize) -> Option<Line<'static>> {
     let (p50, p90) = time.pace_percentiles()?;
     let mut spans = vec![
@@ -208,8 +197,6 @@ mod tests {
             .collect()
     }
 
-    /// The fixture's 87h over 30 days renders the working time, the human
-    /// wait, and the context rate; a summary without turns renders nothing.
     #[test]
     fn renders_working_time_and_density() {
         let summary = crate::share::fixtures::sample_summary();
@@ -237,7 +224,6 @@ mod tests {
             time.measured_ms = time.active_ms;
         }
         assert!(!rendered(&time_lines(&full, 60)[4]).contains("measured"));
-        // Narrower rails keep the coverage in a shorter form, never clipped.
         for width in [60_u16, 46, 38, 32] {
             let row = rendered(&time_lines(&summary, width)[4]);
             assert!(row.contains("80h 00m"), "{width}: {row}");

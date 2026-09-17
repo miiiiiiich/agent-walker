@@ -1,7 +1,3 @@
-//! Shareable stats card: render a 16:9 terminal-style summary as an SVG,
-//! rasterize it to PNG locally (no network), and produce a text caption.
-//! Used by the in-app share modal and the `--share` flag.
-
 mod actions;
 mod badge_art;
 mod card;

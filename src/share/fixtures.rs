@@ -107,8 +107,6 @@ pub(crate) fn sample_summary() -> Summary {
     }
 }
 
-/// Working-time fixture: 87h over 30 days with 6h 40m spent answering
-/// questions, at 600K context tokens per working minute.
 fn sample_active_time() -> crate::model::ActiveTimeSummary {
     crate::model::ActiveTimeSummary {
         turns: 100,
@@ -122,14 +120,11 @@ fn sample_active_time() -> crate::model::ActiveTimeSummary {
             (time::macros::date!(2026 - 09 - 03), 34_560_000),
             (time::macros::date!(2026 - 09 - 04), 10_800_000),
         ],
-        // 80h of the 87h can tell model from tools; 55% of that is model.
         model_ms: 158_400_000,
         measured_ms: 288_000_000,
     }
 }
 
-/// Cache-reuse fixture: three populated bands (500K+ empty), one expiry
-/// row and one cold-start row.
 fn sample_context() -> ContextSummary {
     ContextSummary {
         calls: 1_200,

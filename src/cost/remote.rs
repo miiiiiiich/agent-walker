@@ -1,9 +1,4 @@
-//! The ONLY network egress in the cost pipeline (and, besides the auto-detected,
-//! opt-out Cursor collector, in the whole binary): fetching LiteLLM's community
-//! pricing table. Anything that changes what leaves the machine or where it
-//! goes lives in this file — a diff touching `cost/remote.rs` is an egress
-//! change by definition. Only pricing metadata is fetched; no usage data is
-//! ever sent.
+//! Keep network egress here so changes to what leaves the machine can be audited by file.
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -14,16 +9,11 @@ use tracing::debug;
 
 use super::{Pricing, Snapshot, loaded, parse_snapshot_json, replace_loaded};
 
-/// Decoded-body cap; the table is a few MB.
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
 const PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
-/// Fetch the upstream `LiteLLM` database and reduce it to the snapshot
-/// format: bare model ids (any provider) with per-token costs. No provider
-/// allowlist — a model is priced if its id is in the table; unknown ids remain
-/// unpriced. Provider/region duplicates and absurd rates are the actual guards.
 fn fetch_snapshot_json() -> Option<String> {
     // No env proxy: ureq 3 would pick up `HTTPS_PROXY` & co. by default,
     // which would silently change where this request leaves the machine.
@@ -65,7 +55,6 @@ fn fetch_snapshot_json() -> Option<String> {
         {
             continue; // provider/region variants; keep bare model ids only
         }
-        // Accept only chat, completion, and responses model modes.
         if !matches!(
             entry.get("mode").and_then(serde_json::Value::as_str),
             Some("chat" | "completion" | "responses")
@@ -125,10 +114,7 @@ fn store_snapshot(path: &Path, serialized: &str) {
 }
 
 enum Refreshed {
-    /// Came off the network this call.
     Fetched(Snapshot),
-    /// Read from disk: either fetched earlier today, or the fallback after
-    /// a failed fetch.
     Stored(Snapshot),
     Nothing,
 }

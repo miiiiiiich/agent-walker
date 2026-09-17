@@ -1,15 +1,11 @@
-//! LIMITS panel data: daily peak of the Codex plan's 5h window.
 use std::collections::{BTreeMap, HashSet};
 
 use time::{Date, Duration, UtcOffset};
 
 use crate::model::{Collection, LimitDay, LimitsHistory};
 
-/// Daily-peak LIMITS history over the analysis window. Tri-state per day:
-/// a day with samples carries its peak `used_percent`; a day with provider
-/// activity but no sample (older CLI versions) is `NoSample`; a day without
-/// activity is `NoUse` — the chart renders the three differently, so a
-/// measured 0% is never confused with "didn't use Codex that day".
+/// Keep measured zero, missing samples, and no activity distinct so an unused
+/// day cannot be mistaken for measured 0%.
 pub(super) fn limits_history(
     collection: &Collection,
     window_start: Date,

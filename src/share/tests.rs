@@ -2,15 +2,13 @@ use super::fixtures::sample_summary;
 use super::svg::svg;
 use super::{REPO_URL, ShareCard, badge_art, render_png};
 
-/// The 24 codename animals, straight from the ladder — badge assets must cover
-/// exactly this set (Ant is the unranked floor and has one).
 fn animals() -> Vec<&'static str> {
     crate::codename::all_animals().collect()
 }
 
 /// The watermark embeds bundled badge SVGs as raw XML, so they must stay
 /// path-only — no script/handler/external-ref vectors can sneak in via a
-/// regenerated asset. (Safety is enforced here, not just asserted in docs.)
+/// regenerated asset.
 #[test]
 fn bundled_badges_are_path_only() {
     const FORBIDDEN: [&str; 13] = [
@@ -52,7 +50,6 @@ fn every_badge_rasterizes() {
     for animal in animals() {
         let art =
             badge_art::badge_inner(animal).unwrap_or_else(|| panic!("missing badge: {animal}"));
-        // The silhouette's native space is 1024×1024 (see the badge `<g>` transform).
         let doc = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">{}</svg>"#,
             art.replace("currentColor", "#000000")
@@ -75,8 +72,6 @@ fn every_badge_rasterizes() {
     }
 }
 
-/// A card whose window holds tokens with no known price shows "—" instead of
-/// an undercounted "$0" — and its caption drops the cost stat entirely.
 #[test]
 fn unpriced_cost_renders_as_dash_not_zero() {
     let mut summary = sample_summary();
@@ -101,8 +96,6 @@ fn unpriced_cost_renders_as_dash_not_zero() {
     assert!(!caption.contains("$0"), "{caption}");
 }
 
-/// The cache-reuse share rides the header stat line and the caption as one
-/// number; a summary without context data leaves both untouched.
 #[test]
 fn cached_share_rides_header_and_caption() {
     let card = ShareCard::from_summary(&sample_summary());
@@ -117,8 +110,6 @@ fn cached_share_rides_header_and_caption() {
     assert!(!svg(&card).contains("cached"));
     assert!(!card.caption().contains("cached"));
 
-    // Every section reads one window, so the ratio rides along whatever span
-    // the caller asked for — no coincidence check.
     let mut summary = sample_summary();
     summary.period_days = 7;
     assert_eq!(
@@ -127,7 +118,6 @@ fn cached_share_rides_header_and_caption() {
     );
 }
 
-/// X counts every character (whitespace included) and each URL as 23.
 #[test]
 fn x_weight_counts_whitespace_and_flat_urls() {
     assert_eq!(super::card::x_weight("a b"), 3);
@@ -139,19 +129,13 @@ fn x_weight_counts_whitespace_and_flat_urls() {
         4 + 23
     );
     assert_eq!(super::card::x_weight("日本"), 4);
-    // EM DASH sits above U+10FF but is in X's weight-1 range.
     assert_eq!(super::card::x_weight("a — b"), 5);
 }
 
-/// The caption fits X's 280-weight limit by dropping optional stats in
-/// priority order; a saturated stat line on the SVG yields the cache share
-/// before it can reach the codename.
 #[test]
 fn caption_and_header_fit_their_budgets() {
     let mut summary = sample_summary();
     summary.total_usage.input_tokens = u64::MAX;
-    // A provider-reported cost this large makes the stat line overrun its
-    // budget on its own, so the cache share has to yield.
     summary.model_daily.push(crate::model::ModelDailyStat {
         date: summary.period_end,
         model: "claude-opus-4-8".to_owned(),
@@ -162,7 +146,6 @@ fn caption_and_header_fit_their_budgets() {
     let card = ShareCard::from_summary(&summary);
     let caption = card.caption();
     assert!(super::card::x_weight(&caption) <= 280, "{caption}");
-    // The share was dropped from the SVG stat line, the line itself stays.
     let rendered = svg(&card);
     assert!(rendered.contains("tokens   ·"), "{rendered}");
     assert!(
@@ -170,7 +153,6 @@ fn caption_and_header_fit_their_budgets() {
         "stat line should yield the share"
     );
 
-    // The everyday fixture keeps everything.
     let card = ShareCard::from_summary(&sample_summary());
     assert!(card.caption().contains("95% cached"));
     assert!(super::card::x_weight(&card.caption()) <= 280);
@@ -188,10 +170,6 @@ fn caption_includes_headline_and_repo() {
 
 #[test]
 fn card_rank_badge_reflects_own_volume() {
-    // The card ranks on the summary's own 30-day throughput: 250M/day sits at
-    // the bottom of the A band → Octopus. The rank pill carries the 冠位
-    // colour for A (blue) and the caption carries the letters — never a step
-    // counter.
     let mut summary = sample_summary();
     summary.recent_window_volume = 250_000_000 * u64::from(summary.period_days);
     summary.recent_window_active_days = 29;
@@ -214,7 +192,6 @@ fn card_rank_badge_reflects_own_volume() {
     );
     render_png(&card).expect("ranked card must rasterize");
 
-    // The unranked fixture (≈700K tokens/day) leaves the badge slot empty.
     let unranked = ShareCard::from_summary(&sample_summary());
     assert_eq!(unranked.rank, crate::codename::Rank::Unranked);
     assert!(!unranked.caption().contains("Rank"));
@@ -230,13 +207,11 @@ fn rank_badge_variants_cover_width_and_ink_lift() {
         ShareCard::from_summary(&summary)
     };
 
-    // SS is one glyph longer → the pill widens.
     let ss = svg(&card_at(800_000_000));
     assert!(ss.contains(">RANK SS</text>"));
     assert!(ss.contains("width=\"114\""), "SS pill width");
     assert!(ss.contains("#a678f0"), "SS 濃紫 missing");
 
-    // E (墨) renders with the lifted display shade, never the raw ink.
     let e = svg(&card_at(5_000_000));
     assert!(e.contains(">RANK E</text>"));
     assert!(e.contains("#7a8088"), "E ink lift missing");
@@ -255,7 +230,6 @@ fn card_renders_with_charts_and_numbers() {
     assert!(svg_text.contains("BY HOUR"));
     assert!(svg_text.contains("MODELS"));
     assert!(svg_text.contains("TASK TIME"));
-    // Privacy-safe: no repo names ever leak onto the card.
     assert!(!svg_text.contains("orchestra"));
     assert!(render_png(&card).is_ok());
 }

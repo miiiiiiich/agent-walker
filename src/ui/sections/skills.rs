@@ -3,11 +3,6 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// SKILLS: token volume by Claude `attributionSkill` over the analysis
-/// window. Missing attribution does not prove no skill was used.
-/// Skill names appear in the Claude tab and local JSON, never the share card;
-/// this section reads `summary.skills`, not the card's `models` path.
-/// Share is of ATTRIBUTED volume; the subtitle carries the honest denominator.
 pub(in crate::ui) fn skill_lines(
     summary: &Summary,
     width: u16,

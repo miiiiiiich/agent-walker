@@ -1,11 +1,3 @@
-//! Cursor usage comes from its dashboard CSV export.
-//! Authentication uses a local `state.vscdb` JWT or `CURSOR_TOKEN` override.
-//! The session cookie is sent to cursor.com via an undocumented endpoint.
-//! Auto-detection is disabled by `--no-cursor`; signed-out stores make no request.
-//! Store-read and fetch failures count as unreadable sources; fetch reasons are logged.
-//! Usage events carry no project/repo identifier.
-//! The CSV's `Cost` column is authoritative and stored as `reported_cost_usd`.
-
 use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -29,9 +21,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 const ACCESS_TOKEN_SQL: &str = "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'";
 
 /// Collect Cursor usage. `token_override` (from `CURSOR_TOKEN`) wins over the
-/// local DB so a relocated or unreadable store can still be used. `cli_config`
-/// is `~/.cursor/cli-config.json`, a fallback source for the account id (the JWT
-/// `sub` is authoritative).
+/// local DB so a relocated or unreadable store can still be used.
 pub fn collect(
     state_db: &Path,
     cli_config: &Path,
@@ -42,8 +32,6 @@ pub fn collect(
     let mut collection = Collection::new(Provider::Cursor, state_db.to_path_buf());
 
     let jwt = if let Some(token) = token_override {
-        // An explicit CURSOR_TOKEN that's too short or carries control
-        // characters is unusable — a real failure, not signed-out.
         if let Some(token) = sanitize_token(token) {
             token
         } else {
@@ -53,10 +41,7 @@ pub fn collect(
     } else {
         match read_access_token(state_db) {
             Ok(Some(token)) => token,
-            // Signed out (no token row): stay silent — no tab, no request, and
-            // not counted as unreadable.
             Ok(None) => return collection,
-            // The store exists but couldn't be opened/read — a real failure.
             Err(()) => {
                 collection.stats.unreadable_files += 1;
                 return collection;
@@ -109,17 +94,14 @@ fn read_access_token(state_db: &Path) -> Result<Option<String>, ()> {
         Connection::open_with_flags(state_db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| ())?;
     let _ = conn.busy_timeout(Duration::from_millis(500));
     match conn.query_row(ACCESS_TOKEN_SQL, [], |row| row.get::<_, String>(0)) {
-        // A present row that doesn't sanitize to a usable token (too short, or
-        // control characters) reads as `None` — effectively signed out — rather
-        // than a hard error.
+        // A present-but-unusable row is treated as signed out (silent), unlike
+        // a bad CURSOR_TOKEN, which is a user error.
         Ok(token) => Ok(sanitize_token(&token)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(_) => Err(()),
     }
 }
 
-/// Strip surrounding JSON quotes and require token-safe characters before
-/// interpolating the token into a cookie.
 fn sanitize_token(raw: &str) -> Option<String> {
     let token = raw.trim().trim_matches('"').trim();
     let is_jwt_byte = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.');
@@ -145,7 +127,6 @@ fn account_id(cli_config: &Path, jwt: &str) -> Option<String> {
         .and_then(|subject| normalize_subject(&subject))
 }
 
-/// The `sub` claim from a JWT (`header.payload.signature`, base64url, no pad).
 fn jwt_subject(jwt: &str) -> Option<String> {
     let payload = jwt.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -161,7 +142,6 @@ fn jwt_subject(jwt: &str) -> Option<String> {
 /// any other bridged-OAuth subject (`<provider>|<id>`, for any provider) is kept
 /// verbatim — no provider allowlist, so Microsoft / GitLab / SAML logins work too.
 fn normalize_subject(subject: &str) -> Option<String> {
-    // A `…|user_XXX` suffix or an already-bare `user_XXX` collapses to `user_XXX`.
     let tail = subject.rsplit_once('|').map_or(subject, |(_, tail)| tail);
     if let Some(rest) = tail.strip_prefix("user_")
         && !rest.is_empty()
@@ -169,8 +149,6 @@ fn normalize_subject(subject: &str) -> Option<String> {
     {
         return Some(tail.to_owned());
     }
-    // Decoded subjects need separate cookie validation; accept one pipe with
-    // nonempty, safe halves.
     match subject.split_once('|') {
         Some((provider, id)) if is_safe_subject_part(provider) && is_safe_subject_part(id) => {
             Some(subject.to_owned())
@@ -179,8 +157,6 @@ fn normalize_subject(subject: &str) -> Option<String> {
     }
 }
 
-/// Accept nonempty SSO subject halves, including punctuation such as `@`, `+`,
-/// and `:`; reject control characters, cookie delimiters, and extra pipes.
 fn is_safe_subject_part(part: &str) -> bool {
     !part.is_empty()
         && part.bytes().all(|byte| {
@@ -188,12 +164,8 @@ fn is_safe_subject_part(part: &str) -> bool {
         })
 }
 
-/// Decoded-body cap; the export is a few KB per month.
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
-/// `GET` the usage CSV with the browser-equivalent headers. The `Err` carries a
-/// short reason for the log: a 401/403 means the session expired (re-login in
-/// Cursor), other statuses and transport failures pass their own message.
 fn fetch_csv(cookie: &str) -> Result<String, String> {
     fetch_csv_from(CSV_URL, cookie)
 }
@@ -203,12 +175,9 @@ fn fetch_csv_from(url: &str, cookie: &str) -> Result<String, String> {
     // from the endpoint must never carry it to another host. With redirects
     // disabled the cookie only ever reaches cursor.com; a redirect is refused
     // below rather than chased.
-    // `max_redirects(0)` never follows and never errors: the 3xx comes back
-    // as a response and is refused below.
     let agent = ureq::Agent::config_builder()
         .max_redirects(0)
-        // No env proxy (ureq 2 never used one): the cookie must leave only
-        // over the direct connection to cursor.com.
+        // Disable environment proxies so the cookie leaves only over a direct connection.
         .proxy(None)
         // The fetch is synchronous and the dashboard waits on it, so keep the
         // cap short — the CSV is tiny; a slow network shouldn't hang startup.
@@ -230,8 +199,6 @@ fn fetch_csv_from(url: &str, cookie: &str) -> Result<String, String> {
             ureq::Error::Timeout(_) => "the usage endpoint did not answer in time".to_owned(),
             other => format!("network error: {other}"),
         })?;
-    // With redirects disabled a 3xx returns as `Ok`; refuse it instead of
-    // reading a redirect target's body (the cookie was never sent there).
     let status = response.status().as_u16();
     if (300..400).contains(&status) {
         return Err(format!(
@@ -252,8 +219,7 @@ fn fetch_csv_from(url: &str, cookie: &str) -> Result<String, String> {
     Ok(csv)
 }
 
-/// Parse the dashboard CSV. Columns are resolved by header name (Cursor inserts
-/// columns over time), and untrusted numeric cells are parsed leniently.
+/// Resolve CSV columns by header name because Cursor inserts columns over time.
 fn parse_csv(
     csv: &str,
     floor: Option<OffsetDateTime>,
@@ -266,7 +232,6 @@ fn parse_csv(
     };
     // Strip a UTF-8 BOM so the first column name still matches "Date".
     let header = header.trim_start_matches('\u{feff}');
-    // Trim each header cell so `"Date, Model"`-style spacing still resolves.
     let columns: Vec<String> = split_csv_line(header)
         .into_iter()
         .map(|column| column.trim().to_owned())
@@ -322,8 +287,6 @@ fn parse_csv(
             continue;
         };
 
-        // The CSV's own `Total Tokens` is a checksum; a mismatch is a soft
-        // warning (count it) but the row is still recorded.
         if let Some(total) = total_idx.map(|idx| parse_u64(cell(idx)))
             && total != usage.token_volume()
         {
@@ -340,8 +303,6 @@ fn parse_csv(
                 .trim_start_matches('$')
                 .parse::<f64>()
                 .ok()
-                // Reject NaN / inf / negative from a malformed cell; a label like
-                // "Free" lands here too and reads as a reported $0.
                 .filter(|cost| cost.is_finite() && *cost >= 0.0)
                 .unwrap_or(0.0)
         });
@@ -383,13 +344,7 @@ fn parse_required(cell: &str) -> Option<u64> {
     cell.parse::<u64>().ok()
 }
 
-/// Token counts for one row, or `None` (a parse error) if the row is too short
-/// to reach the token columns or a required cell is present-but-unparseable.
-///
-/// The two input columns are disjoint, not nested: `Total Tokens` is
-/// `Input (w/o Cache Write)` + `Input (w/ Cache Write)` + `Cache Read` +
-/// `Output Tokens`, so `Input (w/ Cache Write)` *is* the cache-write count
-/// (default 0 if the column is absent), not a superset to subtract from.
+/// The input columns are disjoint: subtracting cache writes from fresh input would undercount.
 fn row_usage(
     fields: &[String],
     input_idx: usize,
@@ -426,8 +381,6 @@ fn row_usage(
     })
 }
 
-/// Split one CSV record, honoring `"`-quoted fields with embedded commas and
-/// doubled `""` escapes.
 fn split_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current = String::new();
@@ -461,8 +414,6 @@ fn split_csv_line(line: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // Total = 100 (w/ cache write) + 76054 (w/o) + 723008 (cache read) + 8093
-    // (output) = 807255, so this row checksums cleanly.
     const CSV: &str = "Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n\
         \"2026-06-22T13:09:44.478Z\",\"\",\"\",\"free\",\"composer-2.5-fast\",\"No\",\"100\",\"76054\",\"723008\",\"8093\",\"807255\",\"0.71\"\n";
 
@@ -480,19 +431,15 @@ mod tests {
         assert_eq!(event.usage.input_tokens, 76054);
         assert_eq!(event.usage.output_tokens, 8093);
         assert_eq!(event.usage.cache_read_input_tokens, 723_008);
-        // "Input (w/ Cache Write)" is the cache-write count directly.
         assert_eq!(event.usage.cache_creation_input_tokens, 100);
         assert_eq!(event.model.as_deref(), Some("composer-2.5-fast"));
         assert!(event.project.is_none());
         assert_eq!(event.reported_cost_usd, Some(0.71));
-        // The row checksums against Total Tokens, so no parse warning.
         assert_eq!(collection.stats.parse_errors, 0);
     }
 
     #[test]
     fn cache_write_comes_from_the_w_cache_write_column() {
-        // The two input columns are disjoint: cache-write is the "w/ Cache Write"
-        // value itself, not the difference between the columns.
         let csv = "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\",\"500\",\"200\",\"10\",\"5\"\n";
         let event = &parse(csv, None).usage_events[0];
@@ -502,7 +449,6 @@ mod tests {
 
     #[test]
     fn free_cost_label_is_reported_zero_not_litellm() {
-        // A non-numeric Cost ("Free") is a reported $0, not a missing value.
         let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens,Cost\n\
             \"2026-06-22T13:09:44Z\",\"claude-sonnet\",\"10\",\"0\",\"5\",\"Free\"\n";
         let event = &parse(csv, None).usage_events[0];
@@ -519,7 +465,6 @@ mod tests {
 
     #[test]
     fn total_tokens_mismatch_is_a_soft_warning_not_a_drop() {
-        // Total claims 999 but the parts sum to more → counted, row still kept.
         let csv = "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\",\"100\",\"76054\",\"723008\",\"8093\",\"999\"\n";
         let collection = parse(csv, None);
@@ -529,9 +474,6 @@ mod tests {
 
     #[test]
     fn unparseable_token_cell_drops_row_not_records_zero() {
-        // A thousands-separated "1,234" (a plausible format change) is NOT a 0 —
-        // the row is dropped and counted as a parse error rather than silently
-        // recording wrong token counts.
         let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\",\"1,234\",\"0\",\"5\"\n";
         let collection = parse(csv, None);
@@ -541,8 +483,6 @@ mod tests {
 
     #[test]
     fn truncated_row_is_a_parse_error_not_a_zero() {
-        // A row that stops before the token columns must NOT read its missing
-        // cells as 0 — it's a parse error and contributes no event.
         let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\"\n";
         let collection = parse(csv, None);
@@ -552,7 +492,6 @@ mod tests {
 
     #[test]
     fn empty_token_cell_is_zero_not_a_drop() {
-        // An absent value is a legitimate 0; the row is still recorded.
         let csv = "Date,Model,Input (w/o Cache Write),Cache Read,Output Tokens\n\
             \"2026-06-22T13:09:44Z\",\"m\",\"\",\"0\",\"5\"\n";
         let event = &parse(csv, None).usage_events[0];
@@ -562,12 +501,10 @@ mod tests {
 
     #[test]
     fn only_jwt_chars_in_token_are_accepted() {
-        // A real JWT (base64url segments joined by '.') is accepted.
         assert_eq!(
             sanitize_token("eyJhbGci.eyJzdWIi.sig-na_ture").as_deref(),
             Some("eyJhbGci.eyJzdWIi.sig-na_ture")
         );
-        // Surrounding quotes / whitespace are stripped.
         assert_eq!(
             sanitize_token("  \"abcdefghij\"  ").as_deref(),
             Some("abcdefghij")
@@ -603,7 +540,6 @@ mod tests {
             normalize_subject("github|user_01ABC").as_deref(),
             Some("user_01ABC")
         );
-        // An already-bare id (no provider prefix) is accepted as-is.
         assert_eq!(
             normalize_subject("user_01ABC").as_deref(),
             Some("user_01ABC")
@@ -616,13 +552,10 @@ mod tests {
             normalize_subject("google-oauth2|209269195").as_deref(),
             Some("google-oauth2|209269195")
         );
-        // No provider allowlist: any single-pipe subject is kept verbatim.
         assert_eq!(
             normalize_subject("microsoft|abc123").as_deref(),
             Some("microsoft|abc123")
         );
-        // Email-based / tagged subjects from enterprise OIDC / SAML keep their
-        // `@`, `+`, `:` — all valid cookie-octets.
         assert_eq!(
             normalize_subject("okta|user@company.com").as_deref(),
             Some("okta|user@company.com")
@@ -644,11 +577,6 @@ mod tests {
         assert_eq!(normalize_subject("prov ider|123"), None);
     }
 
-    /// Serve one canned HTTP response on a local port and hand back the
-    /// request line + headers the client sent, plus the request count.
-    /// `{addr}` in `response` is replaced with the listener's own address, so
-    /// a redirect points back here and a followed one shows up as a second
-    /// request.
     fn one_shot_server(response: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -677,7 +605,6 @@ mod tests {
         );
         let error = fetch_csv_from(&url, "WorkosCursorSessionToken=secret").unwrap_err();
         assert!(error.contains("unexpected redirect (HTTP 302)"), "{error}");
-        // ureq 3 lowercases header names on the wire.
         let request = rx.recv().unwrap().to_ascii_lowercase();
         assert!(request.contains("cookie: workoscursorsessiontoken=secret"));
         assert!(

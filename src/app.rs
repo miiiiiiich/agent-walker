@@ -32,8 +32,6 @@ pub fn run(args: Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    // Resolve Cursor auto-detection before the struct literal below moves other `args`
-    // fields out (a borrow of `args` after a partial move won't compile).
     let cursor = cursor_config(&args);
     let config = Config {
         demo: demo_enabled(),
@@ -44,19 +42,12 @@ pub fn run(args: Args) -> Result<()> {
         // circuit before the CLI override ever got a chance.
         claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
         codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
-        // Antigravity is always probed (no opt-in flag): an explicit --agy-dir
-        // wins, else fall back to the default location. A resolution failure is
-        // swallowed to None instead of fatal — agy is optional, so a sandbox
-        // without a home dir should still start and just omit the agy tab.
         agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
-        // Same treatment as agy: auto-detected, resolution failure swallowed.
         copilot_dir: args
             .copilot_dir
             .or_else(|| crate::paths::copilot_home().ok()),
         grok_dir: args.grok_dir.or_else(|| crate::paths::grok_home().ok()),
         opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
-        // Cursor uses an explicit token or a present store unless disabled.
-        // The collector handles signed-out stores without a network request.
         cursor,
         use_cache: !args.no_cache,
         local_offset,
@@ -86,7 +77,6 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if let Some(width) = args.render {
-        // Render all present providers and Total from one loaded report.
         let report = load_report(&config)?;
         for tab_index in 0..=report.providers.len() {
             println!(
@@ -108,8 +98,6 @@ pub fn load_report(config: &Config) -> Result<AppSummary> {
     })
 }
 
-/// Only surface a provider when it actually has data, then order what's left
-/// by how much it's used (heaviest first). Shared by the TUI and `--json`.
 fn finish_providers(report: &mut AppSummary) {
     report.providers.retain(provider_has_data);
     sort_providers_by_usage(&mut report.providers);
@@ -125,8 +113,6 @@ fn load_report_with_collections(
     load_report_inner(config, days, pricing_refresh)
 }
 
-/// Run configured collectors, threading independent work, and return their
-/// collections, including empty ones.
 fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<Collection>> {
     let (
         codex_result,
@@ -160,10 +146,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                     )
                 })
             });
-            // Antigravity and OpenCode are probed whenever their directory
-            // resolved; the collector returns an empty collection for a missing
-            // dir / DB, and an empty provider is filtered out before it ever
-            // becomes a tab.
             let agy_handle = scope.spawn(|| {
                 config.agy_dir.as_ref().map(|dir| {
                     agy::collect(dir, mtime_floor, config.use_cache, config.local_offset)
@@ -248,11 +230,6 @@ pub(crate) fn finish_combined(
     combined
 }
 
-/// A provider earns a tab only if it has real activity. Token volume catches
-/// most agents; sessions, tools, completions, interruptions, context volume
-/// and the credit ledger are the fallback for a session that logged activity
-/// but no usage tokens. Everything false means no activity is represented
-/// in this summary, so the tab is dropped.
 fn provider_has_data(summary: &crate::model::Summary) -> bool {
     summary.total_usage.token_volume() > 0
         || summary.sessions > 0
@@ -266,10 +243,6 @@ fn provider_has_data(summary: &crate::model::Summary) -> bool {
         || summary.credits.is_some()
 }
 
-/// Order the provider tabs by how much each is used — token volume, descending —
-/// so the heaviest provider lands at `tab_index 0` (the startup tab). Ties break
-/// on provider label for a stable order. The Total tab is not in `providers`;
-/// it stays appended at the end of the tab strip.
 fn sort_providers_by_usage(providers: &mut [crate::model::Summary]) {
     providers.sort_by(|left, right| {
         right
@@ -297,8 +270,6 @@ fn load_report_inner(
     let started = Instant::now();
     let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
 
-    // Derive the scan floor from the requested window, including the previous
-    // window for comparisons and one day of timezone slack.
     let mtime_floor =
         SystemTime::now().checked_sub(StdDuration::from_secs(history_days(days) * 86_400));
 
@@ -306,8 +277,7 @@ fn load_report_inner(
         crate::collector::sweep_cache_dir();
     }
     let collections = collect_all(config, mtime_floor)?;
-    // Collection is the slow half; by now the pricing fetch has usually
-    // landed. Join regardless so every summary below prices the same way.
+    // Join the pricing refresh so every summary below prices the same way.
     let _ = pricing_refresh.join();
 
     let providers = collections
@@ -343,7 +313,6 @@ mod tests {
     use super::*;
     use crate::model::{Orchestration, Provider, ScanStats, Summary, TokenUsage};
 
-    /// Provider summary for sorting by total token volume, then provider label.
     fn provider_summary(provider: Provider, model: &str, volume: u64) -> Summary {
         let usage = TokenUsage {
             input_tokens: volume,
@@ -404,8 +373,6 @@ mod tests {
 
     #[test]
     fn providers_sort_most_used_first() {
-        // The lighter provider is listed first on input to prove it is reordered
-        // to the back by descending token volume.
         let mut providers = vec![
             provider_summary(Provider::Codex, "gpt-5.5", 1_000_000),
             provider_summary(Provider::Claude, "claude-opus-4-8", 9_000_000),
@@ -413,7 +380,6 @@ mod tests {
 
         sort_providers_by_usage(&mut providers);
 
-        // Heaviest provider lands at tab_index 0 (startup tab).
         assert_eq!(providers[0].provider, Provider::Claude);
         assert_eq!(providers[1].provider, Provider::Codex);
         assert!(
@@ -424,20 +390,16 @@ mod tests {
 
     #[test]
     fn empty_provider_has_no_tab() {
-        // A provider with no tokens, sessions, tools, completions, or
-        // interruptions (a missing or empty log dir) must not earn a tab.
         let empty = provider_summary(Provider::Codex, "gpt-5.5", 0);
         assert!(!provider_has_data(&empty));
 
         let used = provider_summary(Provider::Claude, "claude-opus-4-8", 1);
         assert!(provider_has_data(&used));
 
-        // Interruptions alone are activity: an all-aborted window keeps the tab.
         let mut interrupted_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
         interrupted_only.interrupted = 2;
         assert!(provider_has_data(&interrupted_only));
 
-        // Context volume alone keeps the tab even when total usage is zero.
         let mut context_only = provider_summary(Provider::Codex, "gpt-5.5", 0);
         context_only.context = Some(crate::model::ContextSummary {
             calls: 0,

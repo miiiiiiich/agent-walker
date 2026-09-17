@@ -1,9 +1,7 @@
 use crate::model::ProjectStat;
 
 /// Drop leading path segments shared by every project name
-/// ("work/api", "work/blog" -> "api", "blog") so the distinctive tail
-/// survives narrow columns. Project names keep real path separators
-/// (see `collector::project_from_cwd`), so the shared prefix is slash-delimited.
+/// ("work/api", "work/blog" -> "api", "blog") so the distinctive tail survives narrow columns.
 pub(super) fn strip_common_project_prefix(projects: &mut [ProjectStat]) {
     if projects.len() < 2 {
         return;

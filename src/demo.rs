@@ -1,8 +1,3 @@
-//! Synthetic report data used when `AGENT_WALKER_DEMO=1`.
-//!
-//! A fixed-seed xorshift generates the report for the current date;
-//! the date axis and weekday-dependent volumes vary with the calendar.
-
 use std::path::PathBuf;
 
 use time::{Duration, OffsetDateTime, Time, Weekday};
@@ -28,12 +23,10 @@ impl Rng {
         x
     }
 
-    /// Uniform value in `lo..hi`.
     fn range(&mut self, lo: u64, hi: u64) -> u64 {
         lo + self.next() % (hi - lo).max(1)
     }
 
-    /// True with probability `percent`/100.
     fn chance(&mut self, percent: u64) -> bool {
         self.next() % 100 < percent
     }
@@ -61,7 +54,6 @@ const CLAUDE_TOOLS: [(&str, u64); 8] = [
 
 const SUBAGENTS: [&str; 3] = ["Explore", "general-purpose", "code-reviewer"];
 
-/// Demo skill labels for the SKILLS section (Claude attribution).
 const SKILLS: [&str; 6] = [
     "sk:review",
     "sk:release",
@@ -72,7 +64,6 @@ const SKILLS: [&str; 6] = [
 ];
 
 fn pick_skill(rng: &mut Rng, progress: f64) -> Option<String> {
-    // Synthetic sparse attribution tags only a subset of late-period events.
     if progress < 0.4 || !rng.chance(35) {
         return None;
     }
@@ -94,7 +85,6 @@ const CODEX_TOOLS: [(&str, u64); 4] = [
     ("web_search", 5),
 ];
 
-/// Evening-heavy hour profile (weight per hour of day).
 const HOUR_WEIGHTS: [u64; 24] = [
     4, 2, 1, 0, 0, 0, 0, 1, 2, 4, 6, 7, 8, 8, 9, 10, 12, 10, 8, 7, 8, 9, 8, 6,
 ];
@@ -112,7 +102,6 @@ fn pick_hour(rng: &mut Rng) -> u8 {
 }
 
 fn pick_project(rng: &mut Rng) -> String {
-    // Heavily skewed toward the first projects, like real work.
     let index = match rng.range(0, 100) {
         0..=39 => 0,
         40..=64 => 1,
@@ -124,9 +113,6 @@ fn pick_project(rng: &mut Rng) -> String {
     PROJECTS[index].to_owned()
 }
 
-/// Claude model mix shifts over the period: the Opus 4.x era hands over to
-/// the Claude 5 family (Fable 5 → Fable 5.1), with Sonnet on lighter turns and
-/// Haiku doing background work throughout.
 fn pick_claude_model(rng: &mut Rng, progress: f64) -> &'static str {
     if rng.chance(5) {
         return "claude-haiku-4-5";
@@ -153,7 +139,6 @@ fn pick_claude_model(rng: &mut Rng, progress: f64) -> &'static str {
     }
 }
 
-/// Split a daily token volume into a cache-heavy usage block.
 fn usage_block(rng: &mut Rng, volume: u64) -> TokenUsage {
     let cache_read = volume / 100 * 92;
     let cache_creation = volume / 100 * 5;
@@ -171,7 +156,6 @@ fn usage_block(rng: &mut Rng, volume: u64) -> TokenUsage {
     }
 }
 
-/// Turn durations: mostly minutes, with a believable 20m+ autonomy tail.
 fn turn_duration_ms(rng: &mut Rng) -> u64 {
     match rng.range(0, 100) {
         0..=34 => rng.range(20_000, 120_000),
@@ -183,8 +167,6 @@ fn turn_duration_ms(rng: &mut Rng) -> u64 {
     }
 }
 
-/// Daily volume envelope: ramps up over the period, dips on weekends, and
-/// keeps the first stretch quiet so the grass shows texture.
 #[allow(
     clippy::cast_precision_loss,
     reason = "Synthetic noise factor is below 200; no precision at stake."
@@ -196,7 +178,6 @@ fn daily_volume(rng: &mut Rng, progress: f64, weekday: Weekday) -> u64 {
     if progress < 0.3 && rng.chance(55) {
         return 0;
     }
-    // Shared daily-volume envelope; Codex applies its own scale.
     let ramp = 160_000_000.0 + 1_450_000_000.0 * progress * progress;
     let noise = rng.range(50, 160) as f64 / 100.0;
     let weekend = matches!(weekday, Weekday::Saturday | Weekday::Sunday);
@@ -320,8 +301,6 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
     clippy::cast_precision_loss,
     reason = "Day indices are tiny; precision is irrelevant for fake data."
 )]
-/// Codex model mix: GPT-5.6 Sol for most of the period, GPT-6 Astra taking
-/// over toward the end.
 fn pick_codex_model(rng: &mut Rng, progress: f64) -> &'static str {
     if progress > 0.75 && rng.chance(80) {
         "gpt-6-astra"
@@ -369,8 +348,6 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
             timestamp: Some(timestamp),
             effort: if rng.chance(88) { "xhigh" } else { "low" }.to_owned(),
         });
-        // Daily-peak 5h-window utilization; one mid-period day hits the limit
-        // so the red bar and the peak note render in the demo.
         let used_percent = if day_index == total_days / 2 {
             100.0
         } else {
@@ -425,9 +402,6 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
     collection
 }
 
-/// Copilot demo: session-exit token deltas plus the AI-credit ledger the
-/// CREDITS panel renders. Kept lighter than Claude/Codex — a secondary agent
-/// in the demo persona.
 #[cfg(test)]
 #[allow(
     clippy::cast_precision_loss,
@@ -469,8 +443,6 @@ fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collecti
             usage: usage_block(rng, volume),
             reported_cost_usd: None,
         });
-        // Daily AI-credit spend in nano-AIU; a mid-period spike gives the
-        // CREDITS chart a visible peak.
         let credits = if day_index == total_days * 2 / 3 {
             rng.range(4_000, 6_000)
         } else {

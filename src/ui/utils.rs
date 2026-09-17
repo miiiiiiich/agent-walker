@@ -6,7 +6,6 @@ use crate::model::Summary;
 
 use super::theme;
 
-/// Key column width for kv-style rows, shrinking on narrow columns.
 pub(super) fn kv_label_width(width: u16) -> usize {
     if width < 40 { 11 } else { 17 }
 }
@@ -26,9 +25,7 @@ pub(super) fn bar_fill(value: u64, max: u64, width: usize) -> usize {
     .min(width)
 }
 
-/// The bar track every horizontal stat row shares: a filled head and a
-/// FAINT remainder, both `▄` — one look for every section's bars. New
-/// sections must build their bars from this, not raw span pairs.
+/// Share one bar track so every section's bars look alike.
 pub(super) fn bar_track(filled: usize, width: usize, color: Color) -> [Span<'static>; 2] {
     let filled = filled.min(width);
     [
@@ -40,10 +37,7 @@ pub(super) fn bar_track(filled: usize, width: usize, color: Color) -> [Span<'sta
     ]
 }
 
-/// The canonical horizontal stat row: 14-char label, shared bar track, bold
-/// 8-char value, muted 7-char share (empty omits the column). List sections
-/// (MODELS / SKILLS and future ones) use this shape as-is so the dashboard
-/// stays visually uniform.
+/// Share one stat-row shape so the dashboard stays visually uniform.
 pub(super) fn stat_bar_line(
     label: &str,
     color: Color,
@@ -97,8 +91,6 @@ pub(super) fn section_title(title: &'static str, annotation: &str) -> Line<'stat
     Line::from(spans)
 }
 
-/// Bar track length for a column: fixed label (14) + count (8) columns,
-/// the bar absorbs the rest.
 pub(super) fn bar_width_for(width: u16) -> usize {
     usize::from(width).saturating_sub(22).clamp(8, 24)
 }
@@ -115,8 +107,6 @@ pub(super) fn weekday_index(date: Date) -> u8 {
     }
 }
 
-/// Compact credit formatting: two significant decimals under 10, one under
-/// 100, whole numbers beyond ("0.35", "12.4", "180").
 pub(super) fn format_credits(credits: f64) -> String {
     if credits < 10.0 {
         format!("{credits:.2}")

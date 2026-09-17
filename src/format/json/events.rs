@@ -1,4 +1,3 @@
-//! Dated, normalized collector records. Undated and out-of-window rows are dropped.
 use serde::Serialize;
 use time::{Date, OffsetDateTime};
 

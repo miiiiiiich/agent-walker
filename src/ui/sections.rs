@@ -1,8 +1,5 @@
 //! Panel-specific renderers live in one file per panel (`sections/*.rs`) so
-//! their changes are visible by filename; this facade preserves the
-//! `sections::*` call surface. Cross-panel row primitives (`bar_track` /
-//! `stat_bar_line` / `count_bar_line`) live in `ui/utils.rs`, so a change
-//! there is a deliberate cross-panel signal.
+//! their changes are visible by filename.
 mod agents;
 mod completion;
 mod context;

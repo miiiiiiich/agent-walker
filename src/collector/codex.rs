@@ -119,7 +119,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         // Fork/spawn copies rewrite timestamps to the fork instant and shift
         // line positions (GH-36). Skip the replay burst even without a parent
         // in the scan; content keys deduplicate remaining replay when present.
-        // Keep tracking session, model, and project through the burst.
         let in_replay_burst = session_meta_count >= 2
             && match (replay_second, timestamp) {
                 (Some(second), Some(ts)) => ts.unix_timestamp() == second,
@@ -253,7 +252,6 @@ fn collect_usage_event(
     });
 }
 
-/// Only primary-window snapshots from `token_count` events enter LIMITS.
 /// Key by co-riding usage state and snapshot fields so fork replay collapses
 /// (GH-36), while a moved window survives.
 fn collect_rate_limit_sample(
@@ -302,8 +300,7 @@ fn collect_rate_limit_sample(
     });
 }
 
-/// Reasoning-effort setting for one turn (`turn_context.payload.effort`).
-/// Keyed by `turn_id`, which fork replays copy verbatim — the replayed
+/// Key by `turn_id`, which fork replays copy verbatim — the replayed
 /// `turn_context` collapses with its original despite the rewritten timestamp
 /// (GH-36). Logs predating `turn_id` fall back to the positional key.
 fn collect_effort_event(
@@ -434,9 +431,7 @@ fn collect_pace_event(
     }
 }
 
-/// The turn's `item_completed` stamps (0.14x+): which items ran on the
-/// model's behalf (everything but reasoning, messages and compaction) and
-/// whether any item carried timing at all. Items dedupe by id — file-
+/// Items dedupe by id — file-
 /// wide, so a replay of an earlier turn's item never lands in a later turn
 /// — and tool spans are unioned (parallel tools), so the turn minus the
 /// tool time is the model's own time. The per-turn part resets only when
@@ -454,14 +449,11 @@ struct TurnItems {
 }
 
 impl TurnItems {
-    /// Forget this turn's spans; keep the file-wide replay memory.
     fn end_turn(&mut self) {
         self.tool_spans.clear();
         self.timed = false;
     }
 
-    /// Whether a lifecycle row is the newest seen (and record it). Undated
-    /// rows are taken as current.
     fn lifecycle_is_current(&mut self, timestamp: Option<OffsetDateTime>) -> bool {
         let Some(at) = timestamp else {
             return true;
@@ -504,10 +496,8 @@ impl TurnItems {
                     return;
                 }
                 self.timed = true;
-                // The model's own items are the reasoning, its messages and
-                // context compaction; every other timed item — commands,
-                // MCP, sub-agents, web search, image tools, sleeps, whatever
-                // a newer CLI adds — is something running on its behalf.
+                // Allowlist the model's own items; every other timed item type,
+                // including ones a newer CLI adds, counts as a tool.
                 let is_model = matches!(
                     string_path(value, &["payload", "item", "type"]).as_deref(),
                     Some("Reasoning" | "AgentMessage" | "ContextCompaction" | "UserMessage")
@@ -633,8 +623,6 @@ fn collect_tool_event(
     });
 }
 
-/// Codex tool names that wrap an arbitrary shell command rather than naming a
-/// concrete operation. These are the ones worth decomposing.
 fn is_shell_wrapper(name: &str) -> bool {
     matches!(
         name,
@@ -642,8 +630,6 @@ fn is_shell_wrapper(name: &str) -> bool {
     )
 }
 
-/// Read JSON-encoded `payload.arguments` with `command` or `cmd` as an array
-/// or string. Return the command basename, or `None` to keep the wrapper name.
 fn exec_command_basename(value: &Value) -> Option<String> {
     let arguments = string_path(value, &["payload", "arguments"])?;
     let parsed = serde_json::from_str::<Value>(&arguments).ok()?;
@@ -653,8 +639,6 @@ fn exec_command_basename(value: &Value) -> Option<String> {
     basename(&effective)
 }
 
-/// Normalize `command` into a token vector: a JSON array of strings, or a plain
-/// string split on whitespace.
 fn command_tokens(command: &Value) -> Option<Vec<String>> {
     match command {
         Value::Array(items) => {
@@ -672,18 +656,12 @@ fn command_tokens(command: &Value) -> Option<Vec<String>> {
     }
 }
 
-/// True for a short-option cluster that ends with `c` semantics — i.e. starts
-/// with a single `-`, is not a `--long` flag, and contains `c` (`-c`, `-lc`,
-/// `-lic`, `-euc`). Excludes `--norc` and friends, which merely contain `c`.
 fn is_shell_command_flag(token: &str) -> bool {
     token.starts_with('-') && !token.starts_with("--") && token.contains('c')
 }
 
-/// Run-prefixes that wrap the real command and should be skipped when looking
-/// for the effective command (`sudo cargo build` -> cargo).
 const RUN_PREFIXES: [&str; 4] = ["env", "sudo", "time", "nice"];
 
-/// A leading variable assignment (`FOO=bar`): an identifier, `=`, then a value.
 fn is_var_assignment(token: &str) -> bool {
     let Some((name, _)) = token.split_once('=') else {
         return false;
@@ -693,10 +671,6 @@ fn is_var_assignment(token: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// Pick the token that names the real command. For a `bash -c "<script>"`
-/// wrapper, that is the first token of the script; otherwise it is the first
-/// real token after any run-prefix (`env`/`sudo`/`time`/`nice`) and leading
-/// variable assignments.
 fn effective_command(tokens: &[String]) -> Option<String> {
     let first = tokens.first()?;
     let is_shell = matches!(
@@ -716,8 +690,6 @@ fn effective_command(tokens: &[String]) -> Option<String> {
             .map(ToOwned::to_owned);
     }
 
-    // Not a shell wrapper: skip run-prefixes and `FOO=bar` assignments to reach
-    // the real command (`sudo cargo build` -> cargo, `env FOO=1 grep` -> grep).
     let effective = tokens.iter().find(|token| {
         let bare = trim_quotes(token);
         !is_var_assignment(bare) && !RUN_PREFIXES.contains(&basename(bare).as_deref().unwrap_or(""))
@@ -725,7 +697,6 @@ fn effective_command(tokens: &[String]) -> Option<String> {
     Some(trim_quotes(effective).to_owned())
 }
 
-/// Strip a single matching pair of surrounding quotes (`"grep"` / `'grep'`).
 fn trim_quotes(token: &str) -> &str {
     for quote in ['"', '\''] {
         if let Some(inner) = token
@@ -738,9 +709,6 @@ fn trim_quotes(token: &str) -> &str {
     token
 }
 
-/// Basename of a command token (`/usr/bin/grep` -> `grep`). Gives up on shapes
-/// that aren't a plain command word — a leading `(` subshell or a `FOO=bar`
-/// assignment — so the caller falls back to the wrapper name.
 fn basename(command: &str) -> Option<String> {
     let command = trim_quotes(command);
     if command.is_empty() || command.starts_with('(') || command.contains('=') {
@@ -750,8 +718,6 @@ fn basename(command: &str) -> Option<String> {
     (!base.is_empty()).then(|| base.to_owned())
 }
 
-/// The running cumulative usage object riding on a `token_count` event,
-/// gated on being fingerprintable.
 fn total_usage(value: &Value) -> Option<&Value> {
     value
         .get("payload")
@@ -772,8 +738,6 @@ fn fingerprintable(usage: &Value) -> Option<&Value> {
         .then_some(usage)
 }
 
-/// Order-fixed fingerprint of raw usage counters; missing fields, including
-/// the optional `cache_write_input_tokens`, read as zero.
 fn usage_fingerprint(value: &Value) -> String {
     format!(
         "{}:{}:{}:{}:{}:{}",
@@ -887,10 +851,6 @@ mod tests {
 
     use super::*;
 
-    /// The turn minus its tool-run items is the model's time: replayed
-    /// items count once, parallel tools union, a steering `user_message`
-    /// mid-turn keeps what ran before it, and a turn with no timed item at
-    /// all reports `None` rather than "all model".
     #[test]
     fn model_time_is_the_turn_minus_the_union_of_tool_items() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -929,24 +889,12 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.duration_events.len(), 4);
-        // 20s turn: tools = [5s,15s] ∪ [10s,18s] = 13s (the replayed command
-        // counts once, the overlap once, the steering message drops
-        // nothing) → 7s model.
         assert_eq!(collection.duration_events[0].model_ms, Some(7_000));
-        // No timed items → the split is unknown, not 100% model.
         assert_eq!(collection.duration_events[1].model_ms, None);
-        // The duration-less completion closed i5, the replay of the first
-        // turn's command is remembered file-wide, a replayed older
-        // task_started does not reset i7 (a web search — a tool by
-        // inversion, not by allowlist), and an old item row leaking in after
-        // it is rejected by its timestamp: 9s minus the 2s search.
         assert_eq!(collection.duration_events[2].model_ms, Some(7_000));
-        // A turn whose only item is a replay is unmeasured, not all-model.
         assert_eq!(collection.duration_events[3].model_ms, None);
     }
 
-    /// `task_complete` → the next `user_message` under 30 minutes is the
-    /// human's pace; a prompt an hour later is not.
     #[test]
     fn pace_is_task_complete_to_next_user_message() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1007,9 +955,6 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
-        // 00:01 -> 00:02 and 00:03 -> 00:04; the replayed pair adds nothing,
-        // and a replayed completion after the pairing cannot re-arm a gap
-        // for the 00:05 prompt.
         assert_eq!(gaps, vec![60_000, 60_000]);
     }
 
@@ -1064,16 +1009,12 @@ mod tests {
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":37.5,"window_minutes":300},"secondary":{"used_percent":12.0,"window_minutes":10080}}}}"#,
                 "\n",
-                // A turn_context without effort contributes no effort event.
                 r#"{"timestamp":"2026-06-01T00:00:04Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
                 "\n",
-                // The same aborted turn re-emitted twice counts once.
                 r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:06Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","turn_id":"t7","duration_ms":57000}}"#,
                 "\n",
-                // A non-user abort reason and a legacy abort without turn_id
-                // are both discarded, not counted as escs.
                 r#"{"timestamp":"2026-06-01T00:00:07Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"replaced","turn_id":"t8","duration_ms":100}}"#,
                 "\n",
                 r#"{"timestamp":"2026-06-01T00:00:08Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","duration_ms":200}}"#,
@@ -1089,24 +1030,15 @@ mod tests {
         assert_eq!(collection.permission_events.len(), 1);
         assert_eq!(collection.permission_events[0].mode, "never");
         assert_eq!(collection.interrupt_events.len(), 1);
-        // Only the PRIMARY (5h) window is sampled; the weekly window is
-        // deliberately dropped from the LIMITS history.
         assert_eq!(collection.rate_limit_samples.len(), 1);
         assert!((collection.rate_limit_samples[0].used_percent - 37.5).abs() < f64::EPSILON);
     }
 
-    /// Positional-fallback path (fixtures lack `total_token_usage`): the key
-    /// is (session, timestamp, `line_index`). A copied session file reproduces
-    /// all three, so the duplicate file is merged away — but two distinct
-    /// turns inside one file differ in `line_index` and both survive, even
-    /// though their usage numbers are identical here. So the two-turn file
-    /// copied twice yields 2 events (not 4, and not 1).
     #[test]
     fn deduplicates_copies_but_keeps_distinct_turns() {
         let temp = TempDir::new().expect("test tempdir should be created");
         let day = temp.path().join("2026/06/01");
         fs::create_dir_all(&day).expect("test dirs should be created");
-        // Two turns with identical usage but distinct timestamps and lines.
         let lines = concat!(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
             "\n",
@@ -1121,7 +1053,6 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.stats.files_seen, 2);
-        // 2 distinct turns survive; the copied file is deduplicated away.
         assert_eq!(collection.usage_events.len(), 2);
         let total: u64 = collection
             .usage_events
@@ -1131,8 +1062,6 @@ mod tests {
         assert_eq!(total, 220);
     }
 
-    /// Parent rollout: two turns with cumulative totals, rate limits, and a
-    /// `turn_id`-carrying `turn_context` — the semantic-key path (GH-36).
     fn fork_parent_lines() -> &'static str {
         concat!(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"p1","model_provider":"openai"}}"#,
@@ -1150,10 +1079,6 @@ mod tests {
         )
     }
 
-    /// Forked child rollout, mirroring the real fork shape: the child's own
-    /// `session_meta`, the parent's copied `session_meta`, the parent history
-    /// replayed verbatim with every timestamp rewritten to the fork instant,
-    /// then the child's own new turn.
     fn fork_child_lines() -> &'static str {
         concat!(
             r#"{"timestamp":"2026-06-01T01:00:00Z","type":"session_meta","payload":{"id":"c1","forked_from_id":"p1","model_provider":"openai"}}"#,
@@ -1180,7 +1105,6 @@ mod tests {
     }
 
     fn assert_fork_replay_counted_once(collection: &Collection) {
-        // 2 parent turns + 1 child turn; the replayed copies collapse.
         assert_eq!(collection.usage_events.len(), 3);
         let total: u64 = collection
             .usage_events
@@ -1190,15 +1114,9 @@ mod tests {
         assert_eq!(total, 380); // 110 + 140 + 130
         assert_eq!(collection.rate_limit_samples.len(), 3);
         assert_eq!(collection.effort_events.len(), 2);
-        // Replayed task_complete lines are skipped with the burst, so the
-        // (unkeyed) duration events cannot double-count.
         assert_eq!(collection.duration_events.len(), 2);
-        // The parent's aborted turn replays in the burst too — one event.
         assert_eq!(collection.interrupt_events.len(), 1);
 
-        // Replayed events keep the parent's ORIGINAL timestamps — day/hour
-        // attribution must not shift to the fork instant, whatever the file
-        // scan order.
         let original = OffsetDateTime::parse("2026-06-01T00:00:03Z", &Rfc3339)
             .expect("test timestamp should parse");
         let first_turn = collection
@@ -1272,8 +1190,6 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // Only the child's own turn survives; the replayed parent history is
-        // dropped instead of being counted at the fork instant.
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.token_volume(), 130);
         assert_eq!(collection.rate_limit_samples.len(), 1);
@@ -1311,8 +1227,6 @@ mod tests {
         assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
     }
 
-    /// Two genuine turns with identical per-turn usage still differ in the
-    /// cumulative, so both survive the semantic key.
     #[test]
     fn same_last_usage_with_advanced_cumulative_both_survive() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1342,9 +1256,6 @@ mod tests {
         assert_eq!(total, 220);
     }
 
-    /// Effort events are keyed by `turn_id`: distinct turns with the same
-    /// effort both survive, while a replayed `turn_context` (same `turn_id`,
-    /// rewritten timestamp) collapses with its original.
     #[test]
     fn effort_dedup_by_turn_id() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1393,14 +1304,9 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        // Identical last vectors, but the broken cumulatives must not collide
-        // them into one all-zero fingerprint.
         assert_eq!(collection.usage_events.len(), 2);
     }
 
-    /// Same usage state re-emitted with a moved rate-limit window: the
-    /// snapshot's own fields are part of the key, so both samples survive
-    /// while the usage event itself collapses.
     #[test]
     fn rate_limit_renotification_with_moved_window_survives() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1456,7 +1362,6 @@ mod tests {
         assert_eq!(collection.effort_events.len(), 2);
     }
 
-    /// Distinct `turn_id` values sharing a timestamp must remain distinct.
     #[test]
     fn effort_same_timestamp_distinct_turn_ids_both_survive() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1480,8 +1385,6 @@ mod tests {
         assert_eq!(collection.effort_events.len(), 2);
     }
 
-    /// Every counter in the fingerprint is discriminating — two events
-    /// differing only in `cache_write_input_tokens` stay distinct.
     #[test]
     fn cache_write_difference_yields_distinct_keys() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1505,8 +1408,6 @@ mod tests {
         assert_eq!(collection.usage_events.len(), 2);
     }
 
-    /// The Codex desktop app *moves* a session's JSONL from `sessions/` to the
-    /// sibling `archived_sessions/`, so the collector must scan both.
     #[test]
     fn scans_sibling_archived_sessions() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1537,7 +1438,6 @@ mod tests {
 
         let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
 
-        // Both the active and the archived session are counted.
         assert_eq!(collection.stats.files_seen, 2);
         assert_eq!(collection.usage_events.len(), 2);
         let total: u64 = collection
@@ -1568,19 +1468,12 @@ mod tests {
 
         let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
 
-        // The stale duplicate is filtered by relative path before parsing, so
-        // only one file is read. Its two timestamped lines yield two session
-        // touches — not four — proving the duplicate didn't double-count (the
-        // bug this guards: session_touches / duration_events aren't key-deduped).
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
         assert_eq!(collection.session_touches.len(), 2);
     }
 
-    /// Shell-wrapper tool calls (`exec_command` etc.) are decomposed to the real
-    /// command basename so the tool list reflects the real command;
-    /// unrecognized arguments fall back to the wrapper name unchanged.
     #[test]
     fn decomposes_exec_command_to_real_command_basename() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1591,7 +1484,6 @@ mod tests {
                 r#"{{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{{"type":"function_call","call_id":"{call}","name":"exec_command","arguments":{args}}}}}"#,
             )
         };
-        // `arguments` is a JSON *string*, so the inner JSON is serde-encoded.
         let arg = |inner: &str| serde_json::Value::String(inner.to_owned()).to_string();
         let mut body = String::from(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,

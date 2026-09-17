@@ -3,7 +3,6 @@ use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// Top repositories by token volume — where the AI time actually goes.
 pub(in crate::ui) fn project_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     if summary.projects.is_empty() {
         return Vec::new();

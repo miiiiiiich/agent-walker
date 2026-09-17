@@ -16,7 +16,6 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    // Show the period annotation at this width; the provider tab count is variable.
     if width >= 84 {
         spans.push(Span::styled(
             format!("  last {} days", state.report.period_days),
@@ -25,7 +24,6 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
         spans.push(Span::raw("  "));
     }
 
-    // Provider tabs: provider-colored bar + underlined name marks the selection.
     for (index, (label, color)) in state.tabs().into_iter().enumerate() {
         spans.push(Span::raw("   "));
         if index == state.tab_index {
@@ -44,7 +42,6 @@ pub(super) fn header_line(state: &UiState, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Use the full line if it fits; otherwise return the compact variant.
 pub(super) fn hero_line(summary: &Summary, width: u16) -> Line<'static> {
     let width = usize::from(width);
     let full = build_hero(summary, "   ·   ", false);
@@ -90,8 +87,6 @@ fn build_hero(summary: &Summary, separator: &'static str, compact: bool) -> Line
     Line::from(spans)
 }
 
-/// Period-over-period delta badge ("↑12%"). None when there is no previous
-/// data to compare against.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,

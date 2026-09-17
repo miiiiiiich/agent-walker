@@ -45,7 +45,6 @@ pub(in crate::ui) fn model_chart_lines(
         },
     )];
 
-    // Per-segment per-column mean volume: top models, then the remainder.
     let top_models: Vec<_> = summary
         .models
         .iter()
@@ -109,7 +108,6 @@ pub(in crate::ui) fn model_chart_lines(
         }
     };
 
-    // Cumulative segment boundaries per column, in half-cell units.
     let boundaries: Vec<Vec<usize>> = (0..columns)
         .map(|column| {
             let mut running = 0.0;
@@ -173,7 +171,6 @@ pub(in crate::ui) fn model_chart_lines(
         .filter_map(|fraction| {
             let index = ((day_count.saturating_sub(1)) as f64 * fraction).round() as usize;
             let day = summary.daily.get(index)?;
-            // Center the label on the exact column that draws this day.
             Some((
                 Y_WIDTH + index / chunk,
                 format!(

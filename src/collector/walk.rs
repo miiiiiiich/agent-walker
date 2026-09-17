@@ -1,4 +1,3 @@
-//! Log-directory walking with mtime filtering and scan statistics.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -7,9 +6,6 @@ use tracing::debug;
 
 use crate::model::ScanStats;
 
-/// Recursively list files under `dir` with the given extension whose mtime is
-/// at or after `mtime_floor`. A file whose last write predates the analysis
-/// window cannot contain in-window lines, so it is skipped entirely.
 pub fn list_files(
     dir: &Path,
     extension: &str,

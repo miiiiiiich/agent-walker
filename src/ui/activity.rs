@@ -48,7 +48,6 @@ pub(super) fn activity_lines(summary: &Summary) -> Vec<Line<'static>> {
     lines
 }
 
-/// GitHub-style weekly grid driven by token volume.
 fn usage_heatmap(summary: &Summary) -> Vec<Line<'static>> {
     let usage_by_date = summary
         .daily
@@ -58,7 +57,6 @@ fn usage_heatmap(summary: &Summary) -> Vec<Line<'static>> {
     heatmap_grid(summary, &usage_by_date)
 }
 
-/// Fallback heatmap from per-day session counts (providers without usage numbers).
 fn session_heatmap(summary: &Summary) -> Vec<Line<'static>> {
     let sessions_by_date = summary
         .daily_sessions
@@ -81,7 +79,6 @@ fn heatmap_grid(summary: &Summary, value_by_date: &BTreeMap<Date, u64>) -> Vec<L
 
     let mut lines = Vec::new();
 
-    // Month markers aligned to week columns.
     let mut months = " ".repeat(5);
     let mut last_month = None;
     for week in 0..weeks {

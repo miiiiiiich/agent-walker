@@ -119,7 +119,6 @@ mod tests {
     fn usd_rounding_to_zero_is_never_negative() {
         assert_eq!(format_usd(0.0), "$0.00");
         assert_eq!(format_usd(-0.0), "$0.00");
-        // A sub-cent residue rounds to a clean zero, not "-0.00".
         assert_eq!(format_usd(-0.0001), "$0.00");
         assert_eq!(format_usd(12.5), "$12.50");
     }
@@ -136,15 +135,12 @@ mod tests {
         assert_eq!(short_model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
         assert_eq!(short_model_name("gpt-5.5"), "GPT 5.5");
         assert_eq!(short_model_name("custom-model"), "custom-model");
-        // Claude 5 family: the point version must survive, and a date stamp must not.
         assert_eq!(short_model_name("claude-fable-5-1"), "Fable 5.1");
         assert_eq!(short_model_name("claude-fable-5"), "Fable 5");
         assert_eq!(short_model_name("claude-opus-5"), "Opus 5");
         assert_eq!(short_model_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
-        // Codex model ids carry a codename suffix.
         assert_eq!(short_model_name("gpt-5.6-sol"), "GPT 5.6 Sol");
         assert_eq!(short_model_name("gpt-6-astra"), "GPT 6 Astra");
-        // Older ids carry the version before the family word.
         assert_eq!(short_model_name("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
         assert_eq!(short_model_name("claude-opus-4-1-20250805"), "Opus 4.1");
     }
@@ -158,26 +154,20 @@ mod tests {
             short_model_name("gemini/Users/secret/repo\n<script>"),
             "Other"
         );
-        // The gpt-prefixed passthrough is judged the same way.
         assert_eq!(short_model_name("gpt-/etc/passwd"), "Other");
         // Capitalising a suffix must not launder a non-ASCII character into
         // allowed ASCII (`ß` → `SS`) before the sanitizer sees it.
         assert_eq!(short_model_name("gpt-ßsecret"), "Other");
-        // Non-ASCII / control-only names collapse rather than yielding an empty
-        // chip.
         assert_eq!(short_model_name("名前/\t"), "Other");
-        // A legitimate display name with spaces and parens is preserved verbatim.
         assert_eq!(
             short_model_name("Gemini 3.5 Flash (High)"),
             "Gemini 3.5 Flash (High)"
         );
-        // A local-model id keeps its `:tag` (Ollama / OpenCode) — not collapsed.
         assert_eq!(short_model_name("qwen3:8b"), "qwen3:8b");
     }
 
     #[test]
     fn strips_known_provider_namespace_but_collapses_unknown() {
-        // Gateway / OpenCode `provider/model` ids show by their real name.
         assert_eq!(short_model_name("openai/gpt-4o"), "GPT 4o");
         assert_eq!(short_model_name("google/gemini-2.5-pro"), "gemini-2.5-pro");
         assert_eq!(short_model_name("anthropic/claude-opus-4-8"), "Opus 4.8");

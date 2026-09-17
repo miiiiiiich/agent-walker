@@ -3,8 +3,6 @@ use anyhow::{Context, Result};
 use super::card::ShareCard;
 use super::svg::svg;
 
-/// Rasterize the card SVG at 2x. Pure-Rust, no network; uses locally
-/// installed fonts via fontdb.
 pub(crate) fn render_pixmap(card: &ShareCard) -> Result<resvg::tiny_skia::Pixmap> {
     use std::sync::OnceLock;
 
@@ -44,7 +42,6 @@ pub(crate) fn render_pixmap(card: &ShareCard) -> Result<resvg::tiny_skia::Pixmap
     Ok(pixmap)
 }
 
-/// Card as PNG bytes.
 pub fn render_png(card: &ShareCard) -> Result<Vec<u8>> {
     render_pixmap(card)?.encode_png().context("encode card PNG")
 }

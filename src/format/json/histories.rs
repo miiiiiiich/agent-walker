@@ -1,4 +1,3 @@
-//! Mode distributions, rate-limit history, and credit history.
 use serde::Serialize;
 use time::Date;
 
@@ -71,8 +70,6 @@ impl LimitsDto {
                 .days
                 .iter()
                 .map(|&(date, day)| {
-                    // Three states, kept apart: a day without use and a day
-                    // whose samples are missing both lack a value.
                     let (used_percent, state) = match day {
                         LimitDay::Measured(value) => (Some(value), "measured"),
                         LimitDay::NoSample => (None, "no_sample"),

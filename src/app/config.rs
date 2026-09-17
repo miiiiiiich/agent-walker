@@ -1,8 +1,4 @@
-//! CLI arguments, resolved configuration, and the default log-location
-//! probes — what the app reads and which mode it runs in (report, share,
-//! render, completions), separate from how the report is assembled.
-/// The TUI analysis window in days. Fixed because day charts allocate one
-/// column per day; `--json --days` may request a different window.
+/// Fix the TUI window because day charts allocate one column per day.
 pub const ANALYSIS_WINDOW_DAYS: u16 = 30;
 
 use std::env;
@@ -118,38 +114,20 @@ pub struct Config {
     pub demo: bool,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
-    /// Antigravity log directory, or `None` when it can't be resolved (e.g.
-    /// `dirs::home_dir()` fails in a sandbox). Resolution failure is swallowed
-    /// rather than fatal, since Antigravity is optional — its tab only shows up
-    /// when logs are actually found there.
+    /// Home-resolution failure is nonfatal because Antigravity is optional.
     pub agy_dir: Option<PathBuf>,
-    /// Grok Build root, or `None` when it can't be resolved. Optional and
-    /// auto-detected like the other secondary providers.
     pub grok_dir: Option<PathBuf>,
-    /// GitHub Copilot CLI root, or `None` when it can't be resolved. Optional
-    /// and auto-detected like Antigravity: the tab appears only when session
-    /// logs exist under `session-state/`.
     pub copilot_dir: Option<PathBuf>,
-    /// OpenCode data directory, or `None` when it can't be resolved. Matching
-    /// SQLite databases are auto-detected; collected activity determines visibility.
     pub opencode_dir: Option<PathBuf>,
-    /// Cursor settings, or `None` when there's nothing to read (no Cursor store
-    /// and no `CURSOR_TOKEN`). `Some` carries the resolved `state.vscdb` path,
-    /// the CLI-config path, and an optional token override. Auto-detected, but
-    /// the one collector that reaches the network.
     pub cursor: Option<CursorConfig>,
     pub use_cache: bool,
-    /// Local UTC offset captured at startup (single-threaded moment), used to
-    /// bucket all timestamps into the user's local days and hours.
     pub local_offset: UtcOffset,
 }
 
-/// Resolved Cursor settings (see `Config::cursor`).
 #[derive(Clone)]
 pub struct CursorConfig {
     pub state_db: PathBuf,
     pub cli_config: PathBuf,
-    /// Token override from `CURSOR_TOKEN`; `None` reads the local `state.vscdb`.
     pub token: Option<String>,
 }
 
@@ -181,8 +159,6 @@ pub(super) fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
 }
 
-/// Detect Cursor from a nonempty `CURSOR_TOKEN` or a present `state.vscdb`,
-/// unless `--no-cursor` is set. The collector skips signed-out stores.
 pub(super) fn cursor_config(args: &Args) -> Option<CursorConfig> {
     // Checked first so `--no-cursor` reads neither `CURSOR_TOKEN` nor the store.
     if args.no_cursor {

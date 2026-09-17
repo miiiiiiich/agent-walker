@@ -3,20 +3,11 @@ use crate::model::{ContextReason, ContextSummary, Summary};
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 
-/// The CONTEXT section: how much of the window's input the prompt cache
-/// served (event totals, every usage row), and where the input-equivalent
-/// volume went — re-reading long contexts (by size band), resuming sessions
-/// after the cache expired, starting sessions, ordinary new input, and an
-/// `other` row for volume with no call to attribute it to (subagent rows,
-/// aggregate-logging providers). Call-level rows carry a per-call average
-/// so "keep going" and "start fresh" sit on one scale; `other` shows `—`.
+/// Use per-call averages so continuing and starting fresh compare on the same scale.
 pub(in crate::ui) fn context_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let Some(context) = &summary.context else {
         return Vec::new();
     };
-    // Raw cache data is worth a title even when nothing priced (effective
-    // == 0); aggregate-only providers (calls == 0) still get their headline
-    // and the `other` row.
     if context.context_tokens == 0 {
         return Vec::new();
     }
@@ -101,14 +92,10 @@ fn share_label(part: u64, total: u64) -> String {
     format!("{:.0}%", part as f64 / total.max(1) as f64 * 100.0)
 }
 
-/// Input-equivalent tokens per call — the bold value column. Bands and
-/// reason rows use the same scale, so "keep going" and "start fresh"
-/// compare directly.
 fn per_call(effective: u64, calls: usize) -> String {
     let calls = u64::try_from(calls).unwrap_or(u64::MAX).max(1);
     let value = format_tokens(effective / calls);
-    // The value column is 8 wide; a poisoned counter (saturated u64 →
-    // "18446744073.7B") must not push the share column off the rail.
+    // A saturated counter must not push the share column off the rail.
     if value.chars().count() > 8 {
         ">999B".to_owned()
     } else {
@@ -123,8 +110,6 @@ fn per_call_reason(reason: &ContextReason) -> String {
     per_call(reason.effective, reason.calls)
 }
 
-/// Width-fitted title annotation: the fixed window, the cached share, and
-/// the effective volume, dropping from the right until it fits.
 fn context_annotation(context: &ContextSummary, summary: &Summary, width: u16) -> String {
     let budget = usize::from(width).saturating_sub("▍ CONTEXT  ".chars().count());
     let cached = format!("{:.0}% cached", context.cached_share() * 100.0);
@@ -154,8 +139,6 @@ mod tests {
             .collect()
     }
 
-    /// Empty bands are skipped, both reason rows render, and the title never
-    /// overflows the rail.
     #[test]
     fn renders_populated_bands_and_reasons_within_width() {
         let summary = crate::share::fixtures::sample_summary();
@@ -163,7 +146,6 @@ mod tests {
         let text: Vec<String> = lines.iter().map(rendered).collect();
         assert!(text[0].contains("30d · 95% cached"), "{:?}", text[0]);
         assert!(text[0].contains("effective input"), "{:?}", text[0]);
-        // title + legend + 3 populated bands (500K+ is empty) + expired + cold start + uncached + other.
         assert_eq!(lines.len(), 2 + 3 + 4);
         assert!(
             text.iter()
@@ -193,7 +175,6 @@ mod tests {
         }
     }
 
-    /// A saturated counter from a poisoned log still renders inside the rail.
     #[test]
     fn saturated_values_stay_within_width() {
         let mut summary = crate::share::fixtures::sample_summary();
@@ -217,8 +198,6 @@ mod tests {
         }
     }
 
-    /// An aggregate-only provider (Copilot / Grok: totals, no calls) still
-    /// shows the headline and its `other` row; nothing priced → title only.
     #[test]
     fn aggregate_only_and_unpriced_shapes() {
         let mut summary = crate::share::fixtures::sample_summary();
@@ -250,8 +229,6 @@ mod tests {
         assert_eq!(context_lines(&summary, 100).len(), 1);
     }
 
-    /// No context data means no section; sessionless providers retain bands
-    /// and uncached input, but omit cold-start and expiry rows.
     #[test]
     fn absent_and_sessionless_shapes() {
         let mut summary = crate::share::fixtures::sample_summary();

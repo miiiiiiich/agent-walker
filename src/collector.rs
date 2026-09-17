@@ -1,9 +1,3 @@
-//! One collector per provider (`collector/<provider>.rs`) over shared
-//! infrastructure split by responsibility: `events` (the serialized bundle),
-//! `walk` (directory scanning), `cache` (the versioned parse cache — parsing
-//! semantics changes bump `CACHE_VERSION` there), `merge` (cross-file keyed
-//! dedup), and `project` (cwd normalization). Providers and callers keep
-//! addressing `crate::collector::*` through the re-exports below.
 pub mod agy;
 mod agy_conv;
 pub mod claude;

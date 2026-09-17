@@ -1,20 +1,12 @@
-//! Centralized platform-aware home, cache, and downloads resolution,
-//! with environment overrides for per-tool roots — only the variables each
-//! tool itself reads.
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 
-/// The user's home directory. `dirs::home_dir` consults `$HOME` on Unix and
-/// `%USERPROFILE%` on Windows.
 pub fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow!("could not locate the user home directory"))
 }
 
-/// Use a nonempty `OsString` override, preserving non-UTF-8 paths;
-/// otherwise invoke the lazy fallback.
 fn resolve_root<F>(env_value: Option<OsString>, fallback: F) -> Result<PathBuf>
 where
     F: FnOnce() -> Result<PathBuf>,
@@ -25,52 +17,34 @@ where
     }
 }
 
-/// Use nonempty `CLAUDE_CONFIG_DIR`; otherwise use `~/.claude`.
 pub fn claude_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("CLAUDE_CONFIG_DIR"), || {
         Ok(home_dir()?.join(".claude"))
     })
 }
 
-/// Root directory Codex CLI reads. Defaults to `~/.codex`.
-///
-/// `CODEX_HOME` overrides it if set — this is the official variable
-/// documented at <https://developers.openai.com/codex/environment-variables>.
 pub fn codex_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("CODEX_HOME"), || {
         Ok(home_dir()?.join(".codex"))
     })
 }
 
-/// Root directory Antigravity CLI reads. No env override is known; the value
-/// is `~/.gemini/antigravity-cli`.
 pub fn agy_home() -> Result<PathBuf> {
     Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
-/// Root directory Grok Build (xAI's agentic CLI) writes. `GROK_HOME`
-/// overrides it; the default is `~/.grok`, with per-cwd session logs under
-/// `<root>/sessions/<encoded-cwd>/<session-id>/updates.jsonl`.
 pub fn grok_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("GROK_HOME"), || {
         Ok(home_dir()?.join(".grok"))
     })
 }
 
-/// Root directory GitHub Copilot CLI writes. `COPILOT_HOME` overrides it;
-/// the default is `~/.copilot`, with session logs under
-/// `<root>/session-state/<uuid>/events.jsonl`.
 pub fn copilot_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("COPILOT_HOME"), || {
         Ok(home_dir()?.join(".copilot"))
     })
 }
 
-/// Data directory OpenCode reads. `OPENCODE_HOME` overrides it; otherwise it
-/// follows the XDG data dir (`$XDG_DATA_HOME/opencode`, default
-/// `~/.local/share/opencode`), as documented at
-/// <https://opencode.ai/docs/troubleshooting/>. The SQLite store lives at
-/// `<root>/opencode.db`.
 pub fn opencode_home() -> Result<PathBuf> {
     resolve_root(std::env::var_os("OPENCODE_HOME"), || {
         let xdg = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty());
@@ -82,9 +56,6 @@ pub fn opencode_home() -> Result<PathBuf> {
     })
 }
 
-/// Cursor's Electron `state.vscdb`, where the auth token lives. Cursor follows
-/// the VS Code layout under the platform config dir: `Application Support`
-/// (macOS), `%APPDATA%` (Windows), `~/.config` (Linux).
 pub fn cursor_state_db() -> Result<PathBuf> {
     let base =
         dirs::config_dir().ok_or_else(|| anyhow!("could not locate the user config directory"))?;
@@ -95,25 +66,17 @@ pub fn cursor_state_db() -> Result<PathBuf> {
         .join("state.vscdb"))
 }
 
-/// Cursor CLI config, which carries the account's `authId` used to build the
-/// session cookie.
 pub fn cursor_cli_config() -> Result<PathBuf> {
     Ok(home_dir()?.join(".cursor").join("cli-config.json"))
 }
 
-/// Base directory for `agent-walker`'s parse cache. Stays at
-/// `<home>/.cache/agent-walker` on every platform so a macOS/Linux user
-/// upgrading does not lose their warmed cache; on Windows this resolves under
-/// `%USERPROFILE%\.cache\agent-walker`.
+/// Keep the cache under `<home>/.cache/agent-walker` so existing macOS/Linux
+/// users do not lose their warmed cache.
 pub fn cache_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".cache").join("agent-walker"))
 }
 
-/// Default save directory for the share card. `dirs::download_dir` consults
-/// the OS-native location (Known Folders on Windows, `NSDownloadsDirectory`
-/// on macOS, XDG on Linux), so a non-English or relocated Downloads folder
-/// still resolves correctly. Falls back to the home directory when the OS
-/// doesn't report a Downloads location.
+/// Use the OS-native Downloads resolver so localized and relocated folders resolve correctly.
 pub fn downloads_dir() -> Result<PathBuf> {
     let home = home_dir()?;
     Ok(dirs::download_dir()
@@ -162,7 +125,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_root_preserves_non_utf8_env_path() {
-        // Non-UTF-8 environment paths must survive resolution without invoking the fallback.
         use std::os::unix::ffi::OsStringExt;
         let bytes = vec![b'/', b't', b'm', b'p', b'/', 0xff, 0xfe, b'/', b'x'];
         let raw = OsString::from_vec(bytes.clone());

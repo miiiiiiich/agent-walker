@@ -1,12 +1,5 @@
-//! Working-directory to project-label normalization, shared by every
-//! collector.
-/// Normalize a working-directory path into a project label: strip the home
-/// prefix and (on Windows) normalize separators to `/` so the same repo
-/// collapses to one project key regardless of native (`\`) vs npm/Node-style
-/// (`/`) cwd. "/Users/me/code/app" -> "code/app",
-/// "C:\\Users\\me\\code\\app" -> "code/app". A session whose cwd is exactly
-/// the home directory renders as "~" rather than an empty label so the
-/// PROJECTS row has something readable.
+/// Normalize Windows separators so native and npm/Node cwds share one project key.
+/// Render a home-directory cwd as "~" so the project label is not empty.
 pub fn project_from_cwd(cwd: &str) -> String {
     let home = crate::paths::home_dir()
         .ok()
@@ -83,24 +76,18 @@ mod tests {
 
     #[test]
     fn strip_home_prefix_unix() {
-        // Posix-only test: case-sensitive byte comparison with boundary check.
         if !cfg!(windows) {
             assert_eq!(
                 strip_home_prefix("/Users/me/code/app", "/Users/me"),
                 Some("code/app".to_owned()),
             );
-            // No prefix match → None so the caller falls back.
             assert_eq!(strip_home_prefix("/var/log/x", "/Users/me"), None);
-            // Non-boundary sibling does not strip (would otherwise yield
-            // "tadata/app" for "/Users/metadata/app").
             assert_eq!(strip_home_prefix("/Users/metadata/app", "/Users/me"), None);
             assert_eq!(strip_home_prefix("/Users/me-work/app", "/Users/me"), None);
-            // Trailing slash on home still strips cleanly.
             assert_eq!(
                 strip_home_prefix("/Users/me/code", "/Users/me/"),
                 Some("code".to_owned()),
             );
-            // Cwd equal to home returns empty (the caller substitutes "~").
             assert_eq!(
                 strip_home_prefix("/Users/me", "/Users/me"),
                 Some(String::new())
@@ -110,30 +97,18 @@ mod tests {
 
     #[test]
     fn project_from_cwd_renames_home_to_tilde() {
-        // When the cwd resolves to the home directory itself, the project
-        // label is "~" rather than the empty string.
         if !cfg!(windows) {
-            // Cannot easily inject a fake home; only verify the empty-string
-            // fallback path through a leading-slash cwd that the home strip
-            // would not match (so the trim-only branch runs) is never empty.
             assert_eq!(project_from_cwd("/"), "~");
         }
     }
 
     #[test]
     fn strip_home_prefix_windows_case_insensitive() {
-        // Windows-only test: case-insensitive prefix match with separator
-        // normalization and boundary check.
         if cfg!(windows) {
-            // Lowercase drive letter still strips, remainder normalized.
             assert_eq!(
                 strip_home_prefix(r"c:\users\me\code\app", r"C:\Users\me"),
                 Some("code/app".to_owned()),
             );
-            // Mixed separators (forward-slashed cwd from npm/Node tooling,
-            // backslashed home from dirs::home_dir) — and the remainder is
-            // returned with normalized forward slashes so a native-style
-            // visit to the same repo also lands at `code/app`, not `code\app`.
             assert_eq!(
                 strip_home_prefix("C:/Users/me/code/app", r"C:\Users\me"),
                 Some("code/app".to_owned()),
@@ -142,13 +117,10 @@ mod tests {
                 strip_home_prefix(r"C:\Users\me\code\app", r"C:\Users\me"),
                 Some("code/app".to_owned()),
             );
-            // Non-boundary sibling does not strip.
             assert_eq!(
                 strip_home_prefix(r"C:\Users\metadata", r"C:\Users\me"),
                 None
             );
-            // Drive-root home with a trailing separator still strips (and
-            // the remainder is normalized to forward slashes).
             assert_eq!(
                 strip_home_prefix(r"D:\code\app", r"D:\"),
                 Some("code/app".to_owned()),

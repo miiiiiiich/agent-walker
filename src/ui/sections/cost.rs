@@ -5,11 +5,7 @@ use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 use time::Duration;
 
-/// API-equivalent spend, cache-aware, that answers "is the subscription paying
-/// for itself". Shows trailing windows (today / 7d / 30d) cut from the per-day,
-/// per-model aggregates. Tokens with no known price (LiteLLM unreachable and
-/// uncached, or a model id the table lacks) are never summed as $0: a fully
-/// unpriced window renders "—", a partially priced one flags the gap.
+/// Never sum unknown prices as $0; show the gap rather than an understated total.
 pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let label_width = utils::kv_label_width(width);
     let mut total = CostTally::default();
@@ -82,8 +78,6 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     lines
 }
 
-/// The title annotation: rate provenance, plus the unpriced gap when any
-/// token in the window had no price.
 fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
     // Cursor contributes its own reported cost (an actual charge, not a LiteLLM
     // estimate), so qualify the annotation when any of it is in the total.
@@ -92,10 +86,6 @@ fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
         .iter()
         .any(|model| model.reported_cost_usd.is_some());
     if !total.is_complete() {
-        // Width-fitted like the TURN LENGTH title: longest form that fits the
-        // rail after "▍ COST  ", falling back to the bare gap. The reported-
-        // cost provenance survives alongside the gap — the per-model rows
-        // still show those actual charges.
         let budget = usize::from(width).saturating_sub("▍ COST  ".chars().count());
         let unpriced = format_tokens(total.unpriced_volume);
         let candidates = if has_reported {
@@ -133,8 +123,6 @@ fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
     }
 }
 
-/// A label/value row; `None` renders "—" for a value that could not be
-/// fully priced.
 fn cost_row(label: &str, cost: Option<f64>, emphasize: bool, label_width: usize) -> Line<'static> {
     let value_style = if emphasize {
         Style::default()
@@ -152,9 +140,6 @@ fn cost_row(label: &str, cost: Option<f64>, emphasize: bool, label_width: usize)
     ])
 }
 
-/// Cost over the trailing `days` ending at the period end, summed from the
-/// per-day per-model usage (cache-aware per entry), unpriced volume kept
-/// separate.
 fn window_cost(summary: &Summary, days: u16) -> CostTally {
     let start = summary.period_end - Duration::days(i64::from(days) - 1);
     let mut tally = CostTally::default();
@@ -184,8 +169,6 @@ mod tests {
             .collect()
     }
 
-    /// An unpriced model never sums as $0: the total row shows "—" and the
-    /// title annotation names the gap, fitted to the rail at every width.
     #[test]
     fn unpriced_usage_shows_dash_and_fits_narrow_rails() {
         let mut summary = crate::share::fixtures::sample_summary();
@@ -221,8 +204,6 @@ mod tests {
         }
     }
 
-    /// Provider-reported charges keep their provenance in the title even when
-    /// other usage is unpriced — the per-model rows still show real dollars.
     #[test]
     fn unpriced_annotation_keeps_reported_provenance() {
         let mut summary = crate::share::fixtures::sample_summary();
