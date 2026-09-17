@@ -61,7 +61,7 @@ pub fn run(config: Config) -> Result<()> {
     let report = load_report(&config)?;
     // First-run guidance: an empty dashboard should explain itself.
     let status = if report.combined.scan_stats.files_seen == 0 {
-        "no agent logs found · point me at them with --claude-dir / --codex-dir / --agy-dir"
+        "no agent logs found · looked under ~/.claude and ~/.codex (CLAUDE_CONFIG_DIR / CODEX_HOME relocate them)"
             .to_owned()
     } else {
         String::new()

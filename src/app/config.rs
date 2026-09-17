@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use clap_complete::Shell;
 use time::UtcOffset;
 
 #[derive(Debug, Parser)]
@@ -21,52 +20,12 @@ use time::UtcOffset;
     reason = "Each bool is an independent CLI flag, not a state machine."
 )]
 pub struct Args {
-    #[arg(long, value_name = "DIR")]
-    pub claude_dir: Option<PathBuf>,
-
-    #[arg(long, value_name = "DIR")]
-    pub codex_dir: Option<PathBuf>,
-
-    /// Override the Antigravity log directory. Antigravity is auto-detected:
-    /// its tab appears only when logs are present. Text logs supply activity
-    /// only; token usage is decoded from the conversation store, so the tab
-    /// feeds the token totals like every other provider.
-    #[arg(long, value_name = "DIR")]
-    pub agy_dir: Option<PathBuf>,
-
-    /// Override the Grok Build root (default `~/.grok`, or `$GROK_HOME`).
-    /// Auto-detected: its tab appears only when session logs are present
-    /// under `sessions/`.
-    #[arg(long, value_name = "DIR")]
-    pub grok_dir: Option<PathBuf>,
-
-    /// Override the GitHub Copilot CLI root (default `~/.copilot`, or
-    /// `$COPILOT_HOME`). Auto-detected: its tab appears only when
-    /// `session-state` session logs are present. Token totals come from the
-    /// per-session shutdown records the CLI writes on clean exit.
-    #[arg(long, value_name = "DIR")]
-    pub copilot_dir: Option<PathBuf>,
-
-    /// Override the OpenCode data directory (default `~/.local/share/opencode`,
-    /// or `$OPENCODE_HOME` / `$XDG_DATA_HOME/opencode`). Reads matching OpenCode
-    /// SQLite databases; the tab appears only when collected activity is present.
-    #[arg(long, value_name = "DIR")]
-    pub opencode_dir: Option<PathBuf>,
-
-    /// Override the path to Cursor's `state.vscdb` (default is the platform
-    /// config dir, e.g. `~/Library/Application Support/Cursor/...`). To supply a
-    /// session JWT directly, set the `CURSOR_TOKEN` env var — a token on the
-    /// command line would leak into `ps` and shell history.
-    #[arg(long, value_name = "PATH")]
-    pub cursor_state_db: Option<PathBuf>,
-
-    /// Disable the Cursor collector. Cursor is the only collector that sends a
-    /// credential off the machine — your local Cursor session cookie, to
-    /// cursor.com, to read your own usage. Pass this to stop that egress.
-    /// (Anonymous model-pricing metadata is still fetched; it carries no
-    /// credential.)
+    /// Read Cursor's usage from its dashboard. This is the one request that
+    /// carries a credential (your local Cursor session cookie, sent to
+    /// cursor.com), so it is off unless asked for. `CURSOR_TOKEN` supplies
+    /// the session JWT directly.
     #[arg(long)]
-    pub no_cursor: bool,
+    pub cursor: bool,
 
     /// Ignore the per-file parse cache and rescan everything.
     #[arg(long)]
@@ -76,12 +35,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub share: Option<PathBuf>,
 
-    /// Print shell completions for the given shell and exit.
-    #[arg(long, value_enum, value_name = "SHELL")]
-    pub completions: Option<Shell>,
-
     /// Export the summary and dated events as one JSON document (experimental).
-    #[arg(long, conflicts_with_all = ["share", "render", "completions"])]
+    #[arg(long, conflicts_with_all = ["share", "render"])]
     pub json: bool,
 
     /// Analysis window in days (with --json only).
@@ -160,17 +115,15 @@ pub(super) fn default_opencode_dir() -> Result<PathBuf> {
 }
 
 pub(super) fn cursor_config(args: &Args) -> Option<CursorConfig> {
-    // Checked first so `--no-cursor` reads neither `CURSOR_TOKEN` nor the store.
-    if args.no_cursor {
+    // Checked first so a run without `--cursor` reads neither `CURSOR_TOKEN`
+    // nor the store.
+    if !args.cursor {
         return None;
     }
     let token = env::var("CURSOR_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
-    let state_db = args
-        .cursor_state_db
-        .clone()
-        .or_else(|| crate::paths::cursor_state_db().ok());
+    let state_db = crate::paths::cursor_state_db().ok();
     let store_present = state_db.as_ref().is_some_and(|path| path.exists());
     if token.is_none() && !store_present {
         return None;
@@ -217,6 +170,35 @@ mod tests {
         }
     }
 
+    /// Cursor is the one collector that sends a credential, so it is opt-in:
+    /// without the flag no Cursor config exists, whatever the environment holds.
+    #[test]
+    fn cursor_is_off_unless_asked() {
+        let args = Args::try_parse_from(["agent-walker"]).unwrap();
+        assert!(!args.cursor);
+        assert!(cursor_config(&args).is_none());
+        assert!(
+            Args::try_parse_from(["agent-walker", "--cursor"])
+                .unwrap()
+                .cursor
+        );
+    }
+
+    #[test]
+    fn removed_flags_are_rejected() {
+        for gone in [
+            "--completions=bash",
+            "--claude-dir=x",
+            "--cursor-state-db=x",
+            "--no-cursor",
+        ] {
+            assert!(
+                Args::try_parse_from(["agent-walker", gone]).is_err(),
+                "{gone}"
+            );
+        }
+    }
+
     #[test]
     fn json_is_public_and_exclusive() {
         use clap::CommandFactory;
@@ -225,7 +207,7 @@ mod tests {
         assert!(help.contains("--json"));
         assert!(help.contains("--days <N>"));
         assert!(Args::try_parse_from(["agent-walker", "--snapshot"]).is_err());
-        for flag in ["--render", "--share=out.png", "--completions=bash"] {
+        for flag in ["--render", "--share=out.png"] {
             assert!(Args::try_parse_from(["agent-walker", "--json", flag]).is_err());
         }
     }

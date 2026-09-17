@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The log-directory overrides and `--completions`: `--help` is down to five
+  flags. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `GROK_HOME` and
+  `OPENCODE_HOME` still relocate the logs the tools themselves relocate.
+
 ### Changed
 
+- Cursor is opt-in: pass `--cursor` to read its usage, otherwise nothing is
+  sent to cursor.com. `--no-cursor` is gone.
 - The TUI redraws only on a key or a resize, instead of rebuilding every
   section four times a second while idle.
 - HTTP client moved to ureq 3. Same hosts and headers (names now lowercase

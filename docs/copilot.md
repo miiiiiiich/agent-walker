@@ -4,8 +4,8 @@
 
 `~/.copilot/session-state/<uuid>/events.jsonl` — one directory per session,
 written by the agentic GitHub Copilot CLI (`@github/copilot`; not the retired
-`gh copilot` extension). The root is overridable with `COPILOT_HOME` or
-`--copilot-dir`. Auto-detected: the Copilot tab appears only when session logs
+`gh copilot` extension). The root is overridable with `COPILOT_HOME`.
+Auto-detected: the Copilot tab appears only when session logs
 exist. Everything is read locally; nothing leaves the machine.
 
 ## What's captured

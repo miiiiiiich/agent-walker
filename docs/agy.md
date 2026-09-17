@@ -2,8 +2,7 @@
 
 ## Where the data comes from
 
-`~/.gemini/antigravity-cli` (read-only, auto-detected; point elsewhere with
-`--agy-dir`):
+`~/.gemini/antigravity-cli` (read-only, auto-detected):
 
 - `history.jsonl` + `log/cli-*.log` → the session / tool **activity** timeline.
 - `conversations/<uuid>.db` (SQLite) → **token usage, model, and project**, one

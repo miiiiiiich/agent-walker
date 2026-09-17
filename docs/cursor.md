@@ -1,10 +1,9 @@
 # Cursor
 
-Cursor is **auto-detected** like the other providers — its tab appears whenever
-you're signed into Cursor locally — but it's the one provider that **reaches the
-network** to do it. It's skipped (no request) when there's nothing to read:
-Cursor not installed, signed out (no token), or the fetch doesn't return. So
-nothing is sent unless you're signed in.
+Cursor is the one provider that **reaches the network**, so it is **opt-in**:
+its tab appears only when you pass `--cursor` and are signed into Cursor
+locally. Without the flag nothing is read and nothing is sent; with it, a
+missing store, a signed-out state or a failed fetch simply yields no tab.
 
 ## Why it needs the network
 
@@ -26,11 +25,9 @@ The cookie is `<accountId>::<jwt>`:
   token), with `~/.cursor/cli-config.json` (`authInfo.authId`) as a fallback for
   a malformed JWT.
 
-`CURSOR_TOKEN` supplies the JWT directly (skip the local DB) and
-`--cursor-state-db` points at a non-standard `state.vscdb`. To stop the request
-entirely, pass `--no-cursor` (or sign out of Cursor) — Cursor is the only
-collector that sends a credential off the machine, so this is the one network
-egress you may want to disable.
+`CURSOR_TOKEN` supplies the JWT directly (skip the local DB). The request is
+made only with `--cursor` — Cursor is the only collector that sends a
+credential off the machine, so it is opt-in.
 
 This endpoint is **undocumented** and can change or break without notice. A
 `401`/`403` means the session expired — re-login in Cursor to refresh the token,

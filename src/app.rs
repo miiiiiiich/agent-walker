@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
-use clap::CommandFactory;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
@@ -18,36 +17,19 @@ use config::{
     demo_enabled,
 };
 
-pub fn run(args: Args) -> Result<()> {
-    if let Some(shell) = args.completions {
-        clap_complete::generate(
-            shell,
-            &mut Args::command(),
-            "agent-walker",
-            &mut std::io::stdout(),
-        );
-        return Ok(());
-    }
-
+pub fn run(args: &Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let cursor = cursor_config(&args);
+    let cursor = cursor_config(args);
     let config = Config {
         demo: demo_enabled(),
-        // `map_or_else(default, Ok)` keeps the default lazy, so a `--claude-dir`
-        // / `--codex-dir` / `--agy-dir` override on the CLI still works even
-        // when `dirs::home_dir()` can't resolve (sandbox / no `$HOME` /
-        // `%USERPROFILE%`). Eagerly calling `default_*_dir()?` would short-
-        // circuit before the CLI override ever got a chance.
-        claude_dir: args.claude_dir.map_or_else(default_claude_dir, Ok)?,
-        codex_dir: args.codex_dir.map_or_else(default_codex_dir, Ok)?,
-        agy_dir: args.agy_dir.or_else(|| default_agy_dir().ok()),
-        copilot_dir: args
-            .copilot_dir
-            .or_else(|| crate::paths::copilot_home().ok()),
-        grok_dir: args.grok_dir.or_else(|| crate::paths::grok_home().ok()),
-        opencode_dir: args.opencode_dir.or_else(|| default_opencode_dir().ok()),
+        claude_dir: default_claude_dir()?,
+        codex_dir: default_codex_dir()?,
+        agy_dir: default_agy_dir().ok(),
+        copilot_dir: crate::paths::copilot_home().ok(),
+        grok_dir: crate::paths::grok_home().ok(),
+        opencode_dir: default_opencode_dir().ok(),
         cursor,
         use_cache: !args.no_cache,
         local_offset,
@@ -132,9 +114,8 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                     config.local_offset,
                 )
             });
-            // Cursor is auto-detected (disable with --no-cursor) and the only
-            // collector that hits the network, so it runs in its own thread
-            // alongside the local ones.
+            // Cursor (opt-in via --cursor) is the only collector that hits the
+            // network, so it runs in its own thread alongside the local ones.
             let cursor_handle = scope.spawn(|| {
                 config.cursor.as_ref().map(|cursor| {
                     cursor::collect(
