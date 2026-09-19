@@ -11,8 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Per-provider and total summaries are computed in parallel once the logs
-  are read, taking a little off start-up.
+- Faster start-up.
 
 ### Fixed
 
