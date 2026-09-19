@@ -7,6 +7,8 @@
 
 **English: [README.md](README.md)**
 
+![agent-walker の codename カード](docs/card.png)
+
 ![agent-walker のダッシュボード](docs/demo.gif)
 
 ### トークン量だけでは分からない、AI の使い方を知りたくないですか？
@@ -46,8 +48,6 @@ bunx agent-walker
 `s` を押すと、SNS で共有できる画像がクリップボードに入ります。プロジェクト名などのプライベートな情報は載りません。
 
 トークン使用量に応じてランクと動物が変わり、よく使っている時間帯に応じて色が変わります。
-
-![agent-walker の codename カード](docs/card.png)
 
 ## 対応エージェント
 

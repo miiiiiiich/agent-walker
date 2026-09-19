@@ -7,6 +7,8 @@
 
 **日本語: [README.ja.md](README.ja.md)**
 
+![agent-walker codename card](docs/card.png)
+
 ![agent-walker dashboard](docs/demo.gif)
 
 ### Want to know how you use AI, not just how many tokens you burn?
@@ -46,8 +48,6 @@ Every section reads the same window: the last 30 days.
 Press `s` and a shareable image lands on your clipboard. Nothing private on it, no project names.
 
 Your rank and animal change with token volume. The colour changes with the hours you work.
-
-![agent-walker codename card](docs/card.png)
 
 ## Supported agents
 
