@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Tokens, working time and cost lead the share card as large numbers with
+  per-day rates. The strip below gains the turn count and tokens/min next to
+  sessions and the cache share, and the Models panel shows how many models you used.
+- The card's footer shows `bunx agent-walker` and the period it covers instead
+  of the repository URL.
+
 ## [0.18.1] - 2026-09-19
 
 ### Changed

@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
-use super::REPO_URL;
+use crate::format::format_count;
+
 use super::badge_art;
 use super::card::ShareCard;
 
@@ -36,13 +37,29 @@ const MOD_X: u32 = 746;
 const MOD_W: u32 = 396;
 
 const SEC_Y: u32 = 178; // section-label baseline
-const BODY_TOP: u32 = 196;
-const BODY_BOT: u32 = 486;
-const BODY_H: u32 = BODY_BOT - BODY_TOP;
 
-/// Header stat line budget in characters: past this the right-anchored
-/// line would reach the codename on the left.
-const STAT_LINE_BUDGET: usize = 60;
+/// The three panels share one floor: bars, grass and model tracks all end on
+/// `CHART_BASE`, and each panel's one-line caption sits on the hour-axis
+/// baseline below it.
+const CHART_BASE: u32 = 447;
+const AXIS_Y: u32 = 467;
+
+/// Monospace advance as a fraction of the font size — close enough to size a
+/// column, and the only metric available without shaping the text.
+const ADVANCE: f64 = 0.6;
+
+pub(super) const HERO_PITCH: u32 = 200;
+pub(super) const HERO_GUTTER: u32 = 10;
+
+/// `short_model_name` caps labels at this length; at 19px it still clears the
+/// share figure on the same line.
+const MODEL_LABEL_MAX: usize = 24;
+
+pub(super) const GROUP_GAP: u32 = 36;
+pub(super) const SESSIONS_W: [u32; 4] = [80, 112, 72, 60];
+pub(super) const TURNS_W: [u32; 5] = [88, 88, 88, 88, 104];
+pub(super) const CONTEXT_W: [u32; 2] = [120, 112];
+pub(super) const CELL_GUTTER: u32 = 8;
 
 #[allow(
     clippy::too_many_lines,
@@ -80,8 +97,15 @@ pub fn svg(card: &ShareCard) -> String {
 
     let _ = write!(
         s,
-        r#"<text x="{LX}" y="{}" fill="{C_DIM}" font-size="17"><tspan fill="{C_MUTED}" font-weight="700">agent-walker</tspan>  ·  {REPO_URL}</text>"#,
+        r#"<text x="{LX}" y="{}" fill="{C_DIM}" font-size="17">bunx <tspan fill="{C_MUTED}" font-weight="700">agent-walker</tspan></text>"#,
         H - 38
+    );
+    let _ = write!(
+        s,
+        r#"<text x="{RX}" y="{}" fill="{C_DIM}" font-size="15" text-anchor="end">{} – {}</text>"#,
+        H - 38,
+        xml_escape(&card.period.0),
+        xml_escape(&card.period.1)
     );
 
     s.push_str("</svg>");
@@ -121,33 +145,48 @@ fn draw_header(s: &mut String, card: &ShareCard) {
         xml_escape(&card.animal)
     );
 
-    let _ = write!(
-        s,
-        r#"<text x="{RX}" y="74" fill="{C_MUTED}" font-size="18" text-anchor="end"><tspan fill="{C_TEXT}" font-weight="700">{}/{}</tspan> days active   ·   <tspan fill="{C_TEXT}" font-weight="700">{}</tspan> sessions</text>"#,
-        card.active_days, card.period_days, card.sessions
-    );
-    // Cursor's reported cost is an actual charge, not an API-equivalent estimate.
     // An unknown cost renders as "—" — never "$0", which would misread as free.
-    let cost_label = if card.has_reported_cost {
-        "cost"
-    } else {
-        "api-equiv"
+    let per_day = |value: &str| format!("{value}/day");
+    let (working, working_per_day) = match &card.working {
+        Some((total, rate)) => (total.clone(), Some(per_day(rate))),
+        None => (dash(), None),
     };
-    let cost = card.cost.as_deref().unwrap_or("—");
-    // The stat line grows leftward from RX; with saturated (poisoned) token
-    // or cost values it could reach the codename, so the cache share — the
-    // optional part — yields first.
-    let base = format!("{} tokens   ·   {cost} {cost_label}", card.tokens);
-    let cached = card
-        .cached
-        .as_deref()
-        .map(|cached| format!("   ·   {cached}"))
-        .filter(|extra| base.chars().count() + extra.chars().count() <= STAT_LINE_BUDGET)
-        .unwrap_or_default();
-    let _ = write!(
-        s,
-        r#"<text x="{RX}" y="100" fill="{C_MUTED}" font-size="18" text-anchor="end">{base}{cached}</text>"#
-    );
+    let hero = [
+        (
+            "Tokens",
+            card.tokens.clone(),
+            Some(per_day(&card.tokens_per_day)),
+        ),
+        ("Working time", working, working_per_day),
+        (
+            "Cost",
+            card.cost.clone().unwrap_or_else(dash),
+            card.cost_per_day.as_deref().map(per_day),
+        ),
+    ];
+    for (index, (label, number, sub)) in hero.iter().enumerate() {
+        let x = RX - (2 - u32::try_from(index).unwrap_or(0)) * HERO_PITCH;
+        // Saturated (poisoned) token or cost values shrink to their column
+        // instead of running into the neighbour or the codename.
+        let size = fit_font(number, f64::from(HERO_PITCH - HERO_GUTTER), 32.0);
+        let _ = write!(
+            s,
+            r#"<text x="{x}" y="60" text-anchor="end" font-size="15" font-weight="700" fill="{C_MUTED}">{label}</text>"#
+        );
+        let _ = write!(
+            s,
+            r#"<text x="{x}" y="96" text-anchor="end" font-size="{size:.1}" font-weight="800" fill="{C_TEXT}">{}</text>"#,
+            xml_escape(number)
+        );
+        if let Some(sub) = sub {
+            let size = fit_font(sub, f64::from(HERO_PITCH - HERO_GUTTER), 14.0);
+            let _ = write!(
+                s,
+                r#"<text x="{x}" y="120" text-anchor="end" font-size="{size:.1}" fill="{C_MUTED}">{}</text>"#,
+                xml_escape(sub)
+            );
+        }
+    }
 
     let _ = write!(
         s,
@@ -178,11 +217,16 @@ fn draw_rank_badge(s: &mut String, card: &ShareCard) {
     reason = "Grid geometry is display-only."
 )]
 fn draw_activity(s: &mut String, card: &ShareCard) {
-    section(s, ACT_X, 0, "ACTIVITY", "");
+    section(s, ACT_X, 0, "Activity", "");
     let size = 22_u32;
     let pitch = 27_u32;
     let grid_h = 7 * pitch - (pitch - size);
-    let y0 = BODY_TOP + (BODY_H - grid_h) / 2;
+    let y0 = CHART_BASE - grid_h;
+    let _ = write!(
+        s,
+        r#"<text x="{ACT_X}" y="{AXIS_Y}" font-size="15" fill="{C_MUTED}"><tspan fill="{C_TEXT}" font-weight="700">{}/{}</tspan> active</text>"#,
+        card.active_days, card.period_days
+    );
     for (col, week) in card.grass.cells.iter().enumerate() {
         for (row, level) in week.iter().enumerate() {
             let fill = match level {
@@ -210,10 +254,9 @@ fn draw_hourly(s: &mut String, card: &ShareCard) {
     let Some((heights, peak, _label)) = &card.hourly else {
         return;
     };
-    section(s, HRL_X, HRL_R, "BY HOUR", &format!("peak {peak:02}:00"));
+    section(s, HRL_X, HRL_R, "By hour", &format!("peak {peak:02}:00"));
     let max_h = 232_f64;
-    let axis_gap = 20_f64;
-    let baseline = f64::from(BODY_TOP) + (f64::from(BODY_H) - max_h - axis_gap) / 2.0 + max_h;
+    let baseline = f64::from(CHART_BASE);
     let slot = f64::from(HRL_W) / 24.0;
     for (hour, height) in heights.iter().enumerate() {
         if *height <= 0.0 {
@@ -245,8 +288,7 @@ fn draw_hourly(s: &mut String, card: &ShareCard) {
         let x = f64::from(HRL_X) + slot * f64::from(hour);
         let _ = write!(
             s,
-            r#"<text x="{x:.0}" y="{:.0}" fill="{C_DIM}" font-size="13" text-anchor="{anchor}">{hour:02}</text>"#,
-            baseline + axis_gap
+            r#"<text x="{x:.0}" y="{AXIS_Y}" fill="{C_DIM}" font-size="13" text-anchor="{anchor}">{hour:02}</text>"#
         );
     }
 }
@@ -258,14 +300,28 @@ fn draw_hourly(s: &mut String, card: &ShareCard) {
     reason = "Chart geometry is display-only."
 )]
 fn draw_models(s: &mut String, card: &ShareCard) {
-    section(s, MOD_X, RX, "MODELS", "share");
+    section(s, MOD_X, 0, "Models", "");
     if card.models.is_empty() {
         return;
     }
+    let noun = if card.model_count == 1 {
+        "model"
+    } else {
+        "models"
+    };
+    let _ = write!(
+        s,
+        r#"<text x="{RX}" y="{AXIS_Y}" font-size="15" fill="{C_MUTED}" text-anchor="end"><tspan fill="{C_TEXT}" font-weight="700">{}</tspan> {noun}</text>"#,
+        format_count(card.model_count)
+    );
     let rows = card.models.len().min(4);
     let pitch = 56_u32;
-    let block_h = u32::try_from(rows).unwrap_or(1) * pitch - 24;
-    let mut ry = BODY_TOP + (BODY_H - block_h) / 2;
+    // A row is its label line (26px) over a 13px track; four of them end on
+    // CHART_BASE, fewer are centred in that same span.
+    let row_h = 39_u32;
+    let full_h = 3 * pitch + row_h;
+    let block_h = (u32::try_from(rows).unwrap_or(1) - 1) * pitch + row_h;
+    let mut ry = CHART_BASE - full_h + (full_h - block_h) / 2;
     let track_x = MOD_X;
     let track_w = MOD_W;
     for (index, (name, share, ratio, _formatted)) in card.models.iter().take(4).enumerate() {
@@ -274,7 +330,9 @@ fn draw_models(s: &mut String, card: &ShareCard) {
             s,
             r#"<text x="{MOD_X}" y="{}" fill="{C_TEXT}" font-size="19">{}</text>"#,
             ry + 17,
-            xml_escape(&truncate_tail(name, 16))
+            // Rows are merged by label, so the label prints whole: a shorter
+            // cut let two different labels collapse into one displayed name.
+            xml_escape(&truncate_tail(name, MODEL_LABEL_MAX))
         );
         let _ = write!(
             s,
@@ -304,93 +362,158 @@ fn draw_models(s: &mut String, card: &ShareCard) {
     }
 }
 
-/// Bottom strip — parallel + task time as plain numbers. The two groups split
-/// the width proportionally (parallel 3 cells : task 4 cells) so every cell ends
-/// up the same width: a clean, even division.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "Layout geometry is display-only."
-)]
+/// Bottom strip — three groups told apart by space alone. Columns are sized to
+/// what they hold rather than split evenly: even slots either starve the wide
+/// duration cells or force the captions below legible size on a shrunk card.
 fn draw_bottom(s: &mut String, card: &ShareCard) {
-    let accent = ops_color(&card.ops);
     let par_avg = if card.avg_concurrency > 0.0 || card.parallel.is_some() {
         format!("{:.1}", card.avg_concurrency)
     } else {
-        "—".to_owned()
+        dash()
     };
     let (par_four, par_peak) = match &card.parallel {
-        Some((four_plus, peak)) => (format!("{four_plus}%"), peak.to_string()),
-        None => ("—".to_owned(), "—".to_owned()),
+        Some((four_plus, peak)) => (format!("{four_plus}%"), format_count(*peak)),
+        None => (dash(), dash()),
     };
-    let (p50, p90, max, unattended) = match &card.completion {
-        Some((_, un, _, p50, p90, max)) => (p50.clone(), p90.clone(), max.clone(), un.to_string()),
-        None => (
-            "—".to_owned(),
-            "—".to_owned(),
-            "—".to_owned(),
-            "—".to_owned(),
+    let (turns, p50, p90, max, unattended) = match &card.completion {
+        Some((_, un, count, p50, p90, max)) => (
+            format_count(*count),
+            p50.clone(),
+            p90.clone(),
+            max.clone(),
+            format_count(*un),
         ),
+        None => (dash(), dash(), dash(), dash(), dash()),
     };
+    let accent = ops_color(&card.ops);
 
-    let line_y = 520_u32;
-    let label_y = 548_u32;
-    let num_y = 582_u32;
-    let cap_y = 602_u32;
     let _ = write!(
         s,
-        r#"<line x1="{LX}" y1="{line_y}" x2="{RX}" y2="{line_y}" stroke="{C_HAIRLINE}" stroke-width="1"/>"#
+        r#"<line x1="{LX}" y1="520" x2="{RX}" y2="520" stroke="{C_HAIRLINE}" stroke-width="1"/>"#
     );
-
-    let slot = 145_u32;
-    let par_x = [LX, LX + slot, LX + 2 * slot];
-    let task_x0 = LX + 3 * slot + 69;
-    let task_x = [
-        task_x0,
-        task_x0 + slot,
-        task_x0 + 2 * slot,
-        task_x0 + 3 * slot,
-    ];
-
-    section_label(s, par_x[0], label_y, "PARALLEL");
-    section_label(s, task_x[0], label_y, "TASK TIME");
-
-    let par = [
-        (par_avg.as_str(), "avg", false),
-        (par_four.as_str(), "4+", false),
-        (par_peak.as_str(), "peak", false),
-    ];
-    for (i, (num, cap, _)) in par.iter().enumerate() {
-        cell(s, par_x[i], num_y, cap_y, num, cap, C_TEXT);
-    }
-    let task = [
-        (p50.as_str(), "p50", C_TEXT),
-        (p90.as_str(), "p90", C_TEXT),
-        (max.as_str(), "max", C_TEXT),
-        (unattended.as_str(), "20m+ runs", accent),
-    ];
-    for (i, (num, cap, color)) in task.iter().enumerate() {
-        cell(s, task_x[i], num_y, cap_y, num, cap, color);
-    }
+    let mut x = LX;
+    x = group(
+        s,
+        x,
+        "Sessions",
+        &SESSIONS_W,
+        &[
+            (format_count(card.sessions), "sessions", C_TEXT),
+            (par_avg, "avg parallel", C_TEXT),
+            (par_four, "4+", C_TEXT),
+            (par_peak, "peak", C_TEXT),
+        ],
+    ) + GROUP_GAP;
+    x = group(
+        s,
+        x,
+        "Turns",
+        &TURNS_W,
+        &[
+            (turns, "turns", C_TEXT),
+            (p50, "p50", C_TEXT),
+            (p90, "p90", C_TEXT),
+            (max, "max", C_TEXT),
+            (unattended, "20m+ runs", accent),
+        ],
+    ) + GROUP_GAP;
+    group(
+        s,
+        x,
+        "Context",
+        &CONTEXT_W,
+        &[
+            (
+                card.tokens_per_min.clone().unwrap_or_else(dash),
+                "tokens/min",
+                C_TEXT,
+            ),
+            (card.cached.clone().unwrap_or_else(dash), "cached", C_TEXT),
+        ],
+    );
 }
 
-fn cell(s: &mut String, x: u32, num_y: u32, cap_y: u32, num: &str, cap: &str, color: &str) {
+fn dash() -> String {
+    "—".to_owned()
+}
+
+fn group(
+    s: &mut String,
+    x0: u32,
+    label: &str,
+    widths: &[u32],
+    cells: &[(String, &str, &str)],
+) -> u32 {
     let _ = write!(
         s,
-        r#"<text x="{x}" y="{num_y}" fill="{color}" font-size="26" font-weight="700">{}</text>"#,
-        xml_escape(num)
+        r#"<text x="{x0}" y="548" fill="{C_MUTED}" font-size="15" font-weight="500">{label}</text>"#
     );
-    let _ = write!(
-        s,
-        r#"<text x="{x}" y="{cap_y}" fill="{C_MUTED}" font-size="14">{cap}</text>"#
+    let mut x = x0;
+    for ((number, caption, color), width) in cells.iter().zip(widths) {
+        let compact: String = number.chars().filter(|c| *c != ' ').collect();
+        let size = fit_font(&compact, f64::from(width - CELL_GUTTER), 22.0);
+        let _ = write!(
+            s,
+            r#"<text x="{x}" y="582" fill="{color}" font-size="{size:.1}" font-weight="700">{}</text>"#,
+            number_markup(number, size)
+        );
+        let _ = write!(
+            s,
+            r#"<text x="{x}" y="602" fill="{C_MUTED}" font-size="14">{caption}</text>"#
+        );
+        x += width;
+    }
+    x
+}
+
+/// Durations lose their space and carry their units at caption size on the
+/// same baseline ("1h15m"), so the longest cell stops dwarfing its neighbours.
+/// Anything that is not plain digits-and-units is escaped and left alone.
+pub(super) fn number_markup(text: &str, size: f64) -> String {
+    let is_duration = text.chars().any(|c| c.is_ascii_digit())
+        && text.chars().any(|c| c.is_ascii_lowercase())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase() || c == ' ');
+    if !is_duration {
+        return xml_escape(text);
+    }
+    // Units never outgrow the digits: a number shrunk to fit its column was
+    // sized as if every character shrank with it.
+    let open = format!(
+        r#"<tspan font-size="{:.1}" font-weight="600">"#,
+        size.min(14.0)
     );
+    let mut out = String::new();
+    let mut in_unit = false;
+    for c in text.chars().filter(|c| *c != ' ') {
+        if c.is_ascii_lowercase() != in_unit {
+            in_unit = !in_unit;
+            out.push_str(if in_unit { &open } else { "</tspan>" });
+        }
+        out.push(c);
+    }
+    if in_unit {
+        out.push_str("</tspan>");
+    }
+    out
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "Layout geometry is display-only."
+)]
+fn fit_font(text: &str, width: f64, base: f64) -> f64 {
+    let chars = text.chars().count().max(1) as f64;
+    // Floored to the precision it is printed at: rounding up would draw the
+    // text a hair wider than the column it was sized for.
+    (base.min(width / (chars * ADVANCE)) * 10.0).floor() / 10.0
 }
 
 fn section(s: &mut String, x: u32, right: u32, label: &str, annotation: &str) {
     let _ = write!(
         s,
-        r#"<text x="{x}" y="{SEC_Y}" fill="{C_MUTED}" font-size="15" letter-spacing="2.5" font-weight="700">{label}</text>"#
+        r#"<text x="{x}" y="{SEC_Y}" fill="{C_MUTED}" font-size="17" font-weight="700">{label}</text>"#
     );
     if !annotation.is_empty() && right > 0 {
         let _ = write!(
@@ -399,13 +522,6 @@ fn section(s: &mut String, x: u32, right: u32, label: &str, annotation: &str) {
             xml_escape(annotation)
         );
     }
-}
-
-fn section_label(s: &mut String, x: u32, y: u32, label: &str) {
-    let _ = write!(
-        s,
-        r#"<text x="{x}" y="{y}" fill="{C_MUTED}" font-size="15" letter-spacing="2" font-weight="700">{label}</text>"#
-    );
 }
 
 /// Model names come from logs (untrusted), so escape quotes too — otherwise a
