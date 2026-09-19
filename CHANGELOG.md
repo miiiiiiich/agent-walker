@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-19
+
 ### Changed
 
-- Per-provider and total summaries are computed in parallel once the logs
-  are read, taking a little off start-up.
+- Faster start-up.
 
 ### Fixed
 
@@ -481,6 +482,7 @@ First public release with the codename system and the shareable stats card.
 Initial npm packaging.
 
 [#36]: https://github.com/miiiiiiich/agent-walker/issues/36
+[0.18.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.15.0...v0.16.0
