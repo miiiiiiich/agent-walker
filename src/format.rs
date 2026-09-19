@@ -83,6 +83,12 @@ pub fn format_duration_secs(seconds: i64) -> String {
     }
 }
 
+/// Working time stays in hours: "71h 46m" reads as effort, "2d 23h" as a calendar span.
+pub fn format_hours(duration_ms: u64) -> String {
+    let minutes = duration_ms / 60_000;
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
 pub fn format_duration_ms(duration_ms: u64) -> String {
     let seconds = duration_ms / 1_000;
     format_duration_secs(i64::try_from(seconds).unwrap_or(i64::MAX))
@@ -106,6 +112,14 @@ pub use model_label::short_model_name;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hours_never_roll_over_into_days() {
+        assert_eq!(format_hours(0), "0h 00m");
+        assert_eq!(format_hours(59 * 60_000 + 59_999), "0h 59m");
+        assert_eq!(format_hours(60 * 60_000), "1h 00m");
+        assert_eq!(format_hours(71 * 3_600_000 + 46 * 60_000), "71h 46m");
+    }
 
     #[test]
     fn formats_tokens_with_compact_units() {

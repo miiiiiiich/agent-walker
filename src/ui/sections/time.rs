@@ -1,12 +1,7 @@
-use crate::format::{format_count, format_duration_ms, format_tokens};
+use crate::format::{format_count, format_duration_ms, format_hours, format_tokens};
 use crate::model::Summary;
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
-
-fn format_hours(duration_ms: u64) -> String {
-    let minutes = duration_ms / 60_000;
-    format!("{}h {:02}m", minutes / 60, minutes % 60)
-}
 
 pub(in crate::ui) fn time_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let Some(time) = &summary.active_time else {
