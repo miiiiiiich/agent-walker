@@ -70,6 +70,7 @@ pub(super) fn active_time_summary(
             .saturating_add(usage.input_tokens)
             .saturating_add(usage.cache_creation_input_tokens)
             .saturating_add(usage.cache_read_input_tokens);
+        summary.output_tokens = summary.output_tokens.saturating_add(usage.output_tokens);
     }
     Some(summary)
 }

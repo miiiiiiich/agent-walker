@@ -113,6 +113,7 @@ fn sample_active_time() -> crate::model::ActiveTimeSummary {
         active_ms: 313_200_000,
         human_wait_ms: 24_000_000,
         context_tokens: 3_132_000_000,
+        output_tokens: 31_320_000,
         window_days: 30,
         pace_gaps_ms: vec![20_000, 45_000, 90_000, 480_000],
         daily_active_ms: vec![

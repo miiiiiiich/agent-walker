@@ -5,7 +5,8 @@ use time::{Date, Duration};
 
 use crate::cost::CostTally;
 use crate::format::{
-    format_duration_ms, format_percent, format_tokens, format_usd, short_model_name,
+    format_date, format_duration_ms, format_hours, format_percent, format_tokens, format_usd,
+    short_model_name,
 };
 use crate::model::Summary;
 
@@ -21,10 +22,13 @@ pub struct ShareCard {
     pub(crate) period_days: u16,
     pub(crate) active_days: usize,
     pub(crate) tokens: String,
+    pub(crate) tokens_per_day: String,
+    pub(crate) working: Option<(String, String)>,
     /// Formatted API-equivalent cost, or `None` when some of the window's
     /// tokens had no known price (LiteLLM table unreachable / model id
     /// missing) — the card then shows "—" rather than an undercounted figure.
     pub(crate) cost: Option<String>,
+    pub(crate) cost_per_day: Option<String>,
     /// True when the window contains a provider-reported cost (Cursor) — an
     /// actual charge fetched over the network, not an API-equivalent estimate
     /// from local logs. Independent of whether `cost` could be shown (other
@@ -32,7 +36,10 @@ pub struct ShareCard {
     /// local" copy either way.
     pub(crate) has_reported_cost: bool,
     pub(crate) cached: Option<String>,
+    pub(crate) tokens_per_min: Option<String>,
     pub(crate) sessions: usize,
+    pub(crate) model_count: usize,
+    pub(crate) period: (String, String),
     pub(crate) models: Vec<(String, String, f64, String)>,
     pub(crate) hourly: Option<(Vec<f64>, usize, String)>,
     pub(crate) completion: Option<(Vec<usize>, usize, usize, String, String, String)>,
@@ -84,22 +91,26 @@ impl ShareCard {
             })
         };
 
-        let max_model = summary
-            .models
-            .iter()
-            .map(|model| model.usage.token_volume())
-            .max()
-            .unwrap_or(0)
-            .max(1);
-        let models = summary
-            .models
-            .iter()
-            .filter(|model| model.usage.token_volume() > 0)
+        // Rows merge by printed label: dated and undated ids of one model
+        // would otherwise draw the same name twice next to a count of one.
+        let mut by_label: BTreeMap<String, u64> = BTreeMap::new();
+        for model in &summary.models {
+            let vol = model.usage.token_volume();
+            if vol > 0 {
+                let entry = by_label.entry(short_model_name(&model.name)).or_default();
+                *entry = entry.saturating_add(vol);
+            }
+        }
+        let model_count = by_label.len();
+        let mut by_label: Vec<(String, u64)> = by_label.into_iter().collect();
+        by_label.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let max_model = by_label.first().map_or(1, |(_, vol)| *vol).max(1);
+        let models = by_label
+            .into_iter()
             .take(4)
-            .map(|model| {
-                let vol = model.usage.token_volume();
+            .map(|(name, vol)| {
                 (
-                    short_model_name(&model.name),
+                    name,
                     format_percent(vol, total.max(1)),
                     vol as f64 / max_model as f64,
                     format_tokens(vol),
@@ -140,6 +151,9 @@ impl ShareCard {
             )
         });
 
+        let days = u64::from(summary.period_days.max(1));
+        let complete_usd = tally.complete_usd();
+
         let codename = crate::codename::for_summary(summary);
         Self {
             codename: codename.title(),
@@ -149,7 +163,15 @@ impl ShareCard {
             period_days: summary.period_days,
             active_days: summary.active_days,
             tokens: format_tokens(total),
-            cost: tally.complete_usd().map(format_usd),
+            tokens_per_day: format_tokens(total / days),
+            working: summary.active_time.as_ref().map(|time| {
+                (
+                    format_hours(time.active_ms),
+                    format_hours(time.active_per_day_ms()),
+                )
+            }),
+            cost: complete_usd.map(format_usd),
+            cost_per_day: complete_usd.map(|usd| format_usd(usd / days as f64)),
             has_reported_cost,
             // Every section reads the same window, so the cache share is on the
             // same footing as the rest of the card.
@@ -157,8 +179,18 @@ impl ShareCard {
                 .context
                 .as_ref()
                 .filter(|context| context.context_tokens > 0)
-                .map(|context| format!("{:.0}% cached", context.cached_share() * 100.0)),
+                .map(|context| format!("{:.0}%", context.cached_share() * 100.0)),
+            tokens_per_min: summary
+                .active_time
+                .as_ref()
+                .and_then(crate::model::ActiveTimeSummary::tokens_per_minute)
+                .map(format_tokens),
             sessions: summary.sessions,
+            model_count,
+            period: (
+                format_date(Grass::start(summary)),
+                format_date(summary.period_end),
+            ),
             models,
             hourly,
             completion,
@@ -197,7 +229,7 @@ impl ShareCard {
             let mut stats = vec![format!("{} tokens", self.tokens)];
             stats.extend(cost.clone());
             if cached {
-                stats.extend(self.cached.clone());
+                stats.extend(self.cached.as_ref().map(|share| format!("{share} cached")));
             }
             if parallel_on {
                 stats.extend(parallel.clone());
@@ -240,6 +272,14 @@ impl ShareCard {
 }
 
 impl Grass {
+    /// The activity grid fits the most recent 30 days; longer analysis
+    /// windows are clipped here to avoid overflowing neighbouring charts.
+    fn start(summary: &Summary) -> Date {
+        summary
+            .period_start
+            .max(summary.period_end.saturating_sub(Duration::days(29)))
+    }
+
     fn from_summary(summary: &Summary) -> Self {
         let value_by_date: BTreeMap<Date, u64> = summary
             .daily
@@ -248,11 +288,7 @@ impl Grass {
             .collect();
         let thresholds = quartiles(&value_by_date);
 
-        // The activity grid fits the most recent 30 days; longer analysis
-        // windows are clipped here to avoid overflowing neighbouring charts.
-        let start = summary
-            .period_start
-            .max(summary.period_end.saturating_sub(Duration::days(29)));
+        let start = Self::start(summary);
 
         let mut columns: Vec<Vec<Option<usize>>> = Vec::new();
         let mut column = vec![None; 7];

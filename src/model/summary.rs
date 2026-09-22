@@ -131,6 +131,7 @@ pub struct ActiveTimeSummary {
     pub active_ms: u64,
     pub human_wait_ms: u64,
     pub context_tokens: u64,
+    pub output_tokens: u64,
     pub window_days: u16,
     /// Keep prompt gaps raw so the Total tab can take percentiles across providers.
     pub pace_gaps_ms: Vec<u64>,
@@ -183,10 +184,22 @@ impl ActiveTimeSummary {
 
     /// Divides in milliseconds — a 90-second window is 1.5 minutes, not 1.
     pub fn context_per_minute(&self) -> Option<u64> {
+        self.per_minute(self.context_tokens)
+    }
+
+    /// Output included, unlike the context rate. Only providers that measured
+    /// working time feed it: tokens from one that did not would raise the rate
+    /// without adding a minute to divide by, so the figure would swing with the
+    /// mix of tools rather than with how the agent was driven.
+    pub fn tokens_per_minute(&self) -> Option<u64> {
+        self.per_minute(self.context_tokens.saturating_add(self.output_tokens))
+    }
+
+    fn per_minute(&self, tokens: u64) -> Option<u64> {
         if self.active_ms < 60_000 {
             return None;
         }
-        let rate = u128::from(self.context_tokens) * 60_000 / u128::from(self.active_ms);
+        let rate = u128::from(tokens) * 60_000 / u128::from(self.active_ms);
         Some(u64::try_from(rate).unwrap_or(u64::MAX))
     }
 
@@ -205,6 +218,7 @@ impl ActiveTimeSummary {
             acc.active_ms = acc.active_ms.saturating_add(part.active_ms);
             acc.human_wait_ms = acc.human_wait_ms.saturating_add(part.human_wait_ms);
             acc.context_tokens = acc.context_tokens.saturating_add(part.context_tokens);
+            acc.output_tokens = acc.output_tokens.saturating_add(part.output_tokens);
             acc.pace_gaps_ms.extend_from_slice(&part.pace_gaps_ms);
             acc.model_ms = acc.model_ms.saturating_add(part.model_ms);
             acc.measured_ms = acc.measured_ms.saturating_add(part.measured_ms);
@@ -245,12 +259,35 @@ mod active_time_tests {
     }
 
     #[test]
+    fn tokens_per_minute_adds_output_to_the_context_rate() {
+        let time = ActiveTimeSummary {
+            turns: 1,
+            active_ms: 120_000,
+            context_tokens: 100_000,
+            output_tokens: 20_000,
+            window_days: 30,
+            ..ActiveTimeSummary::default()
+        };
+        assert_eq!(time.context_per_minute(), Some(50_000));
+        assert_eq!(time.tokens_per_minute(), Some(60_000));
+
+        // A saturated sum stays a finite rate instead of wrapping.
+        let saturated = ActiveTimeSummary {
+            context_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            ..time
+        };
+        assert_eq!(saturated.tokens_per_minute(), Some(u64::MAX / 2));
+    }
+
+    #[test]
     fn merged_skips_providers_without_turns() {
         let measured = ActiveTimeSummary {
             turns: 10,
             active_ms: 600_000,
             human_wait_ms: 60_000,
             context_tokens: 1_000_000,
+            output_tokens: 50_000,
             window_days: 30,
             pace_gaps_ms: vec![5_000, 45_000, 120_000],
             daily_active_ms: vec![(time::macros::date!(2026 - 09 - 01), 600_000)],
@@ -259,6 +296,7 @@ mod active_time_tests {
         };
         let token_only = ActiveTimeSummary {
             context_tokens: 9_000_000,
+            output_tokens: 700_000,
             window_days: 30,
             ..ActiveTimeSummary::default()
         };
