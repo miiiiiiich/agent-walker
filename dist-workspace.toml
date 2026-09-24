@@ -22,6 +22,8 @@ github-attestations = true
 # Extra static files to include in each App (path relative to this Cargo.toml's dir)
 include = ["THIRD_PARTY_NOTICES"]
 # Publish jobs to run in CI
-publish-jobs = ["npm"]
+publish-jobs = ["./publish-npm"]
+# Permissions for custom jobs
+github-custom-job-permissions = { "publish-npm" = { id-token = "write" } }
 # Plan jobs to run in CI
 plan-jobs = ["./draft-release"]
