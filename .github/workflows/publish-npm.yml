@@ -1,6 +1,6 @@
 name: Publish npm
 
-# Stages the npm package with trusted publishing (OIDC) — no npm token is
+# Publishes the npm package with trusted publishing (OIDC) — no npm token is
 # stored anywhere. Wired into release.yml as a dist custom publish-job
 # (dist-workspace.toml: publish-jobs = ["./publish-npm"]) instead of dist's
 # built-in npm job, which pins an npm too old for OIDC and only takes a token.
@@ -10,8 +10,8 @@ name: Publish npm
 # also mint OIDC tokens (for attestations) and run dependency build scripts,
 # and without it they could publish too.
 #
-# Staged, not published: the version goes live only after the owner approves
-# it on npm with 2FA, so a hijacked GitHub account alone cannot ship to npm.
+# Published directly rather than staged for a 2FA approval on npm: releases
+# stay fully automatic, at the cost that whoever can push a v* tag can publish.
 
 on:
   workflow_call:
@@ -40,10 +40,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # exact, not "24.x": a range can resolve to the runner's cached
-          # Node, whose bundled npm may predate `npm stage` (needs >= 11.15)
+          # Node, whose bundled npm may predate trusted publishing (needs >= 11.5.1)
           node-version: "24.21.0"
           registry-url: "https://registry.npmjs.org"
-      - name: Stage for publishing
+      - name: Publish
         run: |
           pkgs=$(jq -r '.releases[].artifacts[] | select(endswith("-npm-package.tar.gz"))' <<<"$PLAN")
           # a release that silently skips npm would still be tweeted as shipped
@@ -52,5 +52,5 @@ jobs:
             exit 1
           fi
           while IFS= read -r pkg; do
-            npm stage publish --provenance --access public "./npm/${pkg}"
+            npm publish --provenance --access public "./npm/${pkg}"
           done <<<"$pkgs"
