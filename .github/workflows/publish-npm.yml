@@ -1,0 +1,56 @@
+name: Publish npm
+
+# Stages the npm package with trusted publishing (OIDC) — no npm token is
+# stored anywhere. Wired into release.yml as a dist custom publish-job
+# (dist-workspace.toml: publish-jobs = ["./publish-npm"]) instead of dist's
+# built-in npm job, which pins an npm too old for OIDC and only takes a token.
+#
+# npm matches the *calling* workflow (release.yml) plus the `release`
+# environment. The environment is what matters: release.yml's build jobs can
+# also mint OIDC tokens (for attestations) and run dependency build scripts,
+# and without it they could publish too.
+#
+# Staged, not published: the version goes live only after the owner approves
+# it on npm with 2FA, so a hijacked GitHub account alone cannot ship to npm.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - name: Fetch npm package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: npm/
+          merge-multiple: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # exact, not "24.x": a range can resolve to the runner's cached
+          # Node, whose bundled npm may predate `npm stage` (needs >= 11.15)
+          node-version: "24.21.0"
+          registry-url: "https://registry.npmjs.org"
+      - name: Stage for publishing
+        run: |
+          pkgs=$(jq -r '.releases[].artifacts[] | select(endswith("-npm-package.tar.gz"))' <<<"$PLAN")
+          # a release that silently skips npm would still be tweeted as shipped
+          if [ -z "$pkgs" ]; then
+            echo "no npm package in the plan" >&2
+            exit 1
+          fi
+          while IFS= read -r pkg; do
+            npm stage publish --provenance --access public "./npm/${pkg}"
+          done <<<"$pkgs"
