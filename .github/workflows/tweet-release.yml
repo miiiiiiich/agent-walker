@@ -60,11 +60,36 @@ jobs:
           # an extra path segment
           TAG_PATH=$(jq -rn --arg t "$TAG" '$t|@uri')
           gh api "repos/${{ github.repository }}/releases/tags/$TAG_PATH" \
-            --jq '{tag_name, body, draft}' > release.json
+            --jq '{tag_name, body, draft, prerelease}' > release.json
           if [ "$(jq -r .draft release.json)" = "true" ]; then
             echo "release $TAG is still a draft; not tweeting"
             exit 1
           fi
+      # the Release run finishes once npm accepts the upload, but npm
+      # processes a publish for minutes before serving it — tweeting then
+      # points people at a version `bunx agent-walker` does not resolve yet
+      - name: Wait until npm serves the version
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        timeout-minutes: 35
+        run: |
+          if [ "$(jq -r .prerelease release.json)" = "true" ]; then
+            echo "prereleases are not published to npm; not waiting"
+            exit 0
+          fi
+          VERSION=$(jq -r .tag_name release.json | grep -oE '[0-9]+\.[0-9]+\.[0-9]+$')
+          # presence, not dist-tags.latest: a newer release can take latest
+          # while this one waits, and old tags can be tweeted by dispatch
+          DEADLINE=$((SECONDS + 1800))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            if curl -sf --max-time 20 -H 'Accept: application/vnd.npm.install-v1+json' \
+              -H 'Cache-Control: no-cache' https://registry.npmjs.org/agent-walker \
+              | jq -e --arg v "$VERSION" '.versions | has($v)' >/dev/null; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "agent-walker@$VERSION is not on npm after 30 minutes; not tweeting" >&2
+          exit 1
       - name: Compose and post
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
