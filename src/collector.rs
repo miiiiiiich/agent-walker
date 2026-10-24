@@ -21,4 +21,4 @@ pub use events::{
 };
 pub use merge::merge_into;
 pub use project::project_from_cwd;
-pub use walk::list_files;
+pub use walk::{list_files, list_files_matching};

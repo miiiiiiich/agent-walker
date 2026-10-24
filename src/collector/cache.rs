@@ -11,7 +11,7 @@ use tracing::debug;
 use super::events::FileEvents;
 
 /// Parsing or attribution changes require a version bump so cached events do not retain old semantics.
-const CACHE_VERSION: u32 = 20;
+const CACHE_VERSION: u32 = 21;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {
