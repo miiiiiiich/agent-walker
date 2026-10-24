@@ -30,7 +30,7 @@ pub fn codex_home() -> Result<PathBuf> {
 }
 
 pub fn agy_home() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".gemini").join("antigravity-cli"))
+    Ok(home_dir()?.join(".gemini"))
 }
 
 pub fn grok_home() -> Result<PathBuf> {

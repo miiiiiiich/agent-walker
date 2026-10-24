@@ -9,6 +9,9 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
 use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
 
+const CLI_STORE: &str = "antigravity-cli";
+const APP_STORE: &str = "antigravity";
+
 pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -20,12 +23,13 @@ pub fn collect(
         return collection;
     }
 
+    let cli = root.join(CLI_STORE);
     let mut files = Vec::new();
-    let history = root.join("history.jsonl");
+    let history = cli.join("history.jsonl");
     if history.exists() {
         files.push(history);
     }
-    let log_dir = root.join("log");
+    let log_dir = cli.join("log");
     if log_dir.exists() {
         files.extend(list_files(
             &log_dir,
@@ -40,8 +44,26 @@ pub fn collect(
     });
     merge_into(&mut collection, per_file);
 
-    let usage =
-        super::agy_conv::collect_usage(root, mtime_floor, local_offset, &mut collection.stats);
+    let usage = super::agy_conv::collect_usage(
+        &[cli, root.join(APP_STORE)],
+        mtime_floor,
+        local_offset,
+        &mut collection.stats,
+    );
+    // App conversations, and CLI conversations with no history or log lines,
+    // have nothing but their generations: without a touch per generation their
+    // sessions count in the total but never reach daily sessions, spans or
+    // concurrency. Every generation touches, not only untouched conversations:
+    // the DB name is the history's conversationId, so the analyzer merges both
+    // into one session.
+    collection
+        .session_touches
+        .extend(usage.iter().filter_map(|event| {
+            Some(SessionTouch {
+                timestamp: event.timestamp?,
+                session_id: event.session_id.clone()?,
+            })
+        }));
     collection.usage_events.extend(usage);
     collection.stats.usage_events = collection.usage_events.len();
     collection
@@ -232,16 +254,28 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
+    use time::macros::{date, datetime};
 
     use super::*;
+    use crate::collector::agy_conv::tests::{
+        served_only_gen_blob, step_metadata, write_dated_conversation,
+    };
 
     #[test]
     fn collects_antigravity_history_model_events_and_tool_confirmations() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let log_dir = temp.path().join("log");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
         fs::create_dir_all(&log_dir).expect("test dirs should be created");
+        let app_conversations = temp.path().join(APP_STORE).join("conversations");
+        fs::create_dir_all(&app_conversations).expect("app store should be created");
+        rusqlite::Connection::open(app_conversations.join("c2.db"))
+            .and_then(|conn| {
+                conn.execute_batch("CREATE TABLE gen_metadata (idx INTEGER, data BLOB);")
+            })
+            .expect("app conversation should be created");
         fs::write(
-            temp.path().join("history.jsonl"),
+            cli.join("history.jsonl"),
             r#"{"timestamp":1780726748000,"workspace":"/tmp","conversationId":"c1"}"#,
         )
         .expect("history fixture should be written");
@@ -260,9 +294,70 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(collection.stats.files_seen, 2);
+        // history + log + the app store's conversation
+        assert_eq!(collection.stats.files_seen, 3);
         assert!(collection.usage_events.is_empty());
         assert_eq!(collection.tool_events[0].tool_name, "command:bun");
         assert!(collection.session_touches.len() >= 2);
+    }
+
+    #[test]
+    fn conversation_generations_count_as_sessions_once_per_day() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        let app = temp.path().join(APP_STORE);
+        for store in [&cli, &app] {
+            fs::create_dir_all(store.join("conversations"))
+                .expect("conversations dir should be created");
+        }
+        let started_ms = 1_780_966_800_000; // 2026-06-09 01:00 UTC
+        let hour_ms = 3_600_000;
+        let row = |rid: &str| served_only_gen_blob("gemini-3.8-flash", rid, None);
+        // c1 is in the CLI history and has a generation an hour later.
+        fs::write(
+            cli.join("history.jsonl"),
+            format!(r#"{{"timestamp":{started_ms},"conversationId":"c1"}}"#),
+        )
+        .expect("history fixture should be written");
+        write_dated_conversation(
+            &cli.join("conversations").join("c1.db"),
+            started_ms,
+            &[row("r1")],
+            &[step_metadata(started_ms + hour_ms, "r1")],
+        );
+        // c2 exists only in the app store: no history, no logs.
+        write_dated_conversation(
+            &app.join("conversations").join("c2.db"),
+            started_ms,
+            &[row("r2"), row("r3")],
+            &[
+                step_metadata(started_ms + 2 * hour_ms, "r2"),
+                step_metadata(started_ms + 4 * hour_ms, "r3"),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let summary = crate::analyzer::summarize(
+            &collection,
+            datetime!(2026-06-09 23:00 UTC),
+            7,
+            UtcOffset::UTC,
+        );
+
+        assert_eq!(collection.usage_events.len(), 3);
+        assert_eq!(summary.sessions, 2);
+        let sessions_per_day: Vec<_> = summary
+            .daily_sessions
+            .iter()
+            .map(|day| (day.date, day.sessions))
+            .collect();
+        assert_eq!(sessions_per_day, [(date!(2026 - 06 - 09), 2)]);
+        assert_eq!(
+            summary
+                .longest_session
+                .expect("the app conversation should have a span")
+                .duration_secs(),
+            7_200
+        );
     }
 }

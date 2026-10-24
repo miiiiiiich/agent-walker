@@ -15,11 +15,21 @@ pub struct UsageEvent {
     pub attribution_skill: Option<String>,
     pub project: Option<String>,
     pub usage: TokenUsage,
+    pub granularity: UsageGranularity,
     /// Provider-reported cost in USD for this event, when the source gives an
     /// authoritative figure that the `LiteLLM` model→price path can't (Cursor's
     /// own models aren't in the pricing table). `None` means "price it from
     /// `LiteLLM` like every other provider".
     pub reported_cost_usd: Option<f64>,
+}
+
+/// Whether a usage row is one model request or a sum of several. Rules that
+/// hold per request (long-context pricing, CONTEXT call rows) apply only to
+/// `Call`: a sum's size says nothing about any one request in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsageGranularity {
+    Call,
+    Aggregate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

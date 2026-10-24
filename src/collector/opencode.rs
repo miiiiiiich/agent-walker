@@ -5,12 +5,13 @@
 //! than copying the whole DB into memory first — keeps memory proportional to
 //! the recent-window rows we actually parse, not the entire history.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -38,6 +39,11 @@ pub fn collect(
     // its primary-key id so a turn isn't counted once per file.
     let mut seen_messages = HashSet::new();
     let mut seen_parts = HashSet::new();
+    // Legacy `part` rows and a migrated copy's `content` are the same tool
+    // calls under different keys, so part-id dedupe alone counted them twice
+    // whenever the copy was read first (an earlier-sorted DB file, or a
+    // corrupt legacy message). A message's tools come from one generation.
+    let mut tools_from = HashMap::new();
     for db_path in db_paths(root) {
         let Some(conn) = open_readonly(&db_path) else {
             collection.stats.unreadable_files += 1;
@@ -57,6 +63,17 @@ pub fn collect(
             local_offset,
             &mut collection,
             &mut seen_parts,
+            &mut tools_from,
+        );
+        // After the legacy tables, so a row already counted there (same id)
+        // is skipped together with its tools.
+        parse_session_messages(
+            &conn,
+            floor_ms,
+            local_offset,
+            &mut collection,
+            &mut seen_messages,
+            &mut tools_from,
         );
     }
 
@@ -158,13 +175,16 @@ fn parse_messages(
             collection.stats.parse_errors += 1;
             continue;
         };
-        if !seen.insert(id) {
+        if seen.contains(&id) {
             continue;
         }
+        // Claim the id only once the row parses, so a corrupt legacy row
+        // doesn't hide its intact migrated copy.
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             collection.stats.parse_errors += 1;
             continue;
         };
+        seen.insert(id);
         let Some(created_ms) = value.pointer("/time/created").and_then(Value::as_i64) else {
             continue;
         };
@@ -181,18 +201,7 @@ fn parse_messages(
             continue;
         }
 
-        let usage = TokenUsage {
-            input_tokens: token(&value, "/tokens/input"),
-            // OpenCode stores only the *visible* output here and counts
-            // reasoning separately; fold reasoning in so token totals and cost
-            // match the inclusive convention the other providers use.
-            output_tokens: token(&value, "/tokens/output")
-                .saturating_add(token(&value, "/tokens/reasoning")),
-            reasoning_output_tokens: token(&value, "/tokens/reasoning"),
-            cache_creation_input_tokens: token(&value, "/tokens/cache/write"),
-            cache_read_input_tokens: token(&value, "/tokens/cache/read"),
-            ..TokenUsage::default()
-        };
+        let usage = token_usage(&value);
         collection.usage_events.push(UsageEvent {
             timestamp: Some(timestamp),
             session_id: Some(session_id.clone()),
@@ -211,6 +220,7 @@ fn parse_messages(
             // OpenCode records a per-message cost, but like every non-Cursor
             // provider we price from LiteLLM for consistency (see docs/opencode).
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         });
 
         if let Some(completed_ms) = value.pointer("/time/completed").and_then(Value::as_i64) {
@@ -232,20 +242,27 @@ fn parse_messages(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Generation {
+    Legacy,
+    V2,
+}
+
 fn parse_tool_parts(
     conn: &Connection,
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
+    tools_from: &mut HashMap<String, Generation>,
 ) {
     // Filter only on the indexed `time_created` integer column in SQL, and do the
     // `type == "tool"` check in Rust. Putting `json_extract` in the WHERE clause
     // makes a single malformed `data` row raise "malformed JSON" and abort the
     // whole result set, losing every later tool call in this DB.
-    let Ok(mut stmt) = conn
-        .prepare("SELECT id, session_id, time_created, data FROM part WHERE time_created >= ?1")
-    else {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, message_id, session_id, time_created, data FROM part WHERE time_created >= ?1",
+    ) else {
         return;
     };
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
@@ -254,9 +271,10 @@ fn parse_tool_parts(
         // a type-mismatch parse error.
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
         ))
     }) else {
         return;
@@ -264,7 +282,7 @@ fn parse_tool_parts(
 
     for row in rows {
         collection.stats.lines_seen += 1;
-        let Ok((id, session_id, time_created, data)) = row else {
+        let Ok((id, message_id, session_id, time_created, data)) = row else {
             collection.stats.parse_errors += 1;
             continue;
         };
@@ -278,6 +296,11 @@ fn parse_tool_parts(
         let Some(tool_name) = value.get("tool").and_then(Value::as_str) else {
             continue;
         };
+        if let Some(message_id) = message_id
+            && *tools_from.entry(message_id).or_insert(Generation::Legacy) == Generation::V2
+        {
+            continue;
+        }
         if !seen.insert(id) {
             continue;
         }
@@ -295,6 +318,251 @@ fn parse_tool_parts(
             subagent_type: None,
             source_kind: SourceKind::Main,
         });
+    }
+}
+
+#[derive(Default)]
+struct SessionMeta {
+    directory: Option<String>,
+    copied_through_seq: Option<i64>,
+}
+
+fn parse_session_messages(
+    conn: &Connection,
+    floor_ms: i64,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+    seen: &mut HashSet<String>,
+    tools_from: &mut HashMap<String, Generation>,
+) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, session_id, type, seq, time_created, data FROM session_message \
+         WHERE time_created >= ?1",
+    ) else {
+        return;
+    };
+    let sessions = session_meta(conn);
+    let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    }) else {
+        return;
+    };
+
+    for row in rows {
+        collection.stats.lines_seen += 1;
+        let Ok((id, session_id, kind, seq, time_created, data)) = row else {
+            collection.stats.parse_errors += 1;
+            continue;
+        };
+        if seen.contains(&id) {
+            continue;
+        }
+        let meta = sessions.get(&session_id);
+        // Rows at or below a fork's copy cutoff are the parent's history;
+        // counted, every fork would replay the parent.
+        if meta
+            .and_then(|meta| meta.copied_through_seq)
+            .is_some_and(|cutoff| seq <= cutoff)
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            collection.stats.parse_errors += 1;
+            continue;
+        };
+        seen.insert(id.clone());
+        let created_ms = value
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .unwrap_or(time_created);
+        let Some(timestamp) = ms_to_offset(created_ms, local_offset) else {
+            continue;
+        };
+        collection.session_touches.push(SessionTouch {
+            timestamp,
+            session_id: session_id.clone(),
+        });
+
+        let has_usage = match kind.as_str() {
+            "assistant" => true,
+            "compaction" => value.get("tokens").is_some(),
+            _ => false,
+        };
+        if !has_usage {
+            continue;
+        }
+        collection.usage_events.push(UsageEvent {
+            timestamp: Some(timestamp),
+            session_id: Some(session_id.clone()),
+            model: value
+                .pointer("/model/id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: None,
+            project: meta
+                .and_then(|meta| meta.directory.as_deref())
+                .filter(|dir| !dir.is_empty())
+                .map(project_from_cwd),
+            usage: token_usage(&value),
+            reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
+        });
+        if kind == "assistant" {
+            push_turn(&value, created_ms, &session_id, local_offset, collection);
+            if let Entry::Vacant(slot) = tools_from.entry(id) {
+                slot.insert(Generation::V2);
+                push_tools(&value, created_ms, &session_id, local_offset, collection);
+            }
+        }
+    }
+}
+
+fn push_turn(
+    value: &Value,
+    created_ms: i64,
+    session_id: &str,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+) {
+    if let Some(completed_ms) = value.pointer("/time/completed").and_then(Value::as_i64) {
+        collection.duration_events.push(DurationEvent {
+            timestamp: ms_to_offset(created_ms, local_offset),
+            session_id: Some(session_id.to_owned()),
+            duration_ms: u64::try_from(completed_ms.saturating_sub(created_ms)).unwrap_or(0),
+            human_wait_ms: 0,
+            model_ms: None,
+            status: value
+                .get("finish")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        });
+    }
+}
+
+fn push_tools(
+    value: &Value,
+    created_ms: i64,
+    session_id: &str,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+) {
+    let tools = value
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"));
+    for tool in tools {
+        let Some(name) = tool.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let start_ms = tool
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .unwrap_or(created_ms);
+        collection.tool_events.push(ToolEvent {
+            timestamp: ms_to_offset(start_ms, local_offset),
+            session_id: Some(session_id.to_owned()),
+            tool_name: name.to_owned(),
+            subagent_type: None,
+            source_kind: SourceKind::Main,
+        });
+    }
+}
+
+fn session_meta(conn: &Connection) -> HashMap<String, SessionMeta> {
+    let mut sessions: HashMap<String, SessionMeta> = HashMap::new();
+    for table in ["session_v2", "session"] {
+        let Ok(mut stmt) = conn.prepare(&format!("SELECT id, directory FROM {table}")) else {
+            continue;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        }) else {
+            continue;
+        };
+        for (id, directory) in rows.flatten() {
+            let meta = sessions.entry(id).or_default();
+            if meta.directory.is_none() {
+                meta.directory = directory;
+            }
+        }
+    }
+    for (fork, cutoff) in fork_cutoffs(conn) {
+        sessions.entry(fork).or_default().copied_through_seq = Some(cutoff);
+    }
+    sessions
+}
+
+/// The highest parent `seq` each fork copied. A fork whose parent or
+/// boundary row is gone keeps all its rows: they may be the only surviving
+/// copy of that history.
+fn fork_cutoffs(conn: &Connection) -> Vec<(String, i64)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, fork_session_id, fork_boundary FROM session_v2 \
+         WHERE fork_session_id IS NOT NULL AND fork_boundary IS NOT NULL",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter_map(|(fork, parent, boundary)| {
+            let boundary = serde_json::from_str::<Value>(&boundary).ok()?;
+            let inclusive = match boundary.get("type").and_then(Value::as_str)? {
+                "through" => true,
+                "before" => false,
+                _ => return None,
+            };
+            let message = boundary.get("messageID").and_then(Value::as_str)?;
+            let boundary_seq: i64 = conn
+                .query_row(
+                    "SELECT seq FROM session_message WHERE session_id = ?1 AND id = ?2",
+                    params![parent, message],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()??;
+            let copied_sql = if inclusive {
+                "SELECT max(seq) FROM session_message WHERE session_id = ?1 AND seq <= ?2"
+            } else {
+                "SELECT max(seq) FROM session_message WHERE session_id = ?1 AND seq < ?2"
+            };
+            let copied: Option<i64> = conn
+                .query_row(copied_sql, params![parent, boundary_seq], |row| row.get(0))
+                .ok()?;
+            Some((fork, copied?))
+        })
+        .collect()
+}
+
+/// Reasoning is folded into output, the inclusive convention the other
+/// providers use.
+fn token_usage(value: &Value) -> TokenUsage {
+    TokenUsage {
+        input_tokens: token(value, "/tokens/input"),
+        output_tokens: token(value, "/tokens/output")
+            .saturating_add(token(value, "/tokens/reasoning")),
+        reasoning_output_tokens: token(value, "/tokens/reasoning"),
+        cache_creation_input_tokens: token(value, "/tokens/cache/write"),
+        cache_read_input_tokens: token(value, "/tokens/cache/read"),
+        ..TokenUsage::default()
     }
 }
 
@@ -347,6 +615,304 @@ mod tests {
             [tool],
         )
         .expect("insert tool part");
+    }
+
+    const V2_SCHEMA: &str = "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, fork_session_id TEXT, fork_boundary TEXT, time_created INTEGER NOT NULL);
+         CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);";
+
+    fn v2_assistant(created_ms: i64, input: u64, tool: Option<&str>) -> String {
+        let content = tool.map_or_else(String::new, |name| {
+            format!(r#"{{"type":"tool","id":"call-{created_ms}","name":"{name}","state":{{"status":"completed"}},"time":{{"created":{created_ms}}}}}"#)
+        });
+        format!(
+            r#"{{"agent":"build","model":{{"id":"claude-sonnet-4.6","providerID":"anthropic"}},"content":[{content}],"finish":"stop","tokens":{{"input":{input},"output":10,"reasoning":2,"cache":{{"read":30,"write":4}}}},"time":{{"created":{created_ms},"completed":{done}}}}}"#,
+            done = created_ms + 1_000
+        )
+    }
+
+    fn insert_v2(
+        conn: &Connection,
+        id: &str,
+        session: &str,
+        kind: &str,
+        seq: i64,
+        created_ms: i64,
+        data: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO session_message VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+            params![id, session, kind, seq, created_ms, data],
+        )
+        .expect("insert session_message");
+    }
+
+    fn volumes(collection: &Collection) -> Vec<u64> {
+        let mut volumes: Vec<u64> = collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .collect();
+        volumes.sort_unstable();
+        volumes
+    }
+
+    #[test]
+    fn v2_only_store_reads_assistant_and_compaction_usage() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        insert_v2(
+            &conn,
+            "msg_u",
+            "s1",
+            "user",
+            0,
+            1_781_542_300_000,
+            r#"{"text":"hi","time":{"created":1781542300000}}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &v2_assistant(1_781_542_363_256, 100, Some("bash")),
+        );
+        insert_v2(
+            &conn,
+            "msg_c",
+            "s1",
+            "compaction",
+            2,
+            1_781_542_400_000,
+            r#"{"status":"completed","reason":"auto","summary":"s","model":{"id":"claude-sonnet-4.6","providerID":"anthropic"},"tokens":{"input":5000,"output":200,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1781542400000}}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_r",
+            "s1",
+            "compaction",
+            3,
+            1_781_542_500_000,
+            r#"{"status":"running","reason":"auto","summary":"","time":{"created":1781542500000}}"#,
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4, 5_200]);
+        let assistant = &collection.usage_events[0];
+        assert_eq!(assistant.model.as_deref(), Some("claude-sonnet-4.6"));
+        assert_eq!(assistant.usage.output_tokens, 12);
+        assert_eq!(assistant.project.as_deref(), Some("somewhere/proj"));
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].tool_name, "bash");
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.duration_events[0].duration_ms, 1_000);
+        assert_eq!(collection.session_touches.len(), 4);
+    }
+
+    /// The OpenCode 2 copy of `write_db_at`'s rows: same ids, same tool.
+    fn write_migrated_copy(db: &Path) -> Connection {
+        let conn = Connection::open(db).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        insert_v2(
+            &conn,
+            "m0",
+            "s1",
+            "user",
+            0,
+            1_781_542_300_000,
+            r#"{"text":"hi","time":{"created":1781542300000}}"#,
+        );
+        insert_v2(
+            &conn,
+            "m1",
+            "s1",
+            "assistant",
+            1,
+            ASSISTANT_MS,
+            &v2_assistant(ASSISTANT_MS, 100, Some("glob")),
+        );
+        conn
+    }
+
+    fn tool_names(collection: &Collection) -> Vec<&str> {
+        let mut tools: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|tool| tool.tool_name.as_str())
+            .collect();
+        tools.sort_unstable();
+        tools
+    }
+
+    /// A `session_message` row with a legacy message's id counts once.
+    #[test]
+    fn migrated_rows_are_not_counted_twice() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        let conn = write_migrated_copy(&dir.path().join("opencode.db"));
+        insert_v2(
+            &conn,
+            "msg_new",
+            "s1",
+            "assistant",
+            2,
+            1_781_543_000_000,
+            &v2_assistant(1_781_543_000_000, 700, Some("bash")),
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![175, 700 + 12 + 30 + 4]);
+        assert_eq!(tool_names(&collection), vec!["bash", "glob"]);
+        assert_eq!(collection.duration_events.len(), 2);
+        assert_eq!(collection.session_touches.len(), 3);
+    }
+
+    /// `opencode-dev.db` sorts before `opencode.db`, so the migrated copy is
+    /// read before the legacy rows it shares ids with.
+    #[test]
+    fn migrated_copy_in_an_earlier_db_file_counts_tools_once() {
+        let dir = TempDir::new().expect("tempdir");
+        drop(write_migrated_copy(&dir.path().join("opencode-dev.db")));
+        write_db(dir.path());
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 2);
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(tool_names(&collection), vec!["glob"]);
+        assert_eq!(collection.duration_events.len(), 1);
+    }
+
+    /// An unreadable legacy message falls back to its migrated copy for
+    /// tokens, while its legacy tool parts are still readable.
+    #[test]
+    fn unreadable_legacy_message_counts_tools_once() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        let conn = write_migrated_copy(&dir.path().join("opencode.db"));
+        conn.execute("UPDATE message SET data = '{not json' WHERE id = 'm1'", [])
+            .expect("corrupt legacy message");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(tool_names(&collection), vec!["glob"]);
+    }
+
+    fn write_fork_db(dir: &Path, boundary: &str) {
+        let conn = Connection::open(dir.join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('parent', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert parent");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('fork', '/somewhere/proj', 'parent', ?1, 1781549000000)",
+            [boundary],
+        )
+        .expect("insert fork");
+        let user = r#"{"text":"hi","time":{"created":1781542300000}}"#;
+        let first = v2_assistant(1_781_542_400_000, 100, Some("read"));
+        let second = v2_assistant(1_781_542_500_000, 200, None);
+        insert_v2(&conn, "msg_u", "parent", "user", 0, 1_781_542_300_000, user);
+        insert_v2(
+            &conn,
+            "msg_a",
+            "parent",
+            "assistant",
+            1,
+            1_781_542_400_000,
+            &first,
+        );
+        insert_v2(
+            &conn,
+            "msg_b",
+            "parent",
+            "assistant",
+            2,
+            1_781_542_500_000,
+            &second,
+        );
+        insert_v2(
+            &conn,
+            "msg_evt_0",
+            "fork",
+            "user",
+            0,
+            1_781_542_300_000,
+            user,
+        );
+        insert_v2(
+            &conn,
+            "msg_evt_1",
+            "fork",
+            "assistant",
+            1,
+            1_781_542_400_000,
+            &first,
+        );
+        insert_v2(
+            &conn,
+            "msg_own",
+            "fork",
+            "assistant",
+            2,
+            1_781_549_100_000,
+            &v2_assistant(1_781_549_100_000, 400, None),
+        );
+    }
+
+    /// Fork rows at or below the copy cutoff are not recounted; the fork's
+    /// own rows count.
+    #[test]
+    fn fork_copies_are_not_recounted() {
+        for boundary in [
+            r#"{"type":"through","messageID":"msg_a"}"#,
+            r#"{"type":"before","messageID":"msg_b"}"#,
+        ] {
+            let dir = TempDir::new().expect("tempdir");
+            write_fork_db(dir.path(), boundary);
+
+            let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(volumes(&collection), vec![146, 246, 446], "{boundary}");
+            assert_eq!(collection.tool_events.len(), 1, "{boundary}");
+            let fork_touches = collection
+                .session_touches
+                .iter()
+                .filter(|touch| touch.session_id == "fork")
+                .count();
+            assert_eq!(fork_touches, 1, "{boundary}");
+        }
+    }
+
+    #[test]
+    fn unresolvable_fork_boundary_keeps_every_row() {
+        let dir = TempDir::new().expect("tempdir");
+        write_fork_db(dir.path(), r#"{"type":"through","messageID":"msg_gone"}"#);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 4);
     }
 
     #[test]

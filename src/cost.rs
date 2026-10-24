@@ -6,13 +6,26 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::TokenUsage;
+use crate::model::{CostTally, TokenUsage, UsageGranularity};
 
+mod litellm;
 mod remote;
 
 pub use remote::spawn_pricing_refresh;
 
 static LOADED: OnceLock<RwLock<Option<Snapshot>>> = OnceLock::new();
+
+/// Stored snapshots carry the version of the rules that derived their rates;
+/// bump it whenever those rules change. A file from an older build still
+/// parses, and trusted for the rest of the day it would misprice until the
+/// next day's fetch, so a mismatch refetches and keeps the file only as the
+/// offline fallback.
+const SNAPSHOT_FORMAT: u32 = 2;
+
+/// Codex logs only the provider (`openai`, `codex`) for some sessions, and
+/// `codex-auto-review` has no `LiteLLM` key; all of them price as the model
+/// Codex runs by default, so this follows Codex's default.
+const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Pricing {
@@ -26,11 +39,48 @@ pub struct Pricing {
     pub cache_write_1h: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct ModelPricing {
+    #[serde(flatten)]
+    base: Pricing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    long_context: Option<LongContext>,
+}
+
+/// Rates for every token of a request whose prompt is over
+/// `above_prompt_tokens`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct LongContext {
+    above_prompt_tokens: u64,
+    rates: Pricing,
+}
+
+impl ModelPricing {
+    fn rates_for(&self, usage: &TokenUsage) -> Pricing {
+        match self.long_context {
+            Some(tier) if prompt_tokens(usage) > tier.above_prompt_tokens => tier.rates,
+            _ => self.base,
+        }
+    }
+}
+
+/// The threshold measures the whole prompt. `input_tokens` is fresh input
+/// only, and counting just that would leave a mostly-cached long call at
+/// base rates.
+fn prompt_tokens(usage: &TokenUsage) -> u64 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_read_input_tokens)
+        .saturating_add(usage.cache_creation_input_tokens)
+}
+
 #[derive(Deserialize)]
 struct Snapshot {
     #[serde(rename = "_fetched", default)]
     fetched: Option<String>,
-    models: HashMap<String, Pricing>,
+    #[serde(rename = "_format", default)]
+    format: u32,
+    models: HashMap<String, ModelPricing>,
 }
 
 fn loaded() -> &'static RwLock<Option<Snapshot>> {
@@ -80,16 +130,21 @@ fn normalize(model_name: &str) -> String {
     normalized
 }
 
+/// Base rates, the ones every request pays below any long-context threshold.
+pub fn pricing_for(model_name: &str) -> Option<Pricing> {
+    model_pricing(model_name).map(|pricing| pricing.base)
+}
+
 /// Look up pricing: exact snapshot match first, then the longest snapshot key
 /// the name extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
 /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
 /// plain word suffix (`gemini-pro-default`) must not match a shorter base
 /// key. Retry dotted version segments as dashed only as a fallback, so ids whose pricing
 /// keys genuinely contain dots (`gpt-3.5-turbo`) resolve exactly first.
-pub fn pricing_for(model_name: &str) -> Option<Pricing> {
+fn model_pricing(model_name: &str) -> Option<ModelPricing> {
     let mut name = normalize(model_name);
     if name == "codex" || name == "openai" || name == "codex-auto-review" {
-        "gpt-5.5".clone_into(&mut name);
+        CODEX_DEFAULT_MODEL.clone_into(&mut name);
     }
 
     let loaded = loaded().read().ok()?;
@@ -104,7 +159,7 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     None
 }
 
-fn lookup(snapshot: &Snapshot, name: &str) -> Option<Pricing> {
+fn lookup(snapshot: &Snapshot, name: &str) -> Option<ModelPricing> {
     if let Some(pricing) = snapshot.models.get(name) {
         return Some(*pricing);
     }
@@ -122,13 +177,18 @@ fn lookup(snapshot: &Snapshot, name: &str) -> Option<Pricing> {
         .map(|(_, pricing)| *pricing)
 }
 
+/// Price `usage` as one request, so a prompt over the model's long-context
+/// threshold puts the whole request on the long-context rates.
+pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
+    let pricing = model_pricing(model_name)?;
+    Some(cost_at(&pricing.rates_for(usage), usage))
+}
+
 #[allow(
     clippy::cast_precision_loss,
     reason = "Token counts are far below 2^52; estimate precision is dominated by pricing anyway."
 )]
-pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
-    let pricing = pricing_for(model_name)?;
-
+fn cost_at(rates: &Pricing, usage: &TokenUsage) -> f64 {
     // The 5m/1h split comes from untrusted logs; if it is absent, broken, or
     // would overflow, fall back to pricing every write at the 5m rate.
     let split = usage
@@ -143,49 +203,34 @@ pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
         _ => (usage.cache_creation_input_tokens, 0),
     };
 
-    Some(
-        usage.input_tokens as f64 * pricing.input
-            + usage.output_tokens as f64 * pricing.output
-            + usage.cache_read_input_tokens as f64 * pricing.cache_read
-            + write_short as f64 * pricing.cache_write_5m
-            + write_long as f64 * pricing.cache_write_1h,
-    )
+    usage.input_tokens as f64 * rates.input
+        + usage.output_tokens as f64 * rates.output
+        + usage.cache_read_input_tokens as f64 * rates.cache_read
+        + write_short as f64 * rates.cache_write_5m
+        + write_long as f64 * rates.cache_write_1h
 }
 
-/// Track unpriced volume separately so incomplete pricing cannot be reported
-/// as a complete zero-dollar total.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CostTally {
-    pub priced_usd: f64,
-    pub unpriced_volume: u64,
-}
-
-impl CostTally {
-    pub fn add(
-        &mut self,
-        model_name: &str,
-        unreported: &TokenUsage,
-        reported_cost_usd: Option<f64>,
-    ) {
-        self.priced_usd += reported_cost_usd.unwrap_or(0.0);
-        let volume = unreported.token_volume();
-        if volume == 0 {
-            return;
-        }
-        match usage_cost_usd(model_name, unreported) {
-            Some(cost) => self.priced_usd += cost,
-            None => self.unpriced_volume = self.unpriced_volume.saturating_add(volume),
-        }
+/// Price one usage event. Only a `Call` can cross a long-context threshold:
+/// an aggregate stays at base rates rather than billing every request in it
+/// at the premium because their sum is large.
+pub fn estimate(model_name: &str, usage: &TokenUsage, granularity: UsageGranularity) -> CostTally {
+    let volume = usage.token_volume();
+    if volume == 0 {
+        return CostTally::default();
     }
-
-    pub fn is_complete(&self) -> bool {
-        self.unpriced_volume == 0
-    }
-
-    /// The total, only when it is the whole picture — a partial sum is not
-    /// a total.
-    pub fn complete_usd(&self) -> Option<f64> {
-        self.is_complete().then_some(self.priced_usd)
+    let cost = match granularity {
+        UsageGranularity::Call => usage_cost_usd(model_name, usage),
+        UsageGranularity::Aggregate => pricing_for(model_name).map(|base| cost_at(&base, usage)),
+    };
+    match cost {
+        Some(priced_usd) => CostTally {
+            priced_usd,
+            unpriced_volume: 0,
+        },
+        None => CostTally {
+            priced_usd: 0.0,
+            unpriced_volume: volume,
+        },
     }
 }
 
@@ -221,40 +266,60 @@ pub(crate) mod tests {
                 cache_write_5m: cache_write_5m / 1e6,
                 cache_write_1h: cache_write_1h / 1e6,
             };
+        let flat = |base: Pricing| ModelPricing {
+            base,
+            long_context: None,
+        };
+        let openai = |input: f64, output: f64, cache_read: f64| Pricing {
+            input: input / 1e6,
+            output: output / 1e6,
+            cache_read: cache_read / 1e6,
+            cache_write_5m: 0.0,
+            cache_write_1h: 0.0,
+        };
         replace_loaded(Some(Snapshot {
             fetched: Some("test".to_owned()),
+            format: SNAPSHOT_FORMAT,
             models: HashMap::from([
                 (
                     "claude-opus-4-8".to_owned(),
-                    per_mtok(5.0, 25.0, 6.25, 10.0),
+                    flat(per_mtok(5.0, 25.0, 6.25, 10.0)),
                 ),
-                ("claude-fable-5".to_owned(), per_mtok(8.0, 40.0, 10.0, 16.0)),
+                (
+                    "claude-fable-5".to_owned(),
+                    flat(per_mtok(8.0, 40.0, 10.0, 16.0)),
+                ),
                 (
                     "claude-sonnet-4-5".to_owned(),
-                    per_mtok(3.0, 15.0, 3.75, 6.0),
+                    flat(per_mtok(3.0, 15.0, 3.75, 6.0)),
                 ),
-                ("gpt-3.5-turbo".to_owned(), per_mtok(0.5, 1.5, 0.0, 0.0)),
-                ("grok-4.5".to_owned(), per_mtok(0.2, 1.5, 0.0, 0.0)),
                 (
-                    "gpt-5.5".to_owned(),
-                    Pricing {
-                        input: 5.0 / 1e6,
-                        output: 30.0 / 1e6,
-                        cache_read: 0.5 / 1e6,
-                        cache_write_5m: 0.0,
-                        cache_write_1h: 0.0,
+                    "claude-haiku-5-5".to_owned(),
+                    ModelPricing {
+                        base: per_mtok(0.1, 0.5, 0.125, 0.2),
+                        long_context: Some(LongContext {
+                            above_prompt_tokens: 100_000,
+                            rates: per_mtok(0.5, 2.5, 0.625, 1.0),
+                        }),
                     },
                 ),
                 (
-                    "gemini-3.5-flash".to_owned(),
-                    Pricing {
-                        input: 1.5 / 1e6,
-                        output: 9.0 / 1e6,
-                        cache_read: 0.15 / 1e6,
-                        cache_write_5m: 0.0,
-                        cache_write_1h: 0.0,
+                    "gpt-3.5-turbo".to_owned(),
+                    flat(per_mtok(0.5, 1.5, 0.0, 0.0)),
+                ),
+                ("grok-4.5".to_owned(), flat(per_mtok(0.2, 1.5, 0.0, 0.0))),
+                ("gpt-5.5".to_owned(), flat(openai(5.0, 30.0, 0.5))),
+                (
+                    "gpt-6.1-sol".to_owned(),
+                    ModelPricing {
+                        base: openai(2.0, 10.0, 0.1),
+                        long_context: Some(LongContext {
+                            above_prompt_tokens: 272_000,
+                            rates: openai(4.0, 15.0, 0.2),
+                        }),
                     },
                 ),
+                ("gemini-3.5-flash".to_owned(), flat(openai(1.5, 9.0, 0.15))),
             ]),
         }));
     }
@@ -356,9 +421,78 @@ pub(crate) mod tests {
         };
         let fable = usage_cost_usd("claude-fable-5", &usage).expect("fable should be priced");
         assert!((fable - 8.0).abs() < 1e-9);
-        let review =
-            usage_cost_usd("codex-auto-review", &usage).expect("auto-review should be priced");
-        assert!((review - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn provider_only_names_price_as_the_codex_default() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 100_000,
+            ..TokenUsage::default()
+        };
+        for name in ["codex", "openai", "codex-auto-review"] {
+            let cost = usage_cost_usd(name, &usage).expect("provider-only name should price");
+            assert!((cost - 0.2).abs() < 1e-9, "{name}: {cost}");
+        }
+    }
+
+    /// Cache reads and writes count toward the threshold, and every rate of
+    /// the request switches, the 1h write included.
+    #[test]
+    fn long_context_rates_cover_the_whole_request_over_the_threshold() {
+        install_test_pricing();
+        let at_threshold = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cache_read_input_tokens: 99_000,
+            ..TokenUsage::default()
+        };
+        let base = usage_cost_usd("claude-haiku-5-5", &at_threshold).expect("haiku prices");
+        assert!((base - (1_000.0 * 0.1 + 1_000.0 * 0.5 + 99_000.0 * 0.01) / 1e6).abs() < 1e-12);
+
+        let over = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cache_read_input_tokens: 90_000,
+            cache_creation_input_tokens: 10_000,
+            cache_creation_ephemeral_5m_input_tokens: 4_000,
+            cache_creation_ephemeral_1h_input_tokens: 6_000,
+            ..TokenUsage::default()
+        };
+        let long = usage_cost_usd("claude-haiku-5-5", &over).expect("haiku prices");
+        let expected =
+            (1_000.0 * 0.5 + 1_000.0 * 2.5 + 90_000.0 * 0.05 + 4_000.0 * 0.625 + 6_000.0 * 1.0)
+                / 1e6;
+        assert!((long - expected).abs() < 1e-12, "{long} vs {expected}");
+    }
+
+    #[test]
+    fn openai_long_context_counts_cached_input() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 2_001,
+            output_tokens: 1_000,
+            cache_read_input_tokens: 270_000,
+            ..TokenUsage::default()
+        };
+        let cost = usage_cost_usd("gpt-6.1-sol", &usage).expect("sol prices");
+        let expected = (2_001.0 * 4.0 + 1_000.0 * 15.0 + 270_000.0 * 0.2) / 1e6;
+        assert!((cost - expected).abs() < 1e-12, "{cost} vs {expected}");
+    }
+
+    /// An event that sums several requests stays at base rates even when the
+    /// sum is past the threshold; a single request of the same size does not.
+    #[test]
+    fn aggregate_events_never_cross_a_long_context_threshold() {
+        install_test_pricing();
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let aggregate = estimate("claude-haiku-5-5", &usage, UsageGranularity::Aggregate);
+        assert!((aggregate.priced_usd - 0.1).abs() < 1e-12);
+        let call = estimate("claude-haiku-5-5", &usage, UsageGranularity::Call);
+        assert!((call.priced_usd - 0.5).abs() < 1e-12);
     }
 
     #[test]
@@ -385,20 +519,23 @@ pub(crate) mod tests {
             ..TokenUsage::default()
         };
 
-        let mut priced = CostTally::default();
-        priced.add("claude-opus-4-8", &usage, None);
+        let priced = estimate("claude-opus-4-8", &usage, UsageGranularity::Call);
         assert!(priced.is_complete());
         assert!((priced.complete_usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
 
+        let unpriced = estimate("model-nobody-priced", &usage, UsageGranularity::Call);
         let mut mixed = CostTally::default();
-        mixed.add("claude-opus-4-8", &usage, None);
-        mixed.add("model-nobody-priced", &usage, Some(0.25));
+        mixed.add(&priced, None);
+        mixed.add(&unpriced, Some(0.25));
         assert!((mixed.priced_usd - 5.25).abs() < 1e-9);
         assert_eq!(mixed.unpriced_volume, 1_000_000);
         assert_eq!(mixed.complete_usd(), None);
 
-        let mut empty = CostTally::default();
-        empty.add("model-nobody-priced", &TokenUsage::default(), None);
+        let empty = estimate(
+            "model-nobody-priced",
+            &TokenUsage::default(),
+            UsageGranularity::Call,
+        );
         assert!(empty.is_complete());
     }
 }

@@ -1,23 +1,37 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use ruzstd::decoding::StreamingDecoder;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::collector::{
     FileEvents, KeyedDurationEvent, KeyedEffortEvent, KeyedInterruptEvent, KeyedPaceEvent,
-    KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent, list_files,
-    merge_into, parse_files_cached, project_from_cwd,
+    KeyedPermissionEvent, KeyedRateLimitSample, KeyedToolEvent, KeyedUsageEvent,
+    list_files_matching, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{
     Collection, DurationEvent, EffortEvent, InterruptEvent, PaceEvent, PermissionEvent, Provider,
     RateLimitSample, SessionTouch, SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
+
+const COMPRESSED_SUFFIX: &str = ".zst";
+
+/// Bounds the memory one line can take; a longer line is skipped as a parse
+/// error instead of being buffered.
+const MAX_LINE_BYTES: u64 = 64 << 20;
+
+/// Decoded bytes a `.zst` may expand to, per on-disk byte: far above what
+/// JSONL compresses to, far below what a run-length frame can claim. Past the
+/// budget the file stops parsing.
+const MAX_DECODE_RATIO: u64 = 64;
+/// Floor of the decode budget, so a tiny file's frame overhead never trips it.
+const MIN_DECODE_BUDGET: u64 = 64 << 20;
 
 pub fn collect(
     root: &Path,
@@ -41,20 +55,18 @@ pub fn collect(
         .parent()
         .map(|parent| parent.join("archived_sessions"));
 
-    // A session can briefly exist in both dirs (a stale `sessions/` copy left
-    // after archiving). Dedupe by relative path before parsing — keeping the
-    // larger, more-complete file — so Codex durations (emitted without keys)
-    // and session touches are not duplicated during merging.
-    let file_len = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
+    // Parse one physical file per relative plain path (docs/codex.md) so
+    // Codex durations (emitted without keys) and session touches are not
+    // duplicated during merging.
     let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
         if !dir.exists() {
             continue;
         }
-        for path in list_files(dir, "jsonl", mtime_floor, &mut collection.stats) {
-            let rel = path.strip_prefix(dir).unwrap_or(&path).to_path_buf();
+        for path in list_files_matching(dir, &is_rollout_file, mtime_floor, &mut collection.stats) {
+            let rel = plain_rollout_path(path.strip_prefix(dir).unwrap_or(&path));
             match chosen.get_mut(&rel) {
-                Some(existing) if file_len(&path) > file_len(existing) => *existing = path,
+                Some(existing) if supersedes(&path, existing) => *existing = path,
                 Some(_) => {}
                 None => {
                     chosen.insert(rel, path);
@@ -75,41 +87,164 @@ pub fn collect(
     collection
 }
 
+fn is_compressed(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"))
+}
+
+fn is_rollout_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl") || is_compressed(path)
+}
+
+fn plain_rollout_path(path: &Path) -> PathBuf {
+    if !is_compressed(path) {
+        return path.to_path_buf();
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(COMPRESSED_SUFFIX))
+        .unwrap_or_default();
+    path.with_file_name(name)
+}
+
+/// Plain beats compressed, as in Codex. The frame header's content size is
+/// not compared: it is whatever the file claims, and a forged one would drop
+/// the plain file's usage.
+fn supersedes(candidate: &Path, existing: &Path) -> bool {
+    let disk_len = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
+    match (is_compressed(candidate), is_compressed(existing)) {
+        (false, true) => true,
+        (true, false) => false,
+        _ => disk_len(candidate) > disk_len(existing),
+    }
+}
+
+fn open_rollout(path: &Path) -> Option<Box<dyn BufRead>> {
+    let file = File::open(path).ok()?;
+    if is_compressed(path) {
+        let budget = file
+            .metadata()
+            .ok()?
+            .len()
+            .saturating_mul(MAX_DECODE_RATIO)
+            .max(MIN_DECODE_BUDGET);
+        let decoder = StreamingDecoder::new(BufReader::new(file)).ok()?;
+        return Some(Box::new(BufReader::new(DecodeBudget {
+            inner: decoder,
+            remaining: budget,
+        })));
+    }
+    Some(Box::new(BufReader::new(file)))
+}
+
+/// Fails the read once more than `remaining` bytes would come out, so the
+/// overrun surfaces as an error rather than a silently truncated file.
+struct DecodeBudget<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for DecodeBudget<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            let mut probe = [0_u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(io::Error::other("decoded rollout exceeds its budget")),
+            };
+        }
+        let allowed = usize::try_from(self.remaining).map_or(buf.len(), |left| left.min(buf.len()));
+        let read = self.inner.read(&mut buf[..allowed])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+enum Line {
+    Text,
+    Oversized,
+}
+
+/// Reads the next line into `line`; `Ok(None)` at end of input. A line past
+/// `max_bytes` is consumed without being kept.
+fn next_line(
+    reader: &mut dyn BufRead,
+    line: &mut Vec<u8>,
+    max_bytes: u64,
+) -> io::Result<Option<Line>> {
+    line.clear();
+    let read = reader.take(max_bytes + 1).read_until(b'\n', line)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if line.last() != Some(&b'\n') && line.len() as u64 > max_bytes {
+        line.clear();
+        reader.skip_until(b'\n')?;
+        return Ok(Some(Line::Oversized));
+    }
+    Ok(Some(Line::Text))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "One pass over the rollout feeding every collector; splitting adds indirection without logic."
 )]
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut reader = open_rollout(path)?;
+    // Keys and fallback ids come from the plain name, so a rollout parses the
+    // same whichever representation is on disk this run.
+    let logical_path = plain_rollout_path(path);
     let mut events = FileEvents::default();
-    let mut current_session_id = fallback_session_id(path);
+    let mut current_session_id = fallback_session_id(&logical_path);
     let mut pace_state = PaceState::default();
     let mut turn_items = TurnItems::default();
     let mut current_model = None;
     let mut current_project = None;
     let mut session_meta_count = 0usize;
-    let mut replay_second: Option<i64> = None;
-    let reader = BufReader::new(file);
+    let mut fork_instant: Option<OffsetDateTime> = None;
+    let mut own_thread_id: Option<String> = None;
+    let mut origin = Origin::default();
+    let mut recorded_usage: HashSet<String> = HashSet::new();
+    let mut line = Vec::new();
 
-    for (line_index, line) in reader.lines().enumerate() {
+    for line_index in 0.. {
+        let read = next_line(reader.as_mut(), &mut line, MAX_LINE_BYTES);
+        if matches!(read, Ok(None)) {
+            break;
+        }
         events.lines_seen += 1;
-        let Ok(line) = line else {
+        // A broken zstd frame returns the same error on every read; skipping
+        // it like a bad line would loop forever.
+        let Ok(Some(read)) = read else {
+            events.parse_errors += 1;
+            break;
+        };
+        if matches!(read, Line::Oversized) {
             events.parse_errors += 1;
             continue;
-        };
-        if line.trim().is_empty() {
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             events.parse_errors += 1;
             continue;
         };
 
         let timestamp = parse_timestamp(value.get("timestamp"));
-        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+        let is_session_meta = value.get("type").and_then(Value::as_str) == Some("session_meta");
+        if is_session_meta {
             session_meta_count += 1;
-            if session_meta_count == 2 {
-                replay_second = timestamp.map(OffsetDateTime::unix_timestamp);
+            if session_meta_count == 1 {
+                own_thread_id = string_path(&value, &["payload", "id"]);
+                origin = Origin::from_session_meta(&value);
+                if is_copied_fork(&value) {
+                    fork_instant = timestamp;
+                }
+            } else if session_meta_count == 2 {
+                fork_instant = timestamp;
             }
             current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
             current_model = session_model(&value).or(current_model);
@@ -119,11 +254,17 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         // Fork/spawn copies rewrite timestamps to the fork instant and shift
         // line positions (GH-36). Skip the replay burst even without a parent
         // in the scan; content keys deduplicate remaining replay when present.
-        let in_replay_burst = session_meta_count >= 2
-            && match (replay_second, timestamp) {
-                (Some(second), Some(ts)) => ts.unix_timestamp() == second,
-                _ => false,
-            };
+        // Rows naming this thread as their owner (its own `session_meta`, its
+        // own usage records) are never copies, whatever their timestamp.
+        let own_session_meta = is_session_meta && session_meta_count == 1;
+        let own_record = value.get("type").and_then(Value::as_str) == Some("token_usage_record")
+            && own_thread_id.is_some()
+            && string_path(&value, &["payload", "thread_id"]) == own_thread_id;
+        let in_replay_burst = !own_session_meta
+            && !own_record
+            && fork_instant
+                .zip(timestamp)
+                .is_some_and(|(fork, ts)| in_fork_burst(fork, ts));
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
             if !in_replay_burst {
@@ -154,15 +295,22 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             });
         }
 
-        collect_usage_event(
-            &value,
+        let usage_context = UsageContext {
             timestamp,
-            current_session_id.as_ref(),
-            current_model.as_ref(),
-            current_project.as_deref(),
+            session_id: current_session_id.as_ref(),
+            model: current_model.as_ref(),
+            project: current_project.as_deref(),
+            origin: &origin,
             line_index,
+        };
+        collect_usage_record(
+            &value,
+            &usage_context,
+            own_thread_id.as_deref(),
+            &mut recorded_usage,
             &mut events,
         );
+        collect_usage_event(&value, &usage_context, &recorded_usage, &mut events);
         turn_items.note(&value, timestamp);
         collect_duration_event(
             &value,
@@ -183,7 +331,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             &value,
             timestamp,
             current_session_id.as_ref(),
-            path,
+            &origin,
+            &logical_path,
             line_index,
             &mut events,
         );
@@ -193,17 +342,157 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     Some(events)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Per-line parse context; bundling into a struct adds noise for one caller."
-)]
+/// A `history_base` fork has no copied burst; skipping its first second would
+/// drop its own rows.
+fn is_copied_fork(session_meta: &Value) -> bool {
+    let payload = session_meta.get("payload");
+    payload
+        .and_then(|p| p.get("forked_from_id"))
+        .is_some_and(|id| !id.is_null())
+        && payload
+            .and_then(|p| p.get("history_base"))
+            .is_none_or(Value::is_null)
+}
+
+/// Matching only the fork's own second counts a copy that spills into the
+/// next second twice. Subtracting instead of adding a second keeps a fork at
+/// the last representable instant from panicking.
+fn in_fork_burst(fork: OffsetDateTime, at: OffsetDateTime) -> bool {
+    at.unix_timestamp() >= fork.unix_timestamp() && at - fork < Duration::SECOND
+}
+
+/// Read from the first `session_meta` only: a fork child's second one is the
+/// parent's copy and would make the child a main session.
+#[derive(Default)]
+struct Origin {
+    agent: Option<String>,
+}
+
+impl Origin {
+    fn from_session_meta(session_meta: &Value) -> Self {
+        let Some(payload) = session_meta.get("payload") else {
+            return Self::default();
+        };
+        let Some(Value::Object(source)) = payload.get("source") else {
+            return Self::default();
+        };
+        let agent = if let Some(subagent) = source.get("subagent") {
+            Some(subagent_name(subagent, payload))
+        } else {
+            source
+                .get("internal")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+        Self { agent }
+    }
+
+    fn source_kind(&self) -> SourceKind {
+        if self.agent.is_some() {
+            SourceKind::Subagent
+        } else {
+            SourceKind::Main
+        }
+    }
+}
+
+/// The SUBAGENTS row: a spawned thread's role (its nicknames are random per
+/// spawn and would split one role into many rows), else the subagent kind.
+fn subagent_name(subagent: &Value, payload: &Value) -> String {
+    let name = match subagent {
+        Value::String(kind) => Some(kind.clone()),
+        Value::Object(variant) => match variant.get("thread_spawn") {
+            Some(spawn) => Some(
+                string_path(spawn, &["agent_role"])
+                    .or_else(|| string_path(spawn, &["agent_type"]))
+                    .or_else(|| string_path(payload, &["agent_role"]))
+                    .unwrap_or_else(|| "default".to_owned()),
+            ),
+            None => variant
+                .get("other")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| variant.keys().next().cloned()),
+        },
+        _ => None,
+    };
+    name.filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "subagent".to_owned())
+}
+
+/// Per-line attribution shared by the two usage sources.
+struct UsageContext<'a> {
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&'a String>,
+    model: Option<&'a String>,
+    project: Option<&'a str>,
+    origin: &'a Origin,
+    line_index: usize,
+}
+
+impl UsageContext<'_> {
+    fn event(&self, usage: TokenUsage) -> UsageEvent {
+        UsageEvent {
+            timestamp: self.timestamp,
+            session_id: self.session_id.cloned(),
+            model: self.model.cloned().or_else(|| Some("codex".to_owned())),
+            source_kind: self.origin.source_kind(),
+            attribution_agent: self.origin.agent.clone(),
+            attribution_skill: None,
+            project: self.project.map(ToOwned::to_owned),
+            usage,
+            reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
+        }
+    }
+}
+
+/// The usage source wherever present (docs/codex.md). Every record's usage is
+/// remembered, even one not counted here, so the `token_count` echoing it is
+/// not counted twice.
+fn collect_usage_record(
+    value: &Value,
+    context: &UsageContext<'_>,
+    own_thread_id: Option<&str>,
+    recorded: &mut HashSet<String>,
+    events: &mut FileEvents,
+) {
+    if value.get("type").and_then(Value::as_str) != Some("token_usage_record") {
+        return;
+    }
+    let Some(usage_value) = value
+        .get("payload")
+        .and_then(|payload| payload.get("usage"))
+        .and_then(fingerprintable)
+    else {
+        return;
+    };
+    recorded.insert(usage_fingerprint(usage_value));
+    // A record owned by another thread is a copy of that thread's spending.
+    if let (Some(owner), Some(own)) = (string_path(value, &["payload", "thread_id"]), own_thread_id)
+        && owner != own
+    {
+        return;
+    }
+    let Some(usage) = parse_token_usage(usage_value) else {
+        return;
+    };
+    let key = match string_path(value, &["payload", "response_id"]) {
+        Some(response_id) => Some(format!("codex-usage:v3:{response_id}")),
+        None => context.session_id.and_then(|sid| {
+            positional_key("codex-record", sid, context.timestamp, context.line_index)
+        }),
+    };
+    events.usage_events.push(KeyedUsageEvent {
+        key,
+        event: context.event(usage),
+    });
+}
+
 fn collect_usage_event(
     value: &Value,
-    timestamp: Option<OffsetDateTime>,
-    session_id: Option<&String>,
-    model: Option<&String>,
-    project: Option<&str>,
-    line_index: usize,
+    context: &UsageContext<'_>,
+    recorded: &HashSet<String>,
     events: &mut FileEvents,
 ) {
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
@@ -212,7 +501,14 @@ fn collect_usage_event(
     if string_path(value, &["payload", "type"]).as_deref() != Some("token_count") {
         return;
     }
-    collect_rate_limit_sample(value, timestamp, session_id, line_index, events);
+    let session_id = context.session_id;
+    collect_rate_limit_sample(
+        value,
+        context.timestamp,
+        session_id,
+        context.line_index,
+        events,
+    );
     let Some(last_usage) = value
         .get("payload")
         .and_then(|payload| payload.get("info"))
@@ -220,6 +516,9 @@ fn collect_usage_event(
     else {
         return;
     };
+    if recorded.contains(&usage_fingerprint(last_usage)) {
+        return;
+    }
     let Some(usage) = parse_token_usage(last_usage) else {
         return;
     };
@@ -233,22 +532,12 @@ fn collect_usage_event(
             last = usage_fingerprint(last_usage),
             cum = usage_fingerprint(cum),
         )),
-        (Some(sid), None) => positional_key("codex", sid, timestamp, line_index),
+        (Some(sid), None) => positional_key("codex", sid, context.timestamp, context.line_index),
         _ => None,
     };
     events.usage_events.push(KeyedUsageEvent {
         key,
-        event: UsageEvent {
-            timestamp,
-            session_id: session_id.cloned(),
-            model: model.cloned().or_else(|| Some("codex".to_owned())),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: project.map(ToOwned::to_owned),
-            usage,
-            reported_cost_usd: None,
-        },
+        event: context.event(usage),
     });
 }
 
@@ -580,10 +869,15 @@ fn collect_duration_event(
     });
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Per-line parse context; bundling into a struct adds noise for one caller."
+)]
 fn collect_tool_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
     session_id: Option<&String>,
+    origin: &Origin,
     path: &Path,
     line_index: usize,
     events: &mut FileEvents,
@@ -618,7 +912,7 @@ fn collect_tool_event(
             session_id: session_id.cloned(),
             tool_name,
             subagent_type: None,
-            source_kind: SourceKind::Main,
+            source_kind: origin.source_kind(),
         },
     });
 }
@@ -774,17 +1068,21 @@ fn parse_token_usage(value: &Value) -> Option<TokenUsage> {
     let cached_input_tokens = u64_field(value, "cached_input_tokens");
     let output_tokens = u64_field(value, "output_tokens");
     let reasoning_output_tokens = u64_field(value, "reasoning_output_tokens");
-    let total_tokens = u64_field(value, "total_tokens");
-    if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+    // A `token_count` with only `total_tokens` (the post-compaction refill) is
+    // no API call; counting it adds phantom calls.
+    if input_tokens == 0 && output_tokens == 0 {
         return None;
     }
 
-    // Codex reports input_tokens inclusive of cached_input_tokens; subtract so
-    // input_tokens means fresh (uncached) input, matching the Claude schema.
+    // input_tokens includes cached and cache-write input; subtract both so it
+    // means fresh input, matching the Claude schema.
+    let uncached = input_tokens.saturating_sub(cached_input_tokens);
+    let cache_write = u64_field(value, "cache_write_input_tokens").min(uncached);
     Some(TokenUsage {
-        input_tokens: input_tokens.saturating_sub(cached_input_tokens),
+        input_tokens: uncached - cache_write,
         output_tokens,
         reasoning_output_tokens,
+        cache_creation_input_tokens: cache_write,
         cache_read_input_tokens: cached_input_tokens,
         ..TokenUsage::default()
     })
@@ -846,6 +1144,7 @@ fn fallback_session_id(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Read;
 
     use tempfile::TempDir;
 
@@ -1526,5 +1825,678 @@ mod tests {
                 "ls",           // {"cmd":"ls -la"} -> cmd fallback field
             ]
         );
+    }
+
+    const COMPRESSED_PLAIN: &str =
+        include_str!("../../tests/fixtures/codex/rollout-compressed.jsonl");
+    const COMPRESSED_ZST: &[u8] =
+        include_bytes!("../../tests/fixtures/codex/rollout-compressed.jsonl.zst");
+    /// `resp_a` (1000 + 50) + `resp_b` (1200 + 80) in the fixture.
+    const COMPRESSED_TOTAL: u64 = 2_330;
+
+    fn total_volume(collection: &Collection) -> u64 {
+        collection
+            .usage_events
+            .iter()
+            .map(|event| event.usage.token_volume())
+            .sum()
+    }
+
+    fn usage_json(input: u64, cached: u64, output: u64) -> String {
+        format!(
+            r#"{{"input_tokens":{input},"cached_input_tokens":{cached},"cache_write_input_tokens":0,"output_tokens":{output},"reasoning_output_tokens":0,"total_tokens":{total}}}"#,
+            total = input + output,
+        )
+    }
+
+    fn meta_line(ts: &str, id: &str, source: &str, extra: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"{id}","cwd":"/tmp/p","source":{source},"model_provider":"openai"{extra}}}}}"#
+        )
+    }
+
+    fn record_line(ts: &str, thread: &str, response: &str, usage: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"token_usage_record","payload":{{"thread_id":"{thread}","turn_id":"t1","session_id":"{thread}","root_turn_id":"t1","response_id":"{response}","usage":{usage},"turn_token_usage":{usage},"thread_token_usage":{usage}}}}}"#
+        )
+    }
+
+    fn token_count_line(ts: &str, last: &str, cumulative_total: u64) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":0,"output_tokens":0,"total_tokens":{cumulative_total}}},"last_token_usage":{last},"model_context_window":258400}}}}}}"#
+        )
+    }
+
+    fn write_lines(path: &Path, lines: &[String]) {
+        fs::create_dir_all(path.parent().expect("fixture path has a parent"))
+            .expect("test dirs should be created");
+        let mut body = lines.join("\n");
+        body.push('\n');
+        fs::write(path, body).expect("fixture should be written");
+    }
+
+    #[test]
+    fn compressed_fixture_decodes_to_its_plain_text() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let path = temp.path().join("rollout-z.jsonl.zst");
+        fs::write(&path, COMPRESSED_ZST).expect("fixture should be written");
+
+        let mut decoded = Vec::new();
+        open_rollout(&path)
+            .expect("compressed rollout should open")
+            .read_to_end(&mut decoded)
+            .expect("compressed rollout should decode");
+
+        assert_eq!(decoded, COMPRESSED_PLAIN.as_bytes());
+    }
+
+    #[test]
+    fn reads_compressed_rollouts() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
+            .expect("fixture should be written");
+        fs::write(day.join("rollout-z.jsonl.zst.tmp"), b"partial")
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), COMPRESSED_TOTAL);
+        assert_eq!(collection.tool_events[0].tool_name, "cargo");
+        assert_eq!(collection.duration_events.len(), 1);
+    }
+
+    /// The parse cache stores events per physical path, so the two
+    /// representations must produce the same keys: when Codex compresses or
+    /// restores a file between runs, the merge then sees one rollout, not two.
+    #[test]
+    fn plain_and_compressed_representations_yield_identical_keys() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let plain = temp.path().join("a/rollout-z.jsonl");
+        let compressed = temp.path().join("b/rollout-z.jsonl.zst");
+        fs::create_dir_all(plain.parent().expect("has parent")).expect("dirs");
+        fs::create_dir_all(compressed.parent().expect("has parent")).expect("dirs");
+        fs::write(&plain, COMPRESSED_PLAIN).expect("fixture should be written");
+        fs::write(&compressed, COMPRESSED_ZST).expect("fixture should be written");
+
+        let plain = parse_file(&plain, UtcOffset::UTC).expect("plain parses");
+        let compressed = parse_file(&compressed, UtcOffset::UTC).expect("zst parses");
+
+        let usage_keys = |events: &FileEvents| -> Vec<Option<String>> {
+            events.usage_events.iter().map(|e| e.key.clone()).collect()
+        };
+        let tool_keys = |events: &FileEvents| -> Vec<Option<String>> {
+            events.tool_events.iter().map(|e| e.key.clone()).collect()
+        };
+        let limit_keys = |events: &FileEvents| -> Vec<Option<String>> {
+            events
+                .rate_limit_samples
+                .iter()
+                .map(|e| e.key.clone())
+                .collect()
+        };
+        assert_eq!(usage_keys(&plain), usage_keys(&compressed));
+        assert_eq!(tool_keys(&plain), tool_keys(&compressed));
+        assert_eq!(limit_keys(&plain), limit_keys(&compressed));
+        assert_eq!(
+            plain.session_touches.len(),
+            compressed.session_touches.len()
+        );
+        assert_eq!(plain.lines_seen, compressed.lines_seen);
+    }
+
+    #[test]
+    fn flipping_representation_between_runs_counts_the_session_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        let plain = day.join("rollout-z.jsonl");
+        let compressed = day.join("rollout-z.jsonl.zst");
+        let run = || collect(temp.path(), None, false, UtcOffset::UTC);
+
+        fs::write(&plain, COMPRESSED_PLAIN).expect("fixture should be written");
+        let before = run();
+        fs::write(&compressed, COMPRESSED_ZST).expect("fixture should be written");
+        let both = run();
+        fs::remove_file(&plain).expect("plain should be removed");
+        let after = run();
+
+        for collection in [&before, &both, &after] {
+            assert_eq!(collection.stats.files_seen, 1);
+            assert_eq!(collection.usage_events.len(), 2);
+            assert_eq!(total_volume(collection), COMPRESSED_TOTAL);
+            assert_eq!(collection.duration_events.len(), 1);
+            assert_eq!(collection.tool_events.len(), 1);
+        }
+    }
+
+    /// A plain file beside its `.zst` wins, including the turn appended to it.
+    #[test]
+    fn resumed_plain_rollout_supersedes_its_compressed_sibling() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let day = temp.path().join("2026/06/01");
+        fs::create_dir_all(&day).expect("test dirs should be created");
+        fs::write(day.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
+            .expect("fixture should be written");
+        let resumed = format!(
+            "{COMPRESSED_PLAIN}{}\n",
+            record_line(
+                "2026-06-01T01:00:00Z",
+                "z1",
+                "resp_c",
+                &usage_json(300, 0, 20)
+            )
+        );
+        fs::write(day.join("rollout-z.jsonl"), resumed).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.usage_events.len(), 3);
+        assert_eq!(total_volume(&collection), COMPRESSED_TOTAL + 320);
+    }
+
+    #[test]
+    fn identical_plain_and_compressed_prefer_plain() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let plain = temp.path().join("rollout-z.jsonl");
+        let compressed = temp.path().join("rollout-z.jsonl.zst");
+        fs::write(&plain, COMPRESSED_PLAIN).expect("fixture should be written");
+        fs::write(&compressed, COMPRESSED_ZST).expect("fixture should be written");
+
+        assert!(supersedes(&plain, &compressed));
+        assert!(!supersedes(&compressed, &plain));
+    }
+
+    /// Neither the frame header's claimed size nor the on-disk sizes decide:
+    /// a plain copy smaller than the `.zst` itself still wins, in another
+    /// directory too.
+    #[test]
+    fn plain_copy_wins_over_compressed_even_when_smaller() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let plain = temp.path().join("sessions/2026/06/01/rollout-z.jsonl");
+        write_lines(
+            &plain,
+            &[
+                meta_line("2026-06-01T00:00:00Z", "z1", r#""exec""#, ""),
+                token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
+            ],
+        );
+        let archived_day = temp.path().join("archived_sessions/2026/06/01");
+        fs::create_dir_all(&archived_day).expect("test dirs should be created");
+        fs::write(archived_day.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
+            .expect("fixture should be written");
+        assert!(fs::metadata(&plain).expect("plain exists").len() < COMPRESSED_ZST.len() as u64);
+
+        let collection = collect(&temp.path().join("sessions"), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// A zstd frame of raw and run-length blocks: `prefix`, `run` copies of
+    /// `byte`, then `suffix`, at four bytes per 128 KiB of run.
+    fn run_length_frame(prefix: &[u8], byte: u8, run: usize, suffix: &[u8]) -> Vec<u8> {
+        const BLOCK: usize = 128 << 10;
+        fn header(frame: &mut Vec<u8>, size: usize, kind: u32, last: bool) {
+            let size = u32::try_from(size).expect("block size fits");
+            let value = (size << 3) | (kind << 1) | u32::from(last);
+            frame.extend_from_slice(&value.to_le_bytes()[..3]);
+        }
+        // Magic number, descriptor without content size, 128 KiB window.
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+        header(&mut frame, prefix.len(), 0, false);
+        frame.extend_from_slice(prefix);
+        let mut left = run;
+        while left > 0 {
+            let size = left.min(BLOCK);
+            header(&mut frame, size, 1, false);
+            frame.push(byte);
+            left -= size;
+        }
+        header(&mut frame, suffix.len(), 0, true);
+        frame.extend_from_slice(suffix);
+        frame
+    }
+
+    #[test]
+    fn oversized_line_is_skipped_without_being_buffered() {
+        let usage_line = format!(
+            "{}\n",
+            token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110)
+        );
+        let frame = run_length_frame(
+            br#"{"pad":""#,
+            b'a',
+            1 << 20,
+            format!("\"}}\n{usage_line}").as_bytes(),
+        );
+        let mut reader = BufReader::new(
+            StreamingDecoder::new(frame.as_slice()).expect("frame header should parse"),
+        );
+        let mut line = Vec::new();
+
+        let first = next_line(&mut reader, &mut line, 64 << 10).expect("decodes");
+        assert!(matches!(first, Some(Line::Oversized)));
+        assert!(line.capacity() < 1 << 20);
+        let second = next_line(&mut reader, &mut line, 64 << 10).expect("decodes");
+        assert!(matches!(second, Some(Line::Text)));
+        assert_eq!(line, usage_line.as_bytes());
+        assert!(
+            next_line(&mut reader, &mut line, 64 << 10)
+                .expect("decodes")
+                .is_none()
+        );
+    }
+
+    /// A few kilobytes of run-length blocks claim more than the decode
+    /// budget; parsing stops with a parse error, keeping the rows before it.
+    #[test]
+    fn decompression_bomb_stops_at_the_decode_budget() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let usage_line = format!(
+            "{}\n{}\n",
+            meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+            token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110)
+        );
+        let after_budget = format!(
+            "\n{}\n",
+            token_count_line("2026-06-01T00:00:09Z", &usage_json(200, 0, 20), 330)
+        );
+        let run = usize::try_from(MIN_DECODE_BUDGET).expect("budget fits");
+        let frame = run_length_frame(usage_line.as_bytes(), b'a', run, after_budget.as_bytes());
+        assert!(frame.len() < 8 << 10);
+        let path = temp.path().join("rollout-s1.jsonl.zst");
+        fs::write(&path, frame).expect("fixture should be written");
+
+        let events = parse_file(&path, UtcOffset::UTC).expect("frame header should parse");
+
+        assert_eq!(events.usage_events.len(), 1);
+        assert_eq!(events.parse_errors, 1);
+    }
+
+    #[test]
+    fn truncated_compressed_rollout_stops_with_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let path = temp.path().join("rollout-z.jsonl.zst");
+        fs::write(&path, &COMPRESSED_ZST[..COMPRESSED_ZST.len() / 2])
+            .expect("fixture should be written");
+
+        let events = parse_file(&path, UtcOffset::UTC).expect("frame header is intact");
+
+        assert_eq!(events.parse_errors, 1);
+        assert!(events.usage_events.is_empty());
+    }
+
+    #[test]
+    fn unreadable_compressed_header_counts_as_unreadable_file() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(temp.path().join("rollout-z.jsonl.zst"), b"not zstd")
+            .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.stats.unreadable_files, 1);
+    }
+
+    /// Each record counts once; its `token_count` echoes (one repeated
+    /// byte-identically), the embedded copy in `compacted` and the total-only
+    /// refill row add nothing.
+    #[test]
+    fn usage_records_are_primary_and_their_token_count_echoes_count_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let first = usage_json(100, 40, 10);
+        let compaction = usage_json(5_000, 0, 300);
+        let third = usage_json(800, 700, 30);
+        let echo = token_count_line("2026-06-01T00:00:03.100Z", &first, 110);
+        write_lines(
+            &temp.path().join("rollout-s1.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+                record_line("2026-06-01T00:00:03Z", "s1", "resp_1", &first),
+                echo.clone(),
+                echo.replace("00:00:03.100Z", "00:00:04.000Z"),
+                record_line("2026-06-01T00:00:20Z", "s1", "resp_2", &compaction),
+                format!(
+                    r#"{{"timestamp":"2026-06-01T00:00:21Z","type":"compacted","payload":{{"message":"","compaction_response_id":"resp_2","latest_token_usage_record":{{"thread_id":"s1","response_id":"resp_2","usage":{compaction}}}}}}}"#
+                ),
+                r#"{"timestamp":"2026-06-01T00:00:22Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":258400},"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":27000},"model_context_window":258400}}}"#.to_owned(),
+                record_line("2026-06-01T00:00:30Z", "s1", "resp_3", &third),
+                token_count_line("2026-06-01T00:00:30.100Z", &third, 5_940),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 3);
+        assert_eq!(total_volume(&collection), 110 + 5_300 + 830);
+    }
+
+    /// A `token_count` with no matching record still counts beside the
+    /// records that follow it.
+    #[test]
+    fn rollout_resumed_into_usage_records_counts_both_segments_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let early = usage_json(100, 0, 10);
+        let late = usage_json(200, 100, 20);
+        write_lines(
+            &temp.path().join("rollout-s1.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+                token_count_line("2026-06-01T00:00:03Z", &early, 110),
+                record_line("2026-06-02T00:00:03Z", "s1", "resp_1", &late),
+                token_count_line("2026-06-02T00:00:03.100Z", &late, 330),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), 110 + 220);
+    }
+
+    #[test]
+    fn usage_record_of_another_thread_and_its_echo_are_not_counted() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let copied = usage_json(400, 0, 40);
+        let own = usage_json(100, 0, 10);
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "c1", r#""cli""#, ""),
+                record_line("2026-06-01T00:00:03Z", "p1", "resp_p", &copied),
+                token_count_line("2026-06-01T00:00:03.100Z", &copied, 440),
+                record_line("2026-06-01T00:00:09Z", "c1", "resp_c", &own),
+                token_count_line("2026-06-01T00:00:09.100Z", &own, 550),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    #[test]
+    fn total_only_token_count_is_not_a_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_lines(
+            &temp.path().join("rollout-s1.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+                token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"compacted","payload":{"message":""}}"#.to_owned(),
+                r#"{"timestamp":"2026-06-01T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":258400},"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":27000}}}}"#.to_owned(),
+                token_count_line("2026-06-01T00:00:09Z", &usage_json(0, 0, 12), 122),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), 122);
+    }
+
+    #[test]
+    fn cache_write_input_is_cache_creation_inside_input() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_lines(
+            &temp.path().join("rollout-s1.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+                record_line(
+                    "2026-06-01T00:00:03Z",
+                    "s1",
+                    "resp_1",
+                    r#"{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":30,"output_tokens":10,"reasoning_output_tokens":4,"total_tokens":110}"#,
+                ),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let usage = &collection.usage_events[0].usage;
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.cache_read_input_tokens, 40);
+        assert_eq!(usage.cache_creation_input_tokens, 30);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.reasoning_output_tokens, 4);
+        assert_eq!(usage.token_volume(), 110);
+    }
+
+    #[test]
+    fn subagent_rollouts_are_attributed_by_their_own_session_source() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let usage = usage_json(100, 0, 10);
+        let cases = [
+            (
+                "a",
+                r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p","depth":1,"agent_nickname":"Nick","agent_role":"explorer"}}}"#,
+                Some("explorer"),
+            ),
+            (
+                "b",
+                r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p","depth":1,"agent_nickname":"Nick","agent_role":null}}}"#,
+                Some("default"),
+            ),
+            ("c", r#"{"subagent":"review"}"#, Some("review")),
+            (
+                "d",
+                r#"{"subagent":{"other":"guardian"}}"#,
+                Some("guardian"),
+            ),
+            ("e", r#"{"internal":"guardian"}"#, Some("guardian")),
+            ("f", r#""exec""#, None),
+            ("g", r#"{"custom":"host-app"}"#, None),
+        ];
+        for (id, source, _) in &cases {
+            write_lines(
+                &temp.path().join(format!("rollout-{id}.jsonl")),
+                &[
+                    meta_line("2026-06-01T00:00:00Z", id, source, ""),
+                    record_line("2026-06-01T00:00:03Z", id, &format!("resp_{id}"), &usage),
+                    format!(
+                        r#"{{"timestamp":"2026-06-01T00:00:04Z","type":"response_item","payload":{{"type":"function_call","call_id":"call_{id}","name":"apply_patch","arguments":"{{}}"}}}}"#
+                    ),
+                ],
+            );
+        }
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), cases.len());
+        for (id, _, agent) in &cases {
+            let event = collection
+                .usage_events
+                .iter()
+                .find(|event| event.session_id.as_deref() == Some(*id))
+                .expect("each rollout reports its usage");
+            assert_eq!(event.attribution_agent.as_deref(), *agent, "rollout {id}");
+            let expected = if agent.is_some() {
+                SourceKind::Subagent
+            } else {
+                SourceKind::Main
+            };
+            assert_eq!(event.source_kind, expected, "rollout {id}");
+            let tool = collection
+                .tool_events
+                .iter()
+                .find(|event| event.session_id.as_deref() == Some(*id))
+                .expect("each rollout reports its tool");
+            assert_eq!(tool.source_kind, expected, "rollout {id}");
+        }
+    }
+
+    /// The spawned child's copy of its parent opens with the parent's own
+    /// `session_meta` (`source: "cli"`); that must not reclassify the child.
+    #[test]
+    fn fork_child_stays_a_subagent_past_the_copied_parent_session_meta() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T01:00:00Z",
+                    "c1",
+                    r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1,"agent_role":"worker"}}}"#,
+                    r#","forked_from_id":"p1""#,
+                ),
+                meta_line("2026-06-01T01:00:00Z", "p1", r#""cli""#, ""),
+                record_line(
+                    "2026-06-01T01:00:09Z",
+                    "c1",
+                    "resp_c",
+                    &usage_json(100, 0, 10),
+                ),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].source_kind, SourceKind::Subagent);
+        assert_eq!(
+            collection.usage_events[0].attribution_agent.as_deref(),
+            Some("worker")
+        );
+    }
+
+    /// Copied parent `token_count`s in the fork window, one of them past the
+    /// second boundary, add nothing beside the parent's records.
+    #[test]
+    fn fork_copies_of_parent_token_counts_are_not_recounted_against_records() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let first = usage_json(100, 40, 10);
+        let second = usage_json(120, 0, 20);
+        let own = usage_json(90, 10, 40);
+        write_lines(
+            &temp.path().join("rollout-a-parent.jsonl"),
+            &[
+                meta_line("2026-06-01T00:00:00Z", "p1", r#""cli""#, ""),
+                record_line("2026-06-01T00:00:03Z", "p1", "resp_1", &first),
+                token_count_line("2026-06-01T00:00:03.100Z", &first, 110),
+                record_line("2026-06-01T00:00:09Z", "p1", "resp_2", &second),
+                token_count_line("2026-06-01T00:00:09.100Z", &second, 250),
+            ],
+        );
+        write_lines(
+            &temp.path().join("rollout-b-child.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T01:00:00.998Z",
+                    "c1",
+                    r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1,"agent_role":"worker"}}}"#,
+                    r#","forked_from_id":"p1""#,
+                ),
+                meta_line("2026-06-01T01:00:00.999Z", "p1", r#""cli""#, ""),
+                token_count_line("2026-06-01T01:00:00.999Z", &first, 110),
+                token_count_line("2026-06-01T01:00:01.001Z", &second, 250),
+                record_line("2026-06-01T01:00:09Z", "c1", "resp_c", &own),
+                token_count_line("2026-06-01T01:00:09.100Z", &own, 380),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 3);
+        assert_eq!(total_volume(&collection), 110 + 140 + 130);
+    }
+
+    /// A fork child with a single `session_meta` skips its fork window; a
+    /// `history_base` fork has none.
+    #[test]
+    fn single_meta_fork_child_skips_its_copied_burst() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let own = usage_json(90, 10, 40);
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T01:00:00.999Z",
+                    "c1",
+                    r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1}}}"#,
+                    r#","forked_from_id":"p1""#,
+                ),
+                token_count_line("2026-06-01T01:00:00.999Z", &usage_json(100, 40, 10), 110),
+                token_count_line("2026-06-01T01:00:01.002Z", &usage_json(120, 0, 20), 250),
+                token_count_line("2026-06-01T01:00:30Z", &own, 380),
+            ],
+        );
+        write_lines(
+            &temp.path().join("rollout-r1.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T02:00:00Z",
+                    "r1",
+                    r#""vscode""#,
+                    r#","forked_from_id":"p1","history_base":{"thread_id":"p1","end_ordinal_exclusive":40,"end_byte_offset":9000}"#,
+                ),
+                token_count_line("2026-06-01T02:00:00.500Z", &usage_json(60, 0, 6), 66),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), 130 + 66);
+    }
+
+    /// Records name their owner, so the child's own response written inside
+    /// the fork window counts while the copied rows around it do not.
+    #[test]
+    fn child_owned_record_inside_the_fork_window_counts() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let copied = usage_json(100, 40, 10);
+        let own = usage_json(90, 10, 40);
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T01:00:00Z",
+                    "c1",
+                    r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1}}}"#,
+                    r#","forked_from_id":"p1""#,
+                ),
+                meta_line("2026-06-01T01:00:00Z", "p1", r#""cli""#, ""),
+                token_count_line("2026-06-01T01:00:00Z", &copied, 110),
+                record_line("2026-06-01T01:00:00.500Z", "c1", "resp_c", &own),
+                token_count_line("2026-06-01T01:00:00.600Z", &own, 240),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(total_volume(&collection), 130);
+    }
+
+    #[test]
+    fn fork_at_the_last_representable_instant_does_not_panic() {
+        let last = OffsetDateTime::parse("9999-12-31T23:59:59.999999999Z", &Rfc3339)
+            .expect("max timestamp should parse");
+        assert!(in_fork_burst(last, last));
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &[
+                meta_line(
+                    "9999-12-31T23:59:59.999Z",
+                    "c1",
+                    r#""cli""#,
+                    r#","forked_from_id":"p1""#,
+                ),
+                token_count_line("9999-12-31T23:59:59.999Z", &usage_json(100, 0, 10), 110),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.usage_events.is_empty());
     }
 }

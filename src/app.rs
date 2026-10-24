@@ -321,8 +321,8 @@ mod tests {
             model_daily: vec![crate::model::ModelDailyStat {
                 date: date!(2026 - 06 - 12),
                 model: model.to_owned(),
-                usage: usage.clone(),
-                unreported_usage: usage,
+                usage,
+                estimated: crate::model::CostTally::default(),
                 reported_cost_usd: None,
             }],
             models: Vec::new(),

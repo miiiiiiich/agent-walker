@@ -5,6 +5,7 @@ use time::{Date, Duration, OffsetDateTime, UtcOffset};
 use crate::cost::pricing_for;
 use crate::model::{
     Collection, ContextBand, ContextReason, ContextSummary, Provider, SourceKind, UsageEvent,
+    UsageGranularity,
 };
 
 /// Shared context-size bands let the Total tab add provider summaries element-wise.
@@ -130,12 +131,6 @@ fn account_call(event: &UsageEvent) -> CallAccount {
     }
 }
 
-/// Aggregate usage events feed totals but not call-level rows: dividing session
-/// or multi-call volume by aggregate record counts would misstate per-call figures.
-fn call_level(provider: Provider) -> bool {
-    !matches!(provider, Provider::Copilot | Provider::Grok)
-}
-
 fn empty_summary() -> ContextSummary {
     ContextSummary {
         bands: BANDS
@@ -170,7 +165,6 @@ pub(super) fn context_summary(
     if collection.provider == Provider::Combined {
         return None;
     }
-    let call_level = call_level(collection.provider);
     let in_window = |timestamp: OffsetDateTime| {
         let date = timestamp.to_offset(local_offset).date();
         date >= window_start && date <= period_end
@@ -186,7 +180,9 @@ pub(super) fn context_summary(
         if call.context == 0 {
             continue;
         }
-        if call_level && event.source_kind == SourceKind::Main {
+        // Aggregate rows feed totals but not call rows: dividing a sum of
+        // requests by one record would misstate per-call figures.
+        if event.granularity == UsageGranularity::Call && event.source_kind == SourceKind::Main {
             by_session
                 .entry(event.session_id.as_deref())
                 .or_default()
@@ -285,6 +281,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         }
     }
 
@@ -395,27 +392,35 @@ mod tests {
         assert_eq!(summary.cold_start.expect("cold start").calls, 0);
         assert_eq!(summary.expired.expect("expired").calls, 1);
 
-        let copilot = context_summary(
+        let aggregates = events
+            .iter()
+            .cloned()
+            .map(|mut event| {
+                event.granularity = UsageGranularity::Aggregate;
+                event
+            })
+            .collect::<Vec<_>>();
+        let totals = context_summary(
+            &collection(Provider::Copilot, aggregates),
+            date!(2026 - 06 - 01),
+            date!(2026 - 06 - 30),
+            UtcOffset::UTC,
+        )
+        .expect("aggregate totals");
+        assert_eq!((totals.calls, totals.context_tokens), (0, 100_000));
+        assert!(totals.expired.is_none() && totals.cold_start.is_none());
+        assert_eq!((totals.uncached.calls, totals.uncached.effective), (0, 0));
+        assert_eq!(totals.unclassified_effective, 100_000);
+        let copilot_calls = context_summary(
             &collection(Provider::Copilot, events.clone()),
             date!(2026 - 06 - 01),
             date!(2026 - 06 - 30),
             UtcOffset::UTC,
         )
-        .expect("copilot totals");
-        assert_eq!((copilot.calls, copilot.context_tokens), (0, 100_000));
-        assert!(copilot.expired.is_none() && copilot.cold_start.is_none());
-        assert_eq!((copilot.uncached.calls, copilot.uncached.effective), (0, 0));
-        assert_eq!(copilot.unclassified_effective, 100_000);
-        let grok = context_summary(
-            &collection(Provider::Grok, events.clone()),
-            date!(2026 - 06 - 01),
-            date!(2026 - 06 - 30),
-            UtcOffset::UTC,
-        )
-        .expect("grok totals");
+        .expect("copilot call rows");
         assert_eq!(
-            (grok.calls, grok.uncached.calls, grok.context_tokens),
-            (0, 0, 100_000)
+            (copilot_calls.calls, copilot_calls.context_tokens),
+            (1, 100_000)
         );
         assert!(
             context_summary(

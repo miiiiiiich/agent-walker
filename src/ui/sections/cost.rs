@@ -1,6 +1,5 @@
-use crate::cost::CostTally;
 use crate::format::{format_tokens, format_usd, short_model_name};
-use crate::model::Summary;
+use crate::model::{CostTally, Summary};
 use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 use time::Duration;
@@ -15,11 +14,7 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
         // that had no reported cost — additive so a model name shared by a
         // reporting and a non-reporting provider prices both halves.
         let mut tally = CostTally::default();
-        tally.add(
-            &model.name,
-            &model.unreported_usage,
-            model.reported_cost_usd,
-        );
+        tally.add(&model.estimated, model.reported_cost_usd);
         total.priced_usd += tally.priced_usd;
         total.unpriced_volume = total.unpriced_volume.saturating_add(tally.unpriced_volume);
         if tally.priced_usd > 0.0 {
@@ -148,11 +143,7 @@ fn window_cost(summary: &Summary, days: u16) -> CostTally {
         .iter()
         .filter(|entry| entry.date >= start)
     {
-        tally.add(
-            &entry.model,
-            &entry.unreported_usage,
-            entry.reported_cost_usd,
-        );
+        tally.add(&entry.estimated, entry.reported_cost_usd);
     }
     tally
 }
@@ -176,13 +167,17 @@ mod tests {
             input_tokens: 1_000_000,
             ..TokenUsage::default()
         };
+        let unpriced = CostTally {
+            priced_usd: 0.0,
+            unpriced_volume: usage.token_volume(),
+        };
         summary.models[0].name = "model-nobody-priced".to_owned();
-        summary.models[0].unreported_usage = usage.clone();
+        summary.models[0].estimated = unpriced;
         summary.model_daily.push(ModelDailyStat {
             date: summary.period_end,
             model: "model-nobody-priced".to_owned(),
-            usage: usage.clone(),
-            unreported_usage: usage,
+            usage,
+            estimated: unpriced,
             reported_cost_usd: None,
         });
 
@@ -212,7 +207,10 @@ mod tests {
             ..TokenUsage::default()
         };
         summary.models[0].name = "model-nobody-priced".to_owned();
-        summary.models[0].unreported_usage = usage.clone();
+        summary.models[0].estimated = CostTally {
+            priced_usd: 0.0,
+            unpriced_volume: usage.token_volume(),
+        };
         summary.models[0].reported_cost_usd = Some(3.5);
 
         for width in [44_u16, 100] {

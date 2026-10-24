@@ -3,12 +3,11 @@ use std::fmt::Write as _;
 
 use time::{Date, Duration};
 
-use crate::cost::CostTally;
 use crate::format::{
     format_date, format_duration_ms, format_hours, format_percent, format_tokens, format_usd,
     short_model_name,
 };
-use crate::model::Summary;
+use crate::model::{CostTally, Summary};
 
 use super::REPO_URL;
 
@@ -67,11 +66,7 @@ impl ShareCard {
         let total = summary.total_usage.token_volume();
         let mut tally = CostTally::default();
         for entry in &summary.model_daily {
-            tally.add(
-                &entry.model,
-                &entry.unreported_usage,
-                entry.reported_cost_usd,
-            );
+            tally.add(&entry.estimated, entry.reported_cost_usd);
         }
         let has_reported_cost = summary
             .model_daily

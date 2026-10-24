@@ -12,15 +12,30 @@ pub fn list_files(
     mtime_floor: Option<SystemTime>,
     stats: &mut ScanStats,
 ) -> Vec<PathBuf> {
+    list_files_matching(
+        dir,
+        &|path| path.extension().is_some_and(|value| value == extension),
+        mtime_floor,
+        stats,
+    )
+}
+
+/// `list_files` for names a single extension can't express (`.jsonl.zst`).
+pub fn list_files_matching(
+    dir: &Path,
+    matches: &dyn Fn(&Path) -> bool,
+    mtime_floor: Option<SystemTime>,
+    stats: &mut ScanStats,
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    walk(dir, extension, mtime_floor, stats, &mut files);
+    walk(dir, matches, mtime_floor, stats, &mut files);
     files.sort();
     files
 }
 
 fn walk(
     dir: &Path,
-    extension: &str,
+    matches: &dyn Fn(&Path) -> bool,
     mtime_floor: Option<SystemTime>,
     stats: &mut ScanStats,
     files: &mut Vec<PathBuf>,
@@ -49,10 +64,10 @@ fn walk(
             }
         };
         if file_type.is_dir() {
-            walk(&path, extension, mtime_floor, stats, files);
+            walk(&path, matches, mtime_floor, stats, files);
             continue;
         }
-        if path.extension().is_none_or(|value| value != extension) {
+        if !matches(&path) {
             continue;
         }
         if let Some(floor) = mtime_floor

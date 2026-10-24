@@ -348,6 +348,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     reported_cost_usd: None,
+                    granularity: crate::model::UsageGranularity::Call,
                 },
             };
         let small_early = event(early, 10, None, Some("proj"));
