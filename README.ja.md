@@ -96,6 +96,8 @@ agent-walker --json | jq '{schema_version, window, total}'
 
 [ccusage](https://github.com/ccusage/ccusage) は AI コーディングエージェントのローカル利用量トラッキングの先駆者で、agent-walker が扱う問題のいくつかを最初に特定・解決しました。[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) も参照してください。
 
+ログ形式の変化を追うのに、[tokscale](https://github.com/junhoyeo/tokscale)・[agentsview](https://github.com/wesm/agentsview)・[toktrack](https://github.com/mag123c/toktrack)・ccusage の報告を参考にしました。
+
 ## ライセンス
 
 MIT または Apache-2.0、好きな方で。
