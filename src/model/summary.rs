@@ -4,6 +4,34 @@ use time::{Date, OffsetDateTime};
 
 use super::{Provider, ScanStats, TokenUsage};
 
+/// Track unpriced volume separately so incomplete pricing cannot be reported
+/// as a complete zero-dollar total.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CostTally {
+    pub priced_usd: f64,
+    pub unpriced_volume: u64,
+}
+
+impl CostTally {
+    /// Add a stat's estimate and its provider-reported cost.
+    pub fn add(&mut self, estimated: &Self, reported_cost_usd: Option<f64>) {
+        self.priced_usd += estimated.priced_usd + reported_cost_usd.unwrap_or(0.0);
+        self.unpriced_volume = self
+            .unpriced_volume
+            .saturating_add(estimated.unpriced_volume);
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.unpriced_volume == 0
+    }
+
+    /// The total, only when it is the whole picture — a partial sum is not
+    /// a total.
+    pub fn complete_usd(&self) -> Option<f64> {
+        self.is_complete().then_some(self.priced_usd)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DailyStat {
     pub date: Date,
@@ -21,9 +49,11 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
-    /// Keep unreported usage separate so a model-day shared by reporting and
-    /// non-reporting providers can add both cost paths without double pricing.
-    pub unreported_usage: TokenUsage,
+    /// Kept apart from the reported cost so a model-day shared by reporting
+    /// and non-reporting providers adds both cost paths without double
+    /// pricing. Priced event by event at aggregation: long-context rates
+    /// switch per request, which a summed usage cannot show.
+    pub estimated: CostTally,
     pub reported_cost_usd: Option<f64>,
 }
 
@@ -31,7 +61,7 @@ pub struct ModelDailyStat {
 pub struct ModelStat {
     pub name: String,
     pub usage: TokenUsage,
-    pub unreported_usage: TokenUsage,
+    pub estimated: CostTally,
     pub events: usize,
     pub reported_cost_usd: Option<f64>,
 }

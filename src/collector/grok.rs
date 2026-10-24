@@ -333,6 +333,7 @@ fn collect_turn_usage(
                 project: None,
                 usage,
                 reported_cost_usd: None,
+                granularity: crate::model::UsageGranularity::Aggregate,
             },
         });
     }

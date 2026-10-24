@@ -302,6 +302,7 @@ fn parse_gen(
         project: conversation.project.map(project_from_cwd),
         usage,
         reported_cost_usd: None,
+        granularity: crate::model::UsageGranularity::Call,
     };
     ParseGen::Event(Box::new(Generation { key, source, event }))
 }

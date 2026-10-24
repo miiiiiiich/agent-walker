@@ -3,9 +3,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::cost::CostTally;
 use crate::format::short_model_name;
-use crate::model::Summary;
+use crate::model::{CostTally, Summary};
 
 use super::histories::{CreditsDto, LimitsDto, ModesDto};
 use super::panels::{ContextDto, ParallelDto, TurnLengthDto, WorkingTimeDto};
@@ -191,7 +190,7 @@ impl CostDto {
         let mut estimated = CostTally::default();
         let mut reported_usd = 0.0;
         for model in &summary.models {
-            estimated.add(&model.name, &model.unreported_usage, None);
+            estimated.add(&model.estimated, None);
             reported_usd += model.reported_cost_usd.unwrap_or(0.0);
         }
         Self {

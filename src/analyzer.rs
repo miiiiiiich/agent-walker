@@ -89,19 +89,19 @@ pub fn summarize(
     });
     let favorite_model = models.first().map(|stat| stat.name.clone());
     let model_daily_reported = aggregates.model_daily_reported;
-    let mut model_daily_unreported = aggregates.model_daily_unreported;
+    let mut model_daily_estimated = aggregates.model_daily_estimated;
     let model_daily = aggregates
         .model_daily_usage
         .into_iter()
         .map(|((date, model), usage)| {
             let key = (date, model.clone());
             let reported_cost_usd = model_daily_reported.get(&key).copied();
-            let unreported_usage = model_daily_unreported.remove(&key).unwrap_or_default();
+            let estimated = model_daily_estimated.remove(&key).unwrap_or_default();
             ModelDailyStat {
                 date,
                 model,
                 usage,
-                unreported_usage,
+                estimated,
                 reported_cost_usd,
             }
         })
@@ -350,6 +350,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     reported_cost_usd: None,
+                    granularity: crate::model::UsageGranularity::Call,
                 },
                 UsageEvent {
                     timestamp: Some(datetime!(2026-06-08 10:00 UTC)),
@@ -367,6 +368,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     reported_cost_usd: None,
+                    granularity: crate::model::UsageGranularity::Call,
                 },
             ],
             tool_events: vec![crate::model::ToolEvent {
@@ -434,6 +436,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         };
         let events = vec![
             event(datetime!(2026-06-30 10:00 UTC), 1_000_000_000), // every window
@@ -467,6 +470,65 @@ mod tests {
         );
     }
 
+    fn haiku_call(cache_read: u64) -> UsageEvent {
+        UsageEvent {
+            timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
+            session_id: None,
+            model: Some("claude-haiku-5-5".to_owned()),
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: None,
+            project: None,
+            usage: TokenUsage {
+                input_tokens: 1_000,
+                cache_read_input_tokens: cache_read,
+                ..TokenUsage::default()
+            },
+            reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
+        }
+    }
+
+    /// Two calls under the long-context threshold stay at base rates even
+    /// though their sum is over it, and an aggregate row never crosses it,
+    /// whichever provider it comes from — the Total tab included.
+    #[test]
+    fn long_context_rates_are_judged_per_call() {
+        crate::cost::tests::install_test_pricing();
+        let now = datetime!(2026-06-08 12:00 UTC);
+        let claude = Collection {
+            usage_events: vec![haiku_call(59_000), haiku_call(59_000), haiku_call(119_000)],
+            ..Collection::new(Provider::Claude, "/tmp".into())
+        };
+        let summary = summarize(&claude, now, 7, UtcOffset::UTC);
+        let short = (1_000.0 * 0.1 + 59_000.0 * 0.01) / 1e6;
+        let long = (1_000.0 * 0.5 + 119_000.0 * 0.05) / 1e6;
+        let expected = 2.0 * short + long;
+        let model = &summary.models[0];
+        assert!((model.estimated.priced_usd - expected).abs() < 1e-12);
+        assert!(model.estimated.is_complete());
+        let day = &summary.model_daily[0];
+        assert!((day.estimated.priced_usd - expected).abs() < 1e-12);
+
+        let mut snapshot = haiku_call(119_000);
+        snapshot.granularity = crate::model::UsageGranularity::Aggregate;
+        let base = (1_000.0 * 0.1 + 119_000.0 * 0.01) / 1e6;
+        let copilot = Collection {
+            usage_events: vec![haiku_call(119_000), snapshot.clone()],
+            ..Collection::new(Provider::Copilot, "/tmp".into())
+        };
+        let summary = summarize(&copilot, now, 7, UtcOffset::UTC);
+        assert!((summary.models[0].estimated.priced_usd - (long + base)).abs() < 1e-12);
+
+        let combined = Collection {
+            usage_events: vec![haiku_call(119_000), snapshot],
+            ..Collection::new(Provider::Combined, "/tmp".into())
+        };
+        let summary = summarize(&combined, now, 7, UtcOffset::UTC);
+        assert!((summary.models[0].estimated.priced_usd - (long + base)).abs() < 1e-12);
+        assert!((summary.model_daily[0].estimated.priced_usd - (long + base)).abs() < 1e-12);
+    }
+
     #[test]
     fn reported_and_unreported_costs_split_per_model() {
         let now = datetime!(2026-06-08 12:00 UTC);
@@ -484,6 +546,7 @@ mod tests {
             project: None,
             usage: usage(input),
             reported_cost_usd: reported,
+            granularity: crate::model::UsageGranularity::Call,
         };
         let collection = Collection {
             usage_events: vec![event(Some(0.5), 100), event(None, 300)],
@@ -498,7 +561,7 @@ mod tests {
             .expect("model present");
         assert_eq!(model.usage.input_tokens, 400);
         assert_eq!(model.reported_cost_usd, Some(0.5));
-        assert_eq!(model.unreported_usage.input_tokens, 300);
+        assert_eq!(model.estimated.unpriced_volume, 300);
 
         let day = summary
             .model_daily
@@ -506,7 +569,7 @@ mod tests {
             .find(|stat| stat.model == "shared-model")
             .expect("model-day present");
         assert_eq!(day.reported_cost_usd, Some(0.5));
-        assert_eq!(day.unreported_usage.input_tokens, 300);
+        assert_eq!(day.estimated.unpriced_volume, 300);
     }
 }
 
@@ -535,6 +598,7 @@ mod v09_tests {
                 ..TokenUsage::default()
             },
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         }
     }
 

@@ -212,6 +212,7 @@ fn parse_messages(
             // OpenCode records a per-message cost, but like every non-Cursor
             // provider we price from LiteLLM for consistency (see docs/opencode).
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         });
 
         if let Some(completed_ms) = value.pointer("/time/completed").and_then(Value::as_i64) {
@@ -391,6 +392,7 @@ fn parse_session_messages(
                 .map(project_from_cwd),
             usage: token_usage(&value),
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         });
         if kind == "assistant" {
             push_turn_and_tools(&value, created_ms, &session_id, local_offset, collection);

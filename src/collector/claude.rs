@@ -586,6 +586,7 @@ fn parse_line(
                 project: project.map(ToOwned::to_owned),
                 usage,
                 reported_cost_usd: None,
+                granularity: crate::model::UsageGranularity::Call,
             },
         });
     }
@@ -617,6 +618,7 @@ fn parse_line(
                     project: project.map(ToOwned::to_owned),
                     usage,
                     reported_cost_usd: None,
+                    granularity: crate::model::UsageGranularity::Call,
                 },
             });
         }

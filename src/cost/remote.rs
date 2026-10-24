@@ -5,9 +5,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde_json::Value;
 use tracing::debug;
 
-use super::{Pricing, Snapshot, loaded, parse_snapshot_json, replace_loaded};
+use super::{SNAPSHOT_FORMAT, Snapshot, litellm, loaded, parse_snapshot_json, replace_loaded};
 
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -36,53 +37,8 @@ fn fetch_snapshot_json() -> Option<String> {
     if raw.len() as u64 > MAX_BODY_BYTES {
         return None;
     }
-    let upstream: HashMap<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
-
-    let mut models = HashMap::new();
-    for (key, entry) in &upstream {
-        // Provider/region variants are dropped in favor of bare model ids —
-        // EXCEPT `xai/`: LiteLLM registers Grok models only under the
-        // provider prefix (`xai/grok-4.5`, no bare key), so the prefix is
-        // stripped so those models can resolve to a price.
-        let key = key.strip_prefix("xai/").unwrap_or(key);
-        if key.contains('/')
-            || key.starts_with("anthropic.")
-            || key.starts_with("global.")
-            || key.starts_with("us.")
-            || key.starts_with("eu.")
-            || key.starts_with("au.")
-            || key.starts_with("apac.")
-        {
-            continue; // provider/region variants; keep bare model ids only
-        }
-        if !matches!(
-            entry.get("mode").and_then(serde_json::Value::as_str),
-            Some("chat" | "completion" | "responses")
-        ) {
-            continue;
-        }
-        // Reject non-finite, negative, or absurd rates (> $1/token) so a bad
-        // upstream entry cannot poison cached cost estimates.
-        let cost = |field: &str| {
-            entry
-                .get(field)
-                .and_then(serde_json::Value::as_f64)
-                .filter(|value| value.is_finite() && (0.0..1.0).contains(value))
-        };
-        let Some(input) = cost("input_cost_per_token") else {
-            continue;
-        };
-        models.insert(
-            key.to_owned(),
-            Pricing {
-                input,
-                output: cost("output_cost_per_token").unwrap_or(0.0),
-                cache_read: cost("cache_read_input_token_cost").unwrap_or(0.0),
-                cache_write_5m: cost("cache_creation_input_token_cost").unwrap_or(0.0),
-                cache_write_1h: cost("cache_creation_input_token_cost_above_1hr").unwrap_or(0.0),
-            },
-        );
-    }
+    let upstream: HashMap<String, Value> = serde_json::from_str(&raw).ok()?;
+    let models = litellm::models_from_upstream(&upstream);
     if models.is_empty() {
         return None;
     }
@@ -91,6 +47,7 @@ fn fetch_snapshot_json() -> Option<String> {
     serde_json::to_string_pretty(&serde_json::json!({
         "_source": PRICING_URL,
         "_fetched": fetched,
+        "_format": SNAPSHOT_FORMAT,
         "models": models,
     }))
     .ok()
@@ -119,20 +76,27 @@ enum Refreshed {
     Nothing,
 }
 
-/// The snapshot to price this run with. One fetched today is used as is —
-/// rates change on the order of weeks, and this keeps the machine quiet for
-/// every run after the first each day. Otherwise fetch and keep the result
-/// on disk; when the fetch fails, the stored snapshot (however old) still
-/// beats no prices at all.
+/// The snapshot to price this run with. One fetched today in the current
+/// format is used as is — rates change on the order of weeks, and this keeps
+/// the machine quiet for every run after the first each day. Otherwise fetch
+/// and keep the result on disk; when the fetch fails, the stored snapshot
+/// (however old, in whatever format) still beats no prices at all.
 fn refresh(file: Option<&Path>, today: &str, fetch: impl FnOnce() -> Option<String>) -> Refreshed {
     let stored = file
         .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|raw| parse_snapshot_json(&raw));
+        .and_then(|raw| parse_snapshot_json(&raw))
+        .map(|mut snapshot| {
+            // Kept only as the offline fallback, an older snapshot still must
+            // not price cache writes at $0.
+            if snapshot.format < SNAPSHOT_FORMAT {
+                litellm::backfill_write_rates(&mut snapshot.models);
+            }
+            snapshot
+        });
     let fallback = |stored: Option<Snapshot>| stored.map_or(Refreshed::Nothing, Refreshed::Stored);
-    if stored
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.fetched.as_deref() == Some(today))
-    {
+    if stored.as_ref().is_some_and(|snapshot| {
+        snapshot.fetched.as_deref() == Some(today) && snapshot.format == SNAPSHOT_FORMAT
+    }) {
         return fallback(stored);
     }
     let Some(serialized) = fetch() else {
@@ -178,7 +142,9 @@ mod tests {
     use super::*;
 
     fn snapshot_json(fetched: &str, input: f64) -> String {
-        format!(r#"{{"_fetched":"{fetched}","models":{{"m":{{"input":{input},"output":0.0}}}}}}"#)
+        format!(
+            r#"{{"_fetched":"{fetched}","_format":{SNAPSHOT_FORMAT},"models":{{"m":{{"input":{input},"output":0.0}}}}}}"#
+        )
     }
 
     #[test]
@@ -194,7 +160,7 @@ mod tests {
             panic!("expected the stored snapshot");
         };
         assert!(!fetched.get());
-        assert!((snapshot.models["m"].input - 1.0).abs() < f64::EPSILON);
+        assert!((snapshot.models["m"].base.input - 1.0).abs() < f64::EPSILON);
     }
 
     /// A file that does not parse, or has no models, counts as absent even
@@ -226,7 +192,7 @@ mod tests {
             panic!("expected a fetched snapshot");
         };
         assert_eq!(snapshot.fetched.as_deref(), Some("2026-09-16"));
-        assert!((snapshot.models["m"].input - 2.0).abs() < f64::EPSILON);
+        assert!((snapshot.models["m"].base.input - 2.0).abs() < f64::EPSILON);
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             snapshot_json("2026-09-16", 2.0)
@@ -246,5 +212,32 @@ mod tests {
             refresh(Some(&dir.path().join("none.json")), "2026-09-16", || None),
             Refreshed::Nothing
         ));
+    }
+
+    /// A snapshot stored by an older build parses fine, so a same-day stamp
+    /// alone would keep its rates until tomorrow; offline it is still used,
+    /// with missing cache-write rates filled in.
+    #[test]
+    fn a_snapshot_in_an_older_format_is_refetched_but_kept_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pricing.json");
+        let older = r#"{"_fetched":"2026-09-16","models":{"m":{"input":1.0,"output":0.0}}}"#;
+        fs::write(&file, older).unwrap();
+        let fetched = Cell::new(false);
+        let refreshed = refresh(Some(&file), "2026-09-16", || {
+            fetched.set(true);
+            Some(snapshot_json("2026-09-16", 2.0))
+        });
+        assert!(fetched.get());
+        assert!(matches!(refreshed, Refreshed::Fetched(_)));
+
+        fs::write(&file, older).unwrap();
+        let Refreshed::Stored(offline) = refresh(Some(&file), "2026-09-16", || None) else {
+            panic!("an older snapshot still beats no prices offline");
+        };
+        let rates = offline.models["m"].base;
+        assert!((rates.input - 1.0).abs() < f64::EPSILON);
+        assert!((rates.cache_write_5m - 1.0).abs() < f64::EPSILON);
+        assert!((rates.cache_write_1h - 1.0).abs() < f64::EPSILON);
     }
 }

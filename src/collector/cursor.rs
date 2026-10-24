@@ -322,6 +322,7 @@ fn parse_csv(
             project: None, // Cursor usage events carry no project identifier.
             usage,
             reported_cost_usd,
+            granularity: crate::model::UsageGranularity::Call,
         });
     }
 }

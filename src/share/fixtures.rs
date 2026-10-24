@@ -3,6 +3,12 @@ use crate::model::{
     Orchestration, Provider, ScanStats, Summary, TokenUsage,
 };
 
+/// The sample usage priced at the test rates for `claude-opus-4-8`.
+const SAMPLE_ESTIMATE: crate::model::CostTally = crate::model::CostTally {
+    priced_usd: 27.5,
+    unpriced_volume: 0,
+};
+
 pub(crate) fn sample_summary() -> Summary {
     use time::macros::date;
 
@@ -31,7 +37,7 @@ pub(crate) fn sample_summary() -> Summary {
         models: vec![ModelStat {
             name: "claude-opus-4-8".to_owned(),
             usage: usage.clone(),
-            unreported_usage: usage.clone(),
+            estimated: SAMPLE_ESTIMATE,
             events: 10,
             reported_cost_usd: None,
         }],

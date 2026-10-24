@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use time::macros::{date, datetime, offset};
 
 use super::*;
+use crate::model::CostTally;
 use crate::model::{
     CreditSample, DurationEvent, EffortEvent, InterruptEvent, LimitDay, LimitsHistory, ModeEvent,
     PaceEvent, PermissionEvent, RateLimitSample, SessionTouch, SourceKind, ToolEvent, UsageEvent,
@@ -146,6 +147,7 @@ fn every_event_stream_uses_local_dates_and_drops_undated_rows() {
                 ..TokenUsage::default()
             },
             reported_cost_usd: None,
+            granularity: crate::model::UsageGranularity::Call,
         });
         collection.duration_events.push(DurationEvent {
             timestamp,
@@ -258,11 +260,10 @@ fn every_event_stream_uses_local_dates_and_drops_undated_rows() {
 
 #[test]
 fn cost_separates_estimates_reported_charges_and_unpriced_tokens() {
-    crate::cost::tests::install_test_pricing();
     let mut summary = crate::share::fixtures::sample_summary();
-    summary.models[0].unreported_usage = TokenUsage {
-        input_tokens: 1_000_000,
-        ..TokenUsage::default()
+    summary.models[0].estimated = CostTally {
+        priced_usd: 5.0,
+        unpriced_volume: 0,
     };
     summary.models[0].reported_cost_usd = Some(2.0);
     let value = serde_json::to_value(SummaryDto::new(&summary, offset!(+09:00))).unwrap();
@@ -272,7 +273,10 @@ fn cost_separates_estimates_reported_charges_and_unpriced_tokens() {
             "estimated_usd": 5.0, "reported_usd": 2.0, "unpriced_tokens": 0
         })
     );
-    summary.models[0].name = "model-nobody-priced".to_owned();
+    summary.models[0].estimated = CostTally {
+        priced_usd: 0.0,
+        unpriced_volume: 1_000_000,
+    };
     let value = serde_json::to_value(SummaryDto::new(&summary, offset!(+09:00))).unwrap();
     assert_eq!(
         value["cost"],
