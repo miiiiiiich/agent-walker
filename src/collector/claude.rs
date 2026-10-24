@@ -148,13 +148,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                             });
                         }
                         turn.flush(&mut events);
-                        turn = TurnState {
-                            start: Some(timestamp),
-                            session_id: session_id_field(&value),
-                            key,
-                            last_activity: Some(timestamp),
-                            ..TurnState::default()
-                        };
+                        turn = TurnState::opened_at(&value, timestamp, key);
                     }
                 } else if let Some(previous) = turn.last_activity {
                     if timestamp - previous > Duration::minutes(30) {
@@ -167,26 +161,28 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                         // human input: the next turn starts there.
                         turn.flush(&mut events);
                         turn = turn.after_cutoff();
-                        turn.restart_if_answer(&value, timestamp);
+                        turn.open_from(&value, timestamp, &mut seen_prompts);
                     } else if turn.charge_answer(&value, timestamp) {
                         turn.last_activity = Some(previous.max(timestamp));
                     } else {
+                        let is_assistant =
+                            value.get("type").and_then(Value::as_str) == Some("assistant");
+                        turn.responded |= is_assistant;
                         // An assistant row while a question is still open
                         // (a replay, or a parallel tool call answered first)
                         // is inside the human's wait, not the model's time.
-                        if value.get("type").and_then(Value::as_str) == Some("assistant")
-                            && timestamp > previous
-                            && turn.pending_questions.is_empty()
+                        if is_assistant && timestamp > previous && turn.pending_questions.is_empty()
                         {
                             let gap = u64::try_from((timestamp - previous).whole_milliseconds())
                                 .unwrap_or(0);
                             turn.model_ms = turn.model_ms.saturating_add(gap);
                         }
                         turn.note_questions(&value, timestamp, &mut seen_questions);
+                        turn.open_if_generated(&value, timestamp, &mut seen_prompts);
                         turn.last_activity = Some(previous.max(timestamp));
                     }
                 } else {
-                    turn.restart_if_answer(&value, timestamp);
+                    turn.open_from(&value, timestamp, &mut seen_prompts);
                 }
             }
         }
@@ -206,37 +202,83 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     Some(events)
 }
 
-fn is_human_turn(value: &Value) -> bool {
-    if value.get("type").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    if value
-        .get("isSidechain")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || value
-            .get("isMeta")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+/// Generated prompts that the origin marker alone lets through: scheduled
+/// runs and shell output are marked human, and older logs have no marker.
+const GENERATED_PROMPT_PREFIXES: [&str; 6] = [
+    "<task-notification>",
+    "<scheduled-task",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+];
+
+fn flagged(value: &Value, field: &str) -> bool {
+    value.get(field).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The text of a main-thread user row that reads as a prompt rather than a
+/// tool result.
+fn prompt_text(value: &Value) -> Option<&str> {
+    if value.get("type").and_then(Value::as_str) != Some("user")
+        || flagged(value, "isSidechain")
+        || flagged(value, "isMeta")
     {
-        return false;
+        return None;
     }
     match value
         .get("message")
-        .and_then(|message| message.get("content"))
+        .and_then(|message| message.get("content"))?
     {
-        Some(Value::String(_)) => true,
-        Some(Value::Array(blocks)) => {
-            let has_text = blocks
+        Value::String(text) => Some(text.as_str()),
+        Value::Array(blocks) => {
+            if blocks
                 .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some("text"));
-            let has_tool_result = blocks
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+            {
+                return None;
+            }
+            blocks
                 .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"));
-            has_text && !has_tool_result
+                .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// A prompt Claude Code wrote itself (a background-task notification, a
+/// peer session's message, a scheduled run) is not a human turn: counting
+/// it as one splits one delegation into several short turns and records
+/// the wait for a background task as the human's pace.
+fn is_human_turn(value: &Value) -> bool {
+    let Some(text) = prompt_text(value) else {
+        return false;
+    };
+    if flagged(value, "isCompactSummary") {
+        return false;
+    }
+    let origin = value
+        .get("origin")
+        .and_then(|origin| origin.get("kind"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("turnOrigin").and_then(Value::as_str));
+    if origin.is_some_and(|kind| kind != "human") {
+        return false;
+    }
+    let text = text.trim_start();
+    !GENERATED_PROMPT_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+fn is_compact_command(value: &Value) -> bool {
+    prompt_text(value).is_some_and(|text| text.contains("<command-name>/compact</command-name>"))
+}
+
+fn is_generated_prompt(value: &Value) -> bool {
+    prompt_text(value).is_some() && !is_human_turn(value)
 }
 
 #[derive(Default)]
@@ -253,6 +295,16 @@ struct TurnState {
     /// End of the last charged wait, so overlapping questions answered in
     /// sequence charge their shared interval once.
     wait_cursor: Option<OffsetDateTime>,
+    /// A local slash command, or a prompt cancelled before the first reply,
+    /// opens a turn the model never answers; without this, its output and
+    /// reminder rows count as a short turn of agent work. A manual compaction
+    /// runs the model without writing an assistant row, so its command row
+    /// counts as answered.
+    responded: bool,
+    /// Opened by a generated prompt with no turn in progress. Dropping such
+    /// a turn loses the scheduled run or the post-notification work from
+    /// working time, so it is kept, but it took no human prompt to start.
+    generated: bool,
 }
 
 impl TurnState {
@@ -321,6 +373,53 @@ impl TurnState {
         self.last_activity = Some(now);
         self.human_wait_ms = 0;
         self.wait_cursor = Some(now);
+        self.responded = false;
+        self.generated = false;
+    }
+
+    /// With no turn in progress, a late answer or a generated prompt opens one.
+    fn open_from(
+        &mut self,
+        value: &Value,
+        now: OffsetDateTime,
+        seen_prompts: &mut HashSet<String>,
+    ) {
+        self.restart_if_answer(value, now);
+        self.open_if_generated(value, now, seen_prompts);
+    }
+
+    /// With no turn in progress, a generated prompt opens one; inside a turn
+    /// it continues that turn. Its uuid is remembered either way so a
+    /// replayed copy cannot open a turn later.
+    fn open_if_generated(
+        &mut self,
+        value: &Value,
+        now: OffsetDateTime,
+        seen_prompts: &mut HashSet<String>,
+    ) {
+        if !is_generated_prompt(value) {
+            return;
+        }
+        let key = string_field(value, "uuid");
+        let replayed = key
+            .as_ref()
+            .is_some_and(|uuid| !seen_prompts.insert(uuid.clone()));
+        if replayed || self.start.is_some() {
+            return;
+        }
+        *self = Self::opened_at(value, now, key);
+    }
+
+    fn opened_at(value: &Value, now: OffsetDateTime, key: Option<String>) -> Self {
+        Self {
+            start: Some(now),
+            session_id: session_id_field(value),
+            key,
+            last_activity: Some(now),
+            responded: is_compact_command(value),
+            generated: is_generated_prompt(value),
+            ..Self::default()
+        }
     }
 
     /// Waiting so far plus the stretch the human has been blocked on up to
@@ -363,6 +462,9 @@ impl TurnState {
         let (Some(start), Some(end)) = (self.start, self.last_activity) else {
             return;
         };
+        if !self.responded {
+            return;
+        }
         let duration_ms = u64::try_from((end - start).whole_milliseconds()).unwrap_or(0);
         if duration_ms == 0 {
             return;
@@ -375,7 +477,7 @@ impl TurnState {
                 duration_ms,
                 human_wait_ms: self.waited_until(end).min(duration_ms),
                 model_ms: Some(self.model_ms.min(duration_ms)),
-                status: Some("turn".to_owned()),
+                status: Some(if self.generated { "generated" } else { "turn" }.to_owned()),
             },
         });
     }
@@ -454,6 +556,14 @@ fn parse_line(
     let Some(message) = value.get("message") else {
         return;
     };
+    // Request-log rows (`api-request-blob`) replay earlier tool calls without
+    // a timestamp; only transcript rows are a call's own record.
+    if !matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("user" | "assistant")
+    ) {
+        return;
+    }
 
     collect_mode_event(value, message, timestamp, events);
     collect_effort_event(value, message, timestamp, events);
@@ -802,12 +912,12 @@ mod tests {
 
         fs::write(
             project_dir.join("session.jsonl"),
-            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"content":[{"type":"tool_use","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","name":"Read","input":{"file_path":"/secret"}}]}}"#,
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"content":[{"type":"tool_use","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","name":"Read","input":{"file_path":"/secret"}}]}}"#,
         )
         .expect("main fixture should be written");
         fs::write(
             subagent_dir.join("agent-abc.jsonl"),
-            r#"{"timestamp":"2026-06-01T00:01:00Z","sessionId":"s1","isSidechain":true,"attributionAgent":"Explore","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":10},"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hidden"}}]}}"#,
+            r#"{"timestamp":"2026-06-01T00:01:00Z","sessionId":"s1","isSidechain":true,"attributionAgent":"Explore","type":"assistant","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":10},"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hidden"}}]}}"#,
         )
         .expect("subagent fixture should be written");
 
@@ -1261,6 +1371,244 @@ mod tests {
         assert_eq!(turn.model_ms, Some(2 * 60_000));
     }
 
+    /// A row Claude Code writes on its own continues the open turn: one
+    /// delegation stays one turn, the wait for a background task is not the
+    /// human's pace, and the row's permission mode is not a human turn's.
+    #[test]
+    fn generated_prompts_continue_the_open_turn() {
+        let generated = [
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","permissionMode":"auto","origin":{"kind":"task-notification"},"turnOrigin":"task_notification","promptSource":"system","message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n</task-notification>"}}"#,
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","permissionMode":"auto","turnOrigin":"peer","message":{"role":"user","content":"a message from another session"}}"#,
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"sdk","message":{"role":"user","content":"<scheduled-task name=\"daily\">run the job</scheduled-task>"}}"#,
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","turnOrigin":"human","message":{"role":"user","content":"<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"}}"#,
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"summary of the earlier conversation"}}"#,
+            r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","message":{"role":"user","content":[{"type":"text","text":"<task-notification>\n<status>completed</status>\n</task-notification>"}]}}"#,
+        ];
+        for row in generated {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            fs::write(
+                temp.path().join("session.jsonl"),
+                [
+                    r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","permissionMode":"auto","origin":{"kind":"human"},"turnOrigin":"human","promptSource":"typed","message":{"role":"user","content":"start a background job"}}"#,
+                    r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"started"}]}}"#,
+                    row,
+                    r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                    r#"{"timestamp":"2026-07-20T00:08:00Z","sessionId":"s1","type":"user","uuid":"h2","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"thanks"}}"#,
+                    "",
+                ]
+                .join("\n"),
+            )
+            .expect("fixture should be written");
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            let durations: Vec<u64> = collection
+                .duration_events
+                .iter()
+                .map(|turn| turn.duration_ms)
+                .collect();
+            assert_eq!(durations, vec![6 * 60_000], "{row}");
+            let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+            assert_eq!(gaps, vec![2 * 60_000], "{row}");
+            assert_eq!(collection.permission_events.len(), 2, "{row}");
+        }
+    }
+
+    fn turn_shapes(collection: &Collection) -> Vec<(u64, &str)> {
+        let mut shapes: Vec<(u64, &str)> = collection
+            .duration_events
+            .iter()
+            .map(|turn| (turn.duration_ms, turn.status.as_deref().unwrap_or("")))
+            .collect();
+        shapes.sort_unstable();
+        shapes
+    }
+
+    /// A session opened by a scheduled run keeps the run's working time as a
+    /// generated turn; the run adds no pace sample or permission mode.
+    #[test]
+    fn scheduled_session_start_opens_a_generated_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"g1","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"sdk","message":{"role":"user","content":"<scheduled-task name=\"daily\">run the job</scheduled-task>"}}"#,
+                r#"{"timestamp":"2026-07-20T00:04:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"working"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:10:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:15:00Z","sessionId":"s1","type":"user","uuid":"h1","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"looks good, one more"}}"#,
+                r#"{"timestamp":"2026-07-20T00:16:00Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:20:00Z","sessionId":"s1","type":"user","uuid":"h2","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"thanks"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(
+            turn_shapes(&collection),
+            vec![(60_000, "turn"), (10 * 60_000, "generated")]
+        );
+        let mut gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+        gaps.sort_unstable();
+        assert_eq!(gaps, vec![4 * 60_000, 5 * 60_000]);
+        assert_eq!(collection.permission_events.len(), 2);
+    }
+
+    /// A notification arriving after a long background job (past the silence
+    /// cutoff) opens a generated turn, so the rest of the delegation keeps
+    /// its working time, whether a queue row or the notification itself
+    /// trips the cutoff.
+    #[test]
+    fn notification_after_a_long_gap_opens_a_generated_turn() {
+        let notification = r#"{"timestamp":"2026-07-20T00:45:00Z","sessionId":"s1","type":"user","uuid":"g1","permissionMode":"auto","origin":{"kind":"task-notification"},"turnOrigin":"task_notification","promptSource":"system","message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n</task-notification>"}}"#;
+        let queued = r#"{"timestamp":"2026-07-20T00:45:00Z","sessionId":"s1","type":"queue-operation","operation":"enqueue"}"#;
+        for lead in [Some(queued), None] {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            let mut rows = vec![
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"run the long job in the background"}}"#,
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"started"}]}}"#,
+            ];
+            rows.extend(lead);
+            rows.extend([
+                notification,
+                r#"{"timestamp":"2026-07-20T00:50:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:55:00Z","sessionId":"s1","type":"user","uuid":"h2","permissionMode":"auto","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"thanks"}}"#,
+                "",
+            ]);
+            fs::write(temp.path().join("session.jsonl"), rows.join("\n"))
+                .expect("fixture should be written");
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(
+                turn_shapes(&collection),
+                vec![(60_000, "turn"), (5 * 60_000, "generated")],
+                "{lead:?}"
+            );
+            let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+            assert_eq!(gaps, vec![5 * 60_000], "{lead:?}");
+            assert_eq!(collection.permission_events.len(), 2, "{lead:?}");
+        }
+    }
+
+    /// A generated prompt replayed after the turn it continued was discarded
+    /// (resume writes history back with the original stamp) must not open a
+    /// turn of its own.
+    #[test]
+    fn replayed_generated_prompt_does_not_open_a_turn() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let notification = r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"g1","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n</task-notification>"}}"#;
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"start a background job"}}"#,
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"started"}]}}"#,
+                notification,
+                r#"{"timestamp":"2026-07-20T00:06:00Z","sessionId":"s1","type":"assistant","message":{"id":"a2","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:07:00Z","sessionId":"s1","type":"user","uuid":"i1","message":{"role":"user","content":"[Request interrupted by user]"}}"#,
+                notification,
+                r#"{"timestamp":"2026-07-20T00:08:00Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"resumed"}]}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert!(turn_shapes(&collection).is_empty());
+    }
+
+    /// A manual compaction is the model's work without an assistant row: it
+    /// stays a turn, and where the typed command is echoed after the
+    /// summary, the compaction still counts once.
+    #[test]
+    fn manual_compaction_counts_once_as_a_turn() {
+        let command = r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"c1","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"}}"#;
+        let stdout = r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"user","uuid":"c2","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}"#;
+        let next = r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"continue"}}"#;
+        let echoed = [
+            r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"t1","message":{"role":"user","content":"/compact"}}"#,
+            r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"system","subtype":"compact_boundary"}"#,
+            r#"{"timestamp":"2026-07-20T00:02:00Z","sessionId":"s1","type":"user","uuid":"s1","isCompactSummary":true,"message":{"role":"user","content":"summary of the earlier conversation"}}"#,
+            command,
+            stdout,
+            next,
+            "",
+        ];
+        for rows in [vec![command, stdout, next, ""], echoed.to_vec()] {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            fs::write(temp.path().join("session.jsonl"), rows.join("\n"))
+                .expect("fixture should be written");
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(turn_shapes(&collection), vec![(2 * 60_000, "turn")]);
+        }
+    }
+
+    /// A local slash command and a prompt cancelled before the first reply
+    /// start like prompts, but the model never answers: neither is a turn.
+    #[test]
+    fn turns_without_a_model_response_are_not_counted() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"user","uuid":"h1","message":{"role":"user","content":"do"}}"#,
+                r#"{"timestamp":"2026-07-20T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"a1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:03:00Z","sessionId":"s1","type":"user","uuid":"l1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}"#,
+                r#"{"timestamp":"2026-07-20T00:03:01Z","sessionId":"s1","type":"user","uuid":"l2","message":{"role":"user","content":"<local-command-stdout>Set model</local-command-stdout>"}}"#,
+                r#"{"timestamp":"2026-07-20T00:05:00Z","sessionId":"s1","type":"user","uuid":"h2","message":{"role":"user","content":"never mind"}}"#,
+                r#"{"timestamp":"2026-07-20T00:05:10Z","sessionId":"s1","type":"attachment","attachment":{"type":"total_tokens_reminder"}}"#,
+                r#"{"timestamp":"2026-07-20T00:05:30Z","sessionId":"s1","type":"user","uuid":"h3","message":{"role":"user","content":"next"}}"#,
+                r#"{"timestamp":"2026-07-20T00:07:30Z","sessionId":"s1","type":"assistant","message":{"id":"a3","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:09:00Z","sessionId":"s1","type":"user","uuid":"h4","message":{"role":"user","content":"thanks"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut durations: Vec<u64> = collection
+            .duration_events
+            .iter()
+            .map(|turn| turn.duration_ms)
+            .collect();
+        durations.sort_unstable();
+        assert_eq!(durations, vec![60_000, 2 * 60_000]);
+    }
+
+    /// A request-log row replays tool calls from the request history with
+    /// no timestamp; a call whose transcript row is gone must not reappear
+    /// from the replay.
+    #[test]
+    fn request_log_rows_add_no_tool_calls() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            [
+                r#"{"timestamp":"2026-07-20T00:00:00Z","sessionId":"s1","type":"api-request","id":"r1","querySource":"repl_main_thread","params":{"model":"claude-fable-5"}}"#,
+                r#"{"type":"api-request-blob","hash":"b1","sessionId":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_gone","name":"Read","input":{}},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#,
+                r#"{"timestamp":"2026-07-20T00:00:05Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":5,"output_tokens":2},"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].tool_name, "Bash");
+        assert!(collection.tool_events[0].timestamp.is_some());
+    }
+
     #[test]
     fn pace_is_the_gap_before_a_prompt_under_the_cutoff() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1579,7 +1927,7 @@ mod tests {
         let temp = TempDir::new().expect("test tempdir should be created");
         fs::write(
             temp.path().join("session.jsonl"),
-            "not-json\n{\"timestamp\":\"2026-06-01T00:00:00Z\",\"sessionId\":\"s1\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n",
+            "not-json\n{\"timestamp\":\"2026-06-01T00:00:00Z\",\"sessionId\":\"s1\",\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n",
         )
         .expect("fixture should be written");
 
@@ -1592,7 +1940,7 @@ mod tests {
     #[test]
     fn deduplicates_usage_and_tool_use_ids() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let line = r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/secret"}}]}}"#;
+        let line = r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/secret"}}]}}"#;
         fs::write(
             temp.path().join("session.jsonl"),
             format!("{line}\n{line}\n"),
@@ -1611,7 +1959,7 @@ mod tests {
         let temp = TempDir::new().expect("test tempdir should be created");
         fs::write(
             temp.path().join("old.jsonl"),
-            r#"{"timestamp":"2026-01-01T00:00:00Z","sessionId":"old","message":{"id":"m0","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:00Z","sessionId":"old","type":"assistant","message":{"id":"m0","usage":{"input_tokens":1,"output_tokens":1}}}"#,
         )
         .expect("fixture should be written");
 
