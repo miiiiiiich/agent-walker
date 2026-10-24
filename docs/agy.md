@@ -6,14 +6,16 @@ Two stores under `~/.gemini` (read-only, auto-detected), both shown as the one
 Antigravity provider:
 
 - `antigravity-cli/` — the agy CLI.
-  - `history.jsonl` + `log/cli-*.log` → the session / tool **activity**
-    timeline.
-  - `conversations/<uuid>.db` (SQLite) → **token usage, model, and project**,
-    one row per generation in the `gen_metadata` table; the `steps` table
-    supplies a row's time when the row itself no longer carries one.
+  - `history.jsonl` + `log/cli-*.log` → session timestamps and confirmed
+    **tools**.
+  - `conversations/<uuid>.db` (SQLite) → **token usage, model, project, and
+    session timestamps**, one row per generation in the `gen_metadata` table;
+    the `steps` table supplies a row's time when the row itself no longer
+    carries one.
 - `antigravity/` — the Antigravity app (IDE). Its `conversations/<uuid>.db`
   files have the same schema and are read the same way. The app keeps no CLI
-  logs, so its conversations add tokens and active days but no tools.
+  logs, so its conversations add tokens, active days, and sessions but no
+  tools.
 
 The `.pb` files next to the DBs (and the `.pb`-only `antigravity-ide/` and
 `antigravity-backup/` directories) are not read.
@@ -40,7 +42,14 @@ in WAL mode and are read alongside the writer.
 - ✅ **Model** — e.g. `Gemini 3.5 Flash (High)` or `gemini-3.8-flash` (see
   [Cost](#cost)).
 - ✅ **Project** — the workspace path recorded in the conversation.
-- ✅ **Activity** — session timestamps → active days, hourly profile, streak.
+- ✅ **Sessions / activity** — session timestamps come from every dated
+  generation, every `history.jsonl` line, and each logged user input or tool
+  confirmation → sessions, active days, streak, daily session counts, longest
+  session, and the concurrency (PARALLEL AGENTS) sweep. A conversation's id is
+  its DB file name, which is also its `conversationId` in `history.jsonl`, so
+  a CLI conversation seen in both counts as one session. App conversations, and
+  CLI conversations with no history or log lines, are dated by their
+  generations alone.
 - ✅ **Some tools** — the commands you *confirmed* in approval dialogs
   (`command:<exe>`) from the logs. Headless print-mode runs log neither
   user input nor tool confirmations, so they add tokens but no tools.
