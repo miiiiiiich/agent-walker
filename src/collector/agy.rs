@@ -9,6 +9,9 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
 use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
 
+const CLI_STORE: &str = "antigravity-cli";
+const APP_STORE: &str = "antigravity";
+
 pub fn collect(
     root: &Path,
     mtime_floor: Option<SystemTime>,
@@ -20,12 +23,13 @@ pub fn collect(
         return collection;
     }
 
+    let cli = root.join(CLI_STORE);
     let mut files = Vec::new();
-    let history = root.join("history.jsonl");
+    let history = cli.join("history.jsonl");
     if history.exists() {
         files.push(history);
     }
-    let log_dir = root.join("log");
+    let log_dir = cli.join("log");
     if log_dir.exists() {
         files.extend(list_files(
             &log_dir,
@@ -40,8 +44,12 @@ pub fn collect(
     });
     merge_into(&mut collection, per_file);
 
-    let usage =
-        super::agy_conv::collect_usage(root, mtime_floor, local_offset, &mut collection.stats);
+    let usage = super::agy_conv::collect_usage(
+        &[cli, root.join(APP_STORE)],
+        mtime_floor,
+        local_offset,
+        &mut collection.stats,
+    );
     collection.usage_events.extend(usage);
     collection.stats.usage_events = collection.usage_events.len();
     collection
@@ -238,10 +246,18 @@ mod tests {
     #[test]
     fn collects_antigravity_history_model_events_and_tool_confirmations() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let log_dir = temp.path().join("log");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
         fs::create_dir_all(&log_dir).expect("test dirs should be created");
+        let app_conversations = temp.path().join(APP_STORE).join("conversations");
+        fs::create_dir_all(&app_conversations).expect("app store should be created");
+        rusqlite::Connection::open(app_conversations.join("c2.db"))
+            .and_then(|conn| {
+                conn.execute_batch("CREATE TABLE gen_metadata (idx INTEGER, data BLOB);")
+            })
+            .expect("app conversation should be created");
         fs::write(
-            temp.path().join("history.jsonl"),
+            cli.join("history.jsonl"),
             r#"{"timestamp":1780726748000,"workspace":"/tmp","conversationId":"c1"}"#,
         )
         .expect("history fixture should be written");
@@ -260,7 +276,8 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(collection.stats.files_seen, 2);
+        // history + log + the app store's conversation
+        assert_eq!(collection.stats.files_seen, 3);
         assert!(collection.usage_events.is_empty());
         assert_eq!(collection.tool_events[0].tool_name, "command:bun");
         assert!(collection.session_touches.len() >= 2);
