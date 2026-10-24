@@ -5,6 +5,7 @@
 //! than copying the whole DB into memory first — keeps memory proportional to
 //! the recent-window rows we actually parse, not the entire history.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -38,6 +39,11 @@ pub fn collect(
     // its primary-key id so a turn isn't counted once per file.
     let mut seen_messages = HashSet::new();
     let mut seen_parts = HashSet::new();
+    // Legacy `part` rows and a migrated copy's `content` are the same tool
+    // calls under different keys, so part-id dedupe alone counted them twice
+    // whenever the copy was read first (an earlier-sorted DB file, or a
+    // corrupt legacy message). A message's tools come from one generation.
+    let mut tools_from = HashMap::new();
     for db_path in db_paths(root) {
         let Some(conn) = open_readonly(&db_path) else {
             collection.stats.unreadable_files += 1;
@@ -57,6 +63,7 @@ pub fn collect(
             local_offset,
             &mut collection,
             &mut seen_parts,
+            &mut tools_from,
         );
         // After the legacy tables, so a row already counted there (same id)
         // is skipped together with its tools.
@@ -66,6 +73,7 @@ pub fn collect(
             local_offset,
             &mut collection,
             &mut seen_messages,
+            &mut tools_from,
         );
     }
 
@@ -234,20 +242,27 @@ fn parse_messages(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Generation {
+    Legacy,
+    V2,
+}
+
 fn parse_tool_parts(
     conn: &Connection,
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
+    tools_from: &mut HashMap<String, Generation>,
 ) {
     // Filter only on the indexed `time_created` integer column in SQL, and do the
     // `type == "tool"` check in Rust. Putting `json_extract` in the WHERE clause
     // makes a single malformed `data` row raise "malformed JSON" and abort the
     // whole result set, losing every later tool call in this DB.
-    let Ok(mut stmt) = conn
-        .prepare("SELECT id, session_id, time_created, data FROM part WHERE time_created >= ?1")
-    else {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, message_id, session_id, time_created, data FROM part WHERE time_created >= ?1",
+    ) else {
         return;
     };
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
@@ -256,9 +271,10 @@ fn parse_tool_parts(
         // a type-mismatch parse error.
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
         ))
     }) else {
         return;
@@ -266,7 +282,7 @@ fn parse_tool_parts(
 
     for row in rows {
         collection.stats.lines_seen += 1;
-        let Ok((id, session_id, time_created, data)) = row else {
+        let Ok((id, message_id, session_id, time_created, data)) = row else {
             collection.stats.parse_errors += 1;
             continue;
         };
@@ -280,6 +296,11 @@ fn parse_tool_parts(
         let Some(tool_name) = value.get("tool").and_then(Value::as_str) else {
             continue;
         };
+        if let Some(message_id) = message_id
+            && *tools_from.entry(message_id).or_insert(Generation::Legacy) == Generation::V2
+        {
+            continue;
+        }
         if !seen.insert(id) {
             continue;
         }
@@ -312,6 +333,7 @@ fn parse_session_messages(
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
+    tools_from: &mut HashMap<String, Generation>,
 ) {
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, session_id, type, seq, time_created, data FROM session_message \
@@ -355,7 +377,7 @@ fn parse_session_messages(
             collection.stats.parse_errors += 1;
             continue;
         };
-        seen.insert(id);
+        seen.insert(id.clone());
         let created_ms = value
             .pointer("/time/created")
             .and_then(Value::as_i64)
@@ -395,12 +417,16 @@ fn parse_session_messages(
             granularity: crate::model::UsageGranularity::Call,
         });
         if kind == "assistant" {
-            push_turn_and_tools(&value, created_ms, &session_id, local_offset, collection);
+            push_turn(&value, created_ms, &session_id, local_offset, collection);
+            if let Entry::Vacant(slot) = tools_from.entry(id) {
+                slot.insert(Generation::V2);
+                push_tools(&value, created_ms, &session_id, local_offset, collection);
+            }
         }
     }
 }
 
-fn push_turn_and_tools(
+fn push_turn(
     value: &Value,
     created_ms: i64,
     session_id: &str,
@@ -420,6 +446,15 @@ fn push_turn_and_tools(
                 .map(ToOwned::to_owned),
         });
     }
+}
+
+fn push_tools(
+    value: &Value,
+    created_ms: i64,
+    session_id: &str,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+) {
     let tools = value
         .get("content")
         .and_then(Value::as_array)
@@ -683,12 +718,9 @@ mod tests {
         assert_eq!(collection.session_touches.len(), 4);
     }
 
-    /// A `session_message` row with a legacy message's id counts once.
-    #[test]
-    fn migrated_rows_are_not_counted_twice() {
-        let dir = TempDir::new().expect("tempdir");
-        write_db(dir.path());
-        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+    /// The OpenCode 2 copy of `write_db_at`'s rows: same ids, same tool.
+    fn write_migrated_copy(db: &Path) -> Connection {
+        let conn = Connection::open(db).expect("open temp db");
         conn.execute_batch(V2_SCHEMA).expect("create schema");
         conn.execute(
             "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
@@ -713,6 +745,25 @@ mod tests {
             ASSISTANT_MS,
             &v2_assistant(ASSISTANT_MS, 100, Some("glob")),
         );
+        conn
+    }
+
+    fn tool_names(collection: &Collection) -> Vec<&str> {
+        let mut tools: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|tool| tool.tool_name.as_str())
+            .collect();
+        tools.sort_unstable();
+        tools
+    }
+
+    /// A `session_message` row with a legacy message's id counts once.
+    #[test]
+    fn migrated_rows_are_not_counted_twice() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        let conn = write_migrated_copy(&dir.path().join("opencode.db"));
         insert_v2(
             &conn,
             "msg_new",
@@ -727,15 +778,43 @@ mod tests {
         let collection = collect(dir.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(volumes(&collection), vec![175, 700 + 12 + 30 + 4]);
-        let mut tools: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|tool| tool.tool_name.as_str())
-            .collect();
-        tools.sort_unstable();
-        assert_eq!(tools, vec!["bash", "glob"]);
+        assert_eq!(tool_names(&collection), vec!["bash", "glob"]);
         assert_eq!(collection.duration_events.len(), 2);
         assert_eq!(collection.session_touches.len(), 3);
+    }
+
+    /// `opencode-dev.db` sorts before `opencode.db`, so the migrated copy is
+    /// read before the legacy rows it shares ids with.
+    #[test]
+    fn migrated_copy_in_an_earlier_db_file_counts_tools_once() {
+        let dir = TempDir::new().expect("tempdir");
+        drop(write_migrated_copy(&dir.path().join("opencode-dev.db")));
+        write_db(dir.path());
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 2);
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(tool_names(&collection), vec!["glob"]);
+        assert_eq!(collection.duration_events.len(), 1);
+    }
+
+    /// An unreadable legacy message falls back to its migrated copy for
+    /// tokens, while its legacy tool parts are still readable.
+    #[test]
+    fn unreadable_legacy_message_counts_tools_once() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        let conn = write_migrated_copy(&dir.path().join("opencode.db"));
+        conn.execute("UPDATE message SET data = '{not json' WHERE id = 'm1'", [])
+            .expect("corrupt legacy message");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(tool_names(&collection), vec!["glob"]);
     }
 
     fn write_fork_db(dir: &Path, boundary: &str) {
