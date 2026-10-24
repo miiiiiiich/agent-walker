@@ -39,9 +39,12 @@ read:
 Upgrading to 2.0 migrates legacy sessions into `session_message` under the
 **same message ids** and leaves the legacy tables in place. agent-walker
 reads the legacy tables first and skips any `session_message` row whose id
-it already counted, so migrated history counts once (and its tools, already
-counted from `part`, aren't counted again). A legacy row that fails to parse
-doesn't claim its id, so an intact migrated copy still counts. 2.1 renamed
+it already counted, so migrated history counts once. A legacy row that fails
+to parse doesn't claim its id, so an intact migrated copy still counts. A
+message's tools come from one generation only, whichever is read first: its
+`part` rows or its migrated `content`. The same holds across DB files, where
+a migrated copy in an earlier-sorted file is read before its legacy rows.
+2.1 renamed
 the provider replay fields on text/reasoning/tool content (`state` /
 `providerState` → `native`); none of the fields read here moved, and the
 legacy `part.state` shape is unchanged.

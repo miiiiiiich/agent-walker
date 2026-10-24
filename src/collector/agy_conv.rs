@@ -507,7 +507,7 @@ fn string_field(buf: &[u8], field: u64) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn varint(field: u64, value: u64) -> Vec<u8> {
@@ -664,7 +664,11 @@ mod tests {
 
     /// A row without a display name (#21) or its own timestamp (#9.#4), whose
     /// #9 carries context-window metadata that must not count as tokens.
-    fn served_only_gen_blob(served: &str, resp_id: &str, selected: Option<&str>) -> Vec<u8> {
+    pub(in crate::collector) fn served_only_gen_blob(
+        served: &str,
+        resp_id: &str,
+        selected: Option<&str>,
+    ) -> Vec<u8> {
         let mut usage = Vec::new();
         usage.extend(varint(1, 1000));
         usage.extend(varint(2, 200));
@@ -688,7 +692,7 @@ mod tests {
         blob
     }
 
-    fn step_metadata(created_ms: i64, resp_id: &str) -> Vec<u8> {
+    pub(in crate::collector) fn step_metadata(created_ms: i64, resp_id: &str) -> Vec<u8> {
         let mut metadata = lenf(1, &timestamp(created_ms));
         metadata.extend(lenf(9, &lenf(11, resp_id.as_bytes())));
         metadata
@@ -805,7 +809,12 @@ mod tests {
         }
     }
 
-    fn write_dated_conversation(path: &Path, started_ms: i64, gens: &[Vec<u8>], steps: &[Vec<u8>]) {
+    pub(in crate::collector) fn write_dated_conversation(
+        path: &Path,
+        started_ms: i64,
+        gens: &[Vec<u8>],
+        steps: &[Vec<u8>],
+    ) {
         write_conversation(path, gens);
         let conn = Connection::open(path).expect("fixture db should open");
         conn.execute_batch(
