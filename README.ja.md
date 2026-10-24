@@ -51,13 +51,13 @@ bunx agent-walker
 
 ## 対応エージェント
 
-Claude Code / Codex CLI / OpenCode / Cursor / GitHub Copilot CLI / Grok Build / Antigravity。全部自動検出です。
+Claude Code / Codex CLI / OpenCode / GitHub Copilot CLI / Grok Build / Antigravity。全部自動検出です。
 
-エージェントごとに、何をどう読んでいるかのドキュメントがあります: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Cursor](docs/cursor.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
+エージェントごとに、何をどう読んでいるかのドキュメントがあります: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
 
 ## プライバシー
 
-agent-walker はログをどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得（取れたらその日は再利用）と、Cursor にサインインしているときの利用状況の取得だけです。
+agent-walker が読むのは、エージェントがこのマシンに書いたログだけです。ログはどこのサーバーにも送りません。ネットワークを使うのは、料金表の取得（取れたらその日は再利用）だけです。
 
 ## 操作
 

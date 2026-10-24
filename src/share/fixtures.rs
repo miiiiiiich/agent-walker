@@ -39,7 +39,6 @@ pub(crate) fn sample_summary() -> Summary {
             usage: usage.clone(),
             estimated: SAMPLE_ESTIMATE,
             events: 10,
-            reported_cost_usd: None,
         }],
         agents: Vec::new(),
         skills: Vec::new(),

@@ -9,7 +9,6 @@ pub(super) struct Aggregates {
     pub(super) total_usage: TokenUsage,
     pub(super) daily_usage: BTreeMap<Date, TokenUsage>,
     pub(super) model_daily_usage: BTreeMap<(Date, String), TokenUsage>,
-    pub(super) model_daily_reported: BTreeMap<(Date, String), f64>,
     pub(super) model_daily_estimated: BTreeMap<(Date, String), CostTally>,
     pub(super) model_map: HashMap<String, ModelAccumulator>,
     pub(super) agent_map: HashMap<String, AgentAccumulator>,
@@ -62,31 +61,19 @@ impl Aggregates {
         }
 
         let model_name = event.model.clone().unwrap_or_else(|| "unknown".to_owned());
-        let estimated = if event.reported_cost_usd.is_none() {
-            crate::cost::estimate(&model_name, &event.usage, event.granularity)
-        } else {
-            CostTally::default()
-        };
-        self.model_map.entry(model_name.clone()).or_default().add(
-            &event.usage,
-            event.reported_cost_usd,
-            &estimated,
-        );
+        let estimated = crate::cost::estimate(&model_name, &event.usage, event.granularity);
+        self.model_map
+            .entry(model_name.clone())
+            .or_default()
+            .add(&event.usage, &estimated);
         self.model_daily_usage
             .entry((date, model_name.clone()))
             .or_default()
             .add_assign(&event.usage);
-        if let Some(cost) = event.reported_cost_usd {
-            *self
-                .model_daily_reported
-                .entry((date, model_name))
-                .or_insert(0.0) += cost;
-        } else {
-            self.model_daily_estimated
-                .entry((date, model_name))
-                .or_default()
-                .add(&estimated, None);
-        }
+        self.model_daily_estimated
+            .entry((date, model_name))
+            .or_default()
+            .add(&estimated);
 
         if let Some(project) = &event.project {
             self.project_map
@@ -183,18 +170,13 @@ pub(super) struct ModelAccumulator {
     usage: TokenUsage,
     estimated: CostTally,
     events: usize,
-    reported_cost: Option<f64>,
 }
 
 impl ModelAccumulator {
-    fn add(&mut self, usage: &TokenUsage, reported_cost: Option<f64>, estimated: &CostTally) {
+    fn add(&mut self, usage: &TokenUsage, estimated: &CostTally) {
         self.usage.add_assign(usage);
         self.events += 1;
-        if let Some(cost) = reported_cost {
-            self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
-        } else {
-            self.estimated.add(estimated, None);
-        }
+        self.estimated.add(estimated);
     }
 
     pub(super) fn into_stat(self, name: String) -> ModelStat {
@@ -203,7 +185,6 @@ impl ModelAccumulator {
             usage: self.usage,
             estimated: self.estimated,
             events: self.events,
-            reported_cost_usd: self.reported_cost,
         }
     }
 }

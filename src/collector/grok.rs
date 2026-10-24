@@ -332,7 +332,6 @@ fn collect_turn_usage(
                 attribution_skill: None,
                 project: None,
                 usage,
-                reported_cost_usd: None,
                 granularity: crate::model::UsageGranularity::Aggregate,
             },
         });

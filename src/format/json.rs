@@ -83,7 +83,7 @@ impl ReportDto {
             .collect::<Result<Vec<_>>>()?;
         let stats = &report.combined.scan_stats;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             generated_at: report.generated_at,
             window,
             time_basis: TimeBasisDto {
@@ -148,7 +148,6 @@ fn provider_name(provider: Provider) -> &'static str {
         Provider::OpenCode => "opencode",
         Provider::Copilot => "copilot",
         Provider::Grok => "grok",
-        Provider::Cursor => "cursor",
     }
 }
 

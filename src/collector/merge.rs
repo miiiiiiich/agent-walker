@@ -34,9 +34,6 @@ fn fill_usage_metadata(target: &mut UsageEvent, source: &UsageEvent) {
     if target.project.is_none() {
         target.project.clone_from(&source.project);
     }
-    if target.reported_cost_usd.is_none() {
-        target.reported_cost_usd = source.reported_cost_usd;
-    }
 }
 
 /// Earlier of two optional timestamps; a lone `Some` beats `None`. Used on
@@ -347,7 +344,6 @@ mod tests {
                         input_tokens,
                         ..TokenUsage::default()
                     },
-                    reported_cost_usd: None,
                     granularity: crate::model::UsageGranularity::Call,
                 },
             };

@@ -381,7 +381,6 @@ mod tests {
             copilot_dir: None,
             grok_dir: None,
             opencode_dir: None,
-            cursor: None,
             use_cache: false,
             local_offset: time::UtcOffset::UTC,
         };

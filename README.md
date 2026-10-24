@@ -51,13 +51,13 @@ Your rank and animal change with token volume. The colour changes with the hours
 
 ## Supported agents
 
-Claude Code / Codex CLI / OpenCode / Cursor / GitHub Copilot CLI / Grok Build / Antigravity. All auto-detected.
+Claude Code / Codex CLI / OpenCode / GitHub Copilot CLI / Grok Build / Antigravity. All auto-detected.
 
-Each one has a page on what is read and how: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Cursor](docs/cursor.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
+Each one has a page on what is read and how: [Claude Code](docs/claude.md) / [Codex](docs/codex.md) / [OpenCode](docs/opencode.md) / [Copilot](docs/copilot.md) / [Grok](docs/grok.md) / [Antigravity](docs/agy.md)
 
 ## Privacy
 
-agent-walker sends your logs nowhere. The only network use is fetching the price table (kept for the day once it lands), and fetching Cursor's usage when you're signed in.
+agent-walker reads only the logs your agents write on this machine, and sends them nowhere. The only network use is fetching the price table (kept for the day once it lands).
 
 ## Keys
 

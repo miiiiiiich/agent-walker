@@ -88,21 +88,19 @@ pub fn summarize(
             .then_with(|| left.name.cmp(&right.name))
     });
     let favorite_model = models.first().map(|stat| stat.name.clone());
-    let model_daily_reported = aggregates.model_daily_reported;
     let mut model_daily_estimated = aggregates.model_daily_estimated;
     let model_daily = aggregates
         .model_daily_usage
         .into_iter()
         .map(|((date, model), usage)| {
-            let key = (date, model.clone());
-            let reported_cost_usd = model_daily_reported.get(&key).copied();
-            let estimated = model_daily_estimated.remove(&key).unwrap_or_default();
+            let estimated = model_daily_estimated
+                .remove(&(date, model.clone()))
+                .unwrap_or_default();
             ModelDailyStat {
                 date,
                 model,
                 usage,
                 estimated,
-                reported_cost_usd,
             }
         })
         .collect::<Vec<_>>();
@@ -349,7 +347,6 @@ mod tests {
                         cache_read_input_tokens: 80,
                         ..TokenUsage::default()
                     },
-                    reported_cost_usd: None,
                     granularity: crate::model::UsageGranularity::Call,
                 },
                 UsageEvent {
@@ -367,7 +364,6 @@ mod tests {
                         cache_read_input_tokens: 40,
                         ..TokenUsage::default()
                     },
-                    reported_cost_usd: None,
                     granularity: crate::model::UsageGranularity::Call,
                 },
             ],
@@ -435,7 +431,6 @@ mod tests {
                 input_tokens: tokens,
                 ..TokenUsage::default()
             },
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         };
         let events = vec![
@@ -484,7 +479,6 @@ mod tests {
                 cache_read_input_tokens: cache_read,
                 ..TokenUsage::default()
             },
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         }
     }
@@ -528,49 +522,6 @@ mod tests {
         assert!((summary.models[0].estimated.priced_usd - (long + base)).abs() < 1e-12);
         assert!((summary.model_daily[0].estimated.priced_usd - (long + base)).abs() < 1e-12);
     }
-
-    #[test]
-    fn reported_and_unreported_costs_split_per_model() {
-        let now = datetime!(2026-06-08 12:00 UTC);
-        let usage = |input: u64| TokenUsage {
-            input_tokens: input,
-            ..TokenUsage::default()
-        };
-        let event = |reported: Option<f64>, input: u64| UsageEvent {
-            timestamp: Some(datetime!(2026-06-07 10:00 UTC)),
-            session_id: None,
-            model: Some("shared-model".to_owned()),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: None,
-            usage: usage(input),
-            reported_cost_usd: reported,
-            granularity: crate::model::UsageGranularity::Call,
-        };
-        let collection = Collection {
-            usage_events: vec![event(Some(0.5), 100), event(None, 300)],
-            ..Collection::new(Provider::Combined, "/tmp".into())
-        };
-
-        let summary = summarize(&collection, now, 7, UtcOffset::UTC);
-        let model = summary
-            .models
-            .iter()
-            .find(|stat| stat.name == "shared-model")
-            .expect("model present");
-        assert_eq!(model.usage.input_tokens, 400);
-        assert_eq!(model.reported_cost_usd, Some(0.5));
-        assert_eq!(model.estimated.unpriced_volume, 300);
-
-        let day = summary
-            .model_daily
-            .iter()
-            .find(|stat| stat.model == "shared-model")
-            .expect("model-day present");
-        assert_eq!(day.reported_cost_usd, Some(0.5));
-        assert_eq!(day.estimated.unpriced_volume, 300);
-    }
 }
 
 #[cfg(test)]
@@ -597,7 +548,6 @@ mod v09_tests {
                 input_tokens: tokens,
                 ..TokenUsage::default()
             },
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         }
     }

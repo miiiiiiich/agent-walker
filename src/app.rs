@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::analyzer::summarize;
-use crate::collector::{agy, claude, codex, copilot, cursor, grok, opencode};
+use crate::collector::{agy, claude, codex, copilot, grok, opencode};
 use crate::model::{AppSummary, Collection};
 use crate::ui;
 
@@ -14,15 +14,13 @@ mod config;
 
 pub use config::{ANALYSIS_WINDOW_DAYS, Args, Config};
 use config::{
-    cursor_config, default_agy_dir, default_claude_dir, default_codex_dir, default_opencode_dir,
-    demo_enabled,
+    default_agy_dir, default_claude_dir, default_codex_dir, default_opencode_dir, demo_enabled,
 };
 
 pub fn run(args: &Args) -> Result<()> {
     // Must be read before any worker threads exist; `time` refuses to probe
     // the environment for the local offset once the process is multithreaded.
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let cursor = cursor_config();
     let config = Config {
         demo: demo_enabled(),
         claude_dir: default_claude_dir()?,
@@ -31,7 +29,6 @@ pub fn run(args: &Args) -> Result<()> {
         copilot_dir: crate::paths::copilot_home().ok(),
         grok_dir: crate::paths::grok_home().ok(),
         opencode_dir: default_opencode_dir().ok(),
-        cursor,
         use_cache: !args.no_cache,
         local_offset,
     };
@@ -97,15 +94,7 @@ fn load_report_with_collections(
 }
 
 fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<Collection>> {
-    let (
-        codex_result,
-        agy_result,
-        opencode_result,
-        copilot_result,
-        grok_result,
-        cursor_result,
-        claude_collection,
-    ) =
+    let (codex_result, agy_result, opencode_result, copilot_result, grok_result, claude_collection) =
         std::thread::scope(|scope| {
             let codex_handle = scope.spawn(|| {
                 codex::collect(
@@ -114,19 +103,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                     config.use_cache,
                     config.local_offset,
                 )
-            });
-            // Cursor is the only collector that hits the network, so it runs in
-            // its own thread alongside the local ones.
-            let cursor_handle = scope.spawn(|| {
-                config.cursor.as_ref().map(|cursor| {
-                    cursor::collect(
-                        &cursor.state_db,
-                        &cursor.cli_config,
-                        cursor.token.as_deref(),
-                        mtime_floor,
-                        config.local_offset,
-                    )
-                })
             });
             let agy_handle = scope.spawn(|| {
                 config.agy_dir.as_ref().map(|dir| {
@@ -160,7 +136,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
                 opencode_handle.join(),
                 copilot_handle.join(),
                 grok_handle.join(),
-                cursor_handle.join(),
                 claude_collection,
             )
         });
@@ -180,9 +155,6 @@ fn collect_all(config: &Config, mtime_floor: Option<SystemTime>) -> Result<Vec<C
     }
     if let Some(gk) = grok_result.map_err(|_| anyhow!("Grok collector thread panicked"))? {
         collections.push(gk);
-    }
-    if let Some(cursor) = cursor_result.map_err(|_| anyhow!("Cursor collector thread panicked"))? {
-        collections.push(cursor);
     }
     Ok(collections)
 }
@@ -323,7 +295,6 @@ mod tests {
                 model: model.to_owned(),
                 usage,
                 estimated: crate::model::CostTally::default(),
-                reported_cost_usd: None,
             }],
             models: Vec::new(),
             agents: Vec::new(),

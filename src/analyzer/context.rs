@@ -280,7 +280,6 @@ mod tests {
                 cache_read_input_tokens: read,
                 ..TokenUsage::default()
             },
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         }
     }
@@ -547,7 +546,7 @@ mod tests {
         let mut e = event("x", datetime!(2026-06-08 10:00 UTC), 50_000, 0, 0);
         e.session_id = None;
         let summary = context_summary(
-            &collection(Provider::Cursor, vec![e]),
+            &collection(Provider::Claude, vec![e]),
             date!(2026 - 06 - 01),
             date!(2026 - 06 - 30),
             UtcOffset::UTC,

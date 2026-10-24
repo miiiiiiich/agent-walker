@@ -67,28 +67,8 @@ pub struct Config {
     pub grok_dir: Option<PathBuf>,
     pub copilot_dir: Option<PathBuf>,
     pub opencode_dir: Option<PathBuf>,
-    pub cursor: Option<CursorConfig>,
     pub use_cache: bool,
     pub local_offset: UtcOffset,
-}
-
-#[derive(Clone)]
-pub struct CursorConfig {
-    pub state_db: PathBuf,
-    pub cli_config: PathBuf,
-    pub token: Option<String>,
-}
-
-// Manual `Debug` so the session token never lands in a `{config:?}` dump (a log
-// line, stderr, a panic message). Only the presence of a token is shown.
-impl std::fmt::Debug for CursorConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CursorConfig")
-            .field("state_db", &self.state_db)
-            .field("cli_config", &self.cli_config)
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .finish()
-    }
 }
 
 pub(super) fn default_claude_dir() -> Result<PathBuf> {
@@ -105,23 +85,6 @@ pub(super) fn default_agy_dir() -> Result<PathBuf> {
 
 pub(super) fn default_opencode_dir() -> Result<PathBuf> {
     crate::paths::opencode_home()
-}
-
-pub(super) fn cursor_config() -> Option<CursorConfig> {
-    let token = env::var("CURSOR_TOKEN")
-        .ok()
-        .filter(|token| !token.trim().is_empty());
-    let state_db = crate::paths::cursor_state_db().ok();
-    let store_present = state_db.as_ref().is_some_and(|path| path.exists());
-    if token.is_none() && !store_present {
-        return None;
-    }
-    // Empty paths let an explicit token work when home resolution fails.
-    Some(CursorConfig {
-        state_db: state_db.unwrap_or_default(),
-        cli_config: crate::paths::cursor_cli_config().unwrap_or_default(),
-        token,
-    })
 }
 
 pub(super) fn demo_enabled() -> bool {
@@ -160,13 +123,7 @@ mod tests {
 
     #[test]
     fn removed_flags_are_rejected() {
-        for gone in [
-            "--completions=bash",
-            "--claude-dir=x",
-            "--cursor-state-db=x",
-            "--no-cursor",
-            "--cursor",
-        ] {
+        for gone in ["--completions=bash", "--claude-dir=x"] {
             assert!(
                 Args::try_parse_from(["agent-walker", gone]).is_err(),
                 "{gone}"

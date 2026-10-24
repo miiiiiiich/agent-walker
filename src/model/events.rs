@@ -16,11 +16,6 @@ pub struct UsageEvent {
     pub project: Option<String>,
     pub usage: TokenUsage,
     pub granularity: UsageGranularity,
-    /// Provider-reported cost in USD for this event, when the source gives an
-    /// authoritative figure that the `LiteLLM` model→price path can't (Cursor's
-    /// own models aren't in the pricing table). `None` means "price it from
-    /// `LiteLLM` like every other provider".
-    pub reported_cost_usd: Option<f64>,
 }
 
 /// Whether a usage row is one model request or a sum of several. Rules that
