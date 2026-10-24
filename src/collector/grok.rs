@@ -49,11 +49,16 @@ pub fn collect(
         collection.stats.unreadable_dirs += 1;
         return collection;
     };
+    // Plain files beside the session directories are not sessions; read as
+    // one, each would count as an unreadable file or directory.
     for cwd_dir in cwd_dirs {
         let Ok(cwd_dir) = cwd_dir else {
             collection.stats.unreadable_files += 1;
             continue;
         };
+        if !is_dir(&cwd_dir) {
+            continue;
+        }
         let Ok(session_dirs) = std::fs::read_dir(cwd_dir.path()) else {
             collection.stats.unreadable_dirs += 1;
             continue;
@@ -63,6 +68,9 @@ pub fn collect(
                 collection.stats.unreadable_files += 1;
                 continue;
             };
+            if !is_dir(&session_dir) {
+                continue;
+            }
             let dir = session_dir.path();
             let Ok(meta) = read_summary(&dir) else {
                 collection.stats.unreadable_files += 1;
@@ -130,6 +138,11 @@ pub fn collect(
     }
     merge_into(&mut collection, per_file);
     collection
+}
+
+/// Follows symlinks, like the `read_dir` that opens the entry next.
+fn is_dir(entry: &std::fs::DirEntry) -> bool {
+    std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
 }
 
 /// Order fork copies by ancestry depth (parents before their children),
@@ -291,13 +304,14 @@ fn collect_turn_usage(
     };
     for (model, entry) in entries {
         let input = u64_field(entry, "inputTokens");
-        let output = u64_field(entry, "outputTokens");
         let cached = u64_field(entry, "cachedReadTokens");
+        let cache_creation = u64_field(entry, "cacheCreationTokens");
         let usage = TokenUsage {
-            input_tokens: input.saturating_sub(cached),
-            output_tokens: output,
+            input_tokens: input.saturating_sub(cached).saturating_sub(cache_creation),
+            output_tokens: u64_field(entry, "outputTokens"),
             reasoning_output_tokens: u64_field(entry, "reasoningTokens"),
             cache_read_input_tokens: cached,
+            cache_creation_input_tokens: cache_creation,
             ..TokenUsage::default()
         };
         if usage.token_volume() == 0 {
@@ -648,6 +662,62 @@ mod tests {
         assert_eq!(collection.tool_events.len(), 1);
         assert_eq!(collection.tool_events[0].source_kind, SourceKind::Subagent);
         assert!(!collection.session_touches.is_empty());
+    }
+
+    /// Cache creation comes out of fresh input; the volume is unchanged.
+    #[test]
+    fn cache_creation_is_split_out_of_input() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let line = r#"{"timestamp":1785170203,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"turn_completed","prompt_id":"p1","usage":{"inputTokens":1000,"outputTokens":50,"cachedReadTokens":600,"cacheCreationTokens":300,"reasoningTokens":0,"modelUsage":{"grok-4.5":{"inputTokens":1000,"outputTokens":50,"cachedReadTokens":600,"cacheCreationTokens":300,"reasoningTokens":0}}}}}}"#;
+        write_session(temp.path(), "cwd", "s1", &format!("{line}\n"), None);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let usage = &collection.usage_events[0].usage;
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_read_input_tokens, 600);
+        assert_eq!(usage.cache_creation_input_tokens, 300);
+        assert_eq!(usage.token_volume(), 1_050);
+    }
+
+    /// A subagent metadata dir under a session and plain files beside the
+    /// session dirs are not sessions; the child's top-level session counts.
+    #[test]
+    fn layout_files_and_subagent_metadata_are_not_sessions() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(temp.path(), "cwd", "parent", &format!("{TURN}\n"), None);
+        let meta = temp
+            .path()
+            .join("sessions")
+            .join("cwd")
+            .join("parent")
+            .join("subagents")
+            .join("child");
+        fs::create_dir_all(&meta).expect("meta dir should be created");
+        fs::write(meta.join("meta.json"), r#"{"status":"completed"}"#).expect("meta");
+        let tool = r#"{"timestamp":1785170100,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"call-sub-1","title":"web_fetch"}}}"#;
+        write_session(
+            temp.path(),
+            "cwd",
+            "child",
+            &format!("{tool}\n"),
+            Some(r#"{"session_kind":"subagent"}"#),
+        );
+        fs::write(temp.path().join("sessions").join("cwd").join(".cwd"), "/x")
+            .expect("marker should be written");
+        fs::write(
+            temp.path().join("sessions").join("session_search.sqlite"),
+            b"",
+        )
+        .expect("index should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].source_kind, SourceKind::Subagent);
+        assert_eq!(collection.stats.unreadable_files, 0);
+        assert_eq!(collection.stats.unreadable_dirs, 0);
     }
 
     #[test]
