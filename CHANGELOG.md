@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-25
+
+### Added
+
+- Antigravity app (IDE) conversations are read. They count under the same
+  provider as the CLI.
+- Compressed Codex rollouts and OpenCode 2 sessions are read.
+
+### Changed
+
+- Each model call is priced on its own, so long-context rates apply. Haiku 5.5
+  prompts over 100K tokens and GPT prompts over 272K are priced at their
+  higher tier.
+- Claude turns count only prompts you typed. Work started by notifications or
+  scheduled prompts still counts as working time.
+- `--json` moves to `schema_version` 2: `cost.reported_usd` and the per-event
+  `reported_cost_usd` are gone.
+
+### Removed
+
+- Cursor support. agent-walker reads only the logs your agents write on your
+  machine, and Cursor keeps its token counts on cursor.com. The price table is
+  now the only network request.
+
+### Fixed
+
+- Codex counts compaction calls, and forked threads no longer recount their
+  parent's history, so all-history totals can drop. Subagent threads show
+  under SUBAGENTS.
+- Antigravity model names and per-row times are recovered after the agy
+  update, so its tokens are priced again.
+- Copilot counts each call from its session store and no longer counts cache
+  writes twice.
+- Grok cache writes are priced as cache writes.
+
 ## [0.19.1] - 2026-09-24
 
 ### Changed
@@ -360,6 +395,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.20.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.18.0...v0.18.1
