@@ -441,7 +441,6 @@ impl UsageContext<'_> {
             attribution_skill: None,
             project: self.project.map(ToOwned::to_owned),
             usage,
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         }
     }

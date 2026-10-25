@@ -10,15 +10,9 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     let mut total = CostTally::default();
     let mut per_model: Vec<(String, f64)> = Vec::new();
     for model in &summary.models {
-        // Provider-reported cost (Cursor) plus the LiteLLM price of the tokens
-        // that had no reported cost — additive so a model name shared by a
-        // reporting and a non-reporting provider prices both halves.
-        let mut tally = CostTally::default();
-        tally.add(&model.estimated, model.reported_cost_usd);
-        total.priced_usd += tally.priced_usd;
-        total.unpriced_volume = total.unpriced_volume.saturating_add(tally.unpriced_volume);
-        if tally.priced_usd > 0.0 {
-            per_model.push((short_model_name(&model.name), tally.priced_usd));
+        total.add(&model.estimated);
+        if model.estimated.priced_usd > 0.0 {
+            per_model.push((short_model_name(&model.name), model.estimated.priced_usd));
         }
     }
     if total.priced_usd < 0.01 && total.is_complete() {
@@ -26,10 +20,7 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     }
     per_model.sort_by(|left, right| right.1.total_cmp(&left.1));
 
-    let mut lines = vec![utils::section_title(
-        "COST",
-        &annotation(summary, &total, width),
-    )];
+    let mut lines = vec![utils::section_title("COST", &annotation(&total, width))];
     if total.priced_usd < 0.01 {
         // Nothing could be priced: one honest "—" row instead of a vanished
         // section (which reads as "no cost").
@@ -73,48 +64,25 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
     lines
 }
 
-fn annotation(summary: &Summary, total: &CostTally, width: u16) -> String {
-    // Cursor contributes its own reported cost (an actual charge, not a LiteLLM
-    // estimate), so qualify the annotation when any of it is in the total.
-    let has_reported = summary
-        .models
-        .iter()
-        .any(|model| model.reported_cost_usd.is_some());
+fn annotation(total: &CostTally, width: u16) -> String {
     if !total.is_complete() {
         let budget = usize::from(width).saturating_sub("▍ COST  ".chars().count());
         let unpriced = format_tokens(total.unpriced_volume);
-        let candidates = if has_reported {
-            [
-                format!("{unpriced} tokens unpriced · incl. provider-reported"),
-                format!("{unpriced} unpriced · incl. reported"),
-            ]
-        } else {
-            [
-                format!("{unpriced} tokens unpriced · rates unavailable"),
-                format!("{unpriced} tokens unpriced"),
-            ]
-        };
-        return candidates
-            .into_iter()
-            .find(|text| text.chars().count() <= budget)
-            .unwrap_or_else(|| format!("{unpriced} unpriced"));
+        return [
+            format!("{unpriced} tokens unpriced · rates unavailable"),
+            format!("{unpriced} tokens unpriced"),
+        ]
+        .into_iter()
+        .find(|text| text.chars().count() <= budget)
+        .unwrap_or_else(|| format!("{unpriced} unpriced"));
     }
     if width < 44 {
-        if has_reported {
-            "incl. reported".to_owned()
-        } else {
-            "api-equivalent".to_owned()
-        }
+        "api-equivalent".to_owned()
     } else {
-        let base = crate::cost::pricing_as_of().map_or_else(
+        crate::cost::pricing_as_of().map_or_else(
             || "api-equivalent · cache-aware".to_owned(),
             |date| format!("api-equivalent · rates {date}"),
-        );
-        if has_reported {
-            format!("{base} · incl. provider-reported")
-        } else {
-            base
-        }
+        )
     }
 }
 
@@ -143,7 +111,7 @@ fn window_cost(summary: &Summary, days: u16) -> CostTally {
         .iter()
         .filter(|entry| entry.date >= start)
     {
-        tally.add(&entry.estimated, entry.reported_cost_usd);
+        tally.add(&entry.estimated);
     }
     tally
 }
@@ -178,7 +146,6 @@ mod tests {
             model: "model-nobody-priced".to_owned(),
             usage,
             estimated: unpriced,
-            reported_cost_usd: None,
         });
 
         let wide = cost_lines(&summary, 100);
@@ -196,29 +163,6 @@ mod tests {
                 "width {width}: {title:?}"
             );
             assert!(title.contains("unpriced"), "{title:?}");
-        }
-    }
-
-    #[test]
-    fn unpriced_annotation_keeps_reported_provenance() {
-        let mut summary = crate::share::fixtures::sample_summary();
-        let usage = TokenUsage {
-            input_tokens: 1_000_000,
-            ..TokenUsage::default()
-        };
-        summary.models[0].name = "model-nobody-priced".to_owned();
-        summary.models[0].estimated = CostTally {
-            priced_usd: 0.0,
-            unpriced_volume: usage.token_volume(),
-        };
-        summary.models[0].reported_cost_usd = Some(3.5);
-
-        for width in [44_u16, 100] {
-            let lines = cost_lines(&summary, width);
-            let title = rendered(&lines[0]);
-            assert!(title.chars().count() <= usize::from(width), "{title:?}");
-            assert!(title.contains("unpriced"), "{title:?}");
-            assert!(title.contains("reported"), "{title:?}");
         }
     }
 }

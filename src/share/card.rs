@@ -28,12 +28,6 @@ pub struct ShareCard {
     /// missing) — the card then shows "—" rather than an undercounted figure.
     pub(crate) cost: Option<String>,
     pub(crate) cost_per_day: Option<String>,
-    /// True when the window contains a provider-reported cost (Cursor) — an
-    /// actual charge fetched over the network, not an API-equivalent estimate
-    /// from local logs. Independent of whether `cost` could be shown (other
-    /// usage may be unpriced); softens the caption's "API-equivalent / 100%
-    /// local" copy either way.
-    pub(crate) has_reported_cost: bool,
     pub(crate) cached: Option<String>,
     pub(crate) tokens_per_min: Option<String>,
     pub(crate) sessions: usize,
@@ -66,12 +60,8 @@ impl ShareCard {
         let total = summary.total_usage.token_volume();
         let mut tally = CostTally::default();
         for entry in &summary.model_daily {
-            tally.add(&entry.estimated, entry.reported_cost_usd);
+            tally.add(&entry.estimated);
         }
-        let has_reported_cost = summary
-            .model_daily
-            .iter()
-            .any(|entry| entry.reported_cost_usd.is_some());
         let parallel = {
             let levels = summary.orchestration.time_by_level;
             // Seconds come from untrusted logs; stay on the saturating discipline
@@ -167,7 +157,6 @@ impl ShareCard {
             }),
             cost: complete_usd.map(format_usd),
             cost_per_day: complete_usd.map(|usd| format_usd(usd / days as f64)),
-            has_reported_cost,
             // Every section reads the same window, so the cache share is on the
             // same footing as the rest of the card.
             cached: summary
@@ -197,16 +186,11 @@ impl ShareCard {
 
     pub fn caption(&self) -> String {
         const MAX_WEIGHT: usize = 280;
-        // Cursor's reported cost is an actual charge, not an API-equivalent
-        // estimate, so don't label it as one. An unknown cost is simply
-        // absent — a "$0" would misread as free.
-        let cost = self.cost.as_ref().map(|cost| {
-            if self.has_reported_cost {
-                format!("{cost} cost")
-            } else {
-                format!("{cost} API-equivalent")
-            }
-        });
+        // An unknown cost is simply absent — a "$0" would misread as free.
+        let cost = self
+            .cost
+            .as_ref()
+            .map(|cost| format!("{cost} API-equivalent"));
         let parallel = self
             .parallel
             .as_ref()
@@ -243,13 +227,8 @@ impl ShareCard {
             if unattended_on && let Some(unattended) = unattended {
                 let _ = write!(caption, "\n{unattended} turns ran 20m+.");
             }
-            // The "100% local / logs never leave" claim only holds without
-            // Cursor, whose usage is fetched from its dashboard over the network.
-            let provenance = if self.has_reported_cost {
-                "Tracked with agent-walker (Cursor usage read from its dashboard)."
-            } else {
-                "Tracked 100% locally with agent-walker — your logs never leave your machine."
-            };
+            let provenance =
+                "Tracked 100% locally with agent-walker — your logs never leave your machine.";
             let _ = write!(caption, "\n\n{provenance}\nhttps://{REPO_URL}");
             caption
         };

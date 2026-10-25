@@ -11,7 +11,6 @@ pub enum Provider {
     OpenCode,
     Copilot,
     Grok,
-    Cursor,
 }
 
 impl Provider {
@@ -24,7 +23,6 @@ impl Provider {
             Self::OpenCode => "OpenCode",
             Self::Copilot => "Copilot",
             Self::Grok => "Grok",
-            Self::Cursor => "Cursor",
         }
     }
 }

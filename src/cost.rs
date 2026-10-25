@@ -525,9 +525,9 @@ pub(crate) mod tests {
 
         let unpriced = estimate("model-nobody-priced", &usage, UsageGranularity::Call);
         let mut mixed = CostTally::default();
-        mixed.add(&priced, None);
-        mixed.add(&unpriced, Some(0.25));
-        assert!((mixed.priced_usd - 5.25).abs() < 1e-9);
+        mixed.add(&priced);
+        mixed.add(&unpriced);
+        assert!((mixed.priced_usd - 5.0).abs() < 1e-9);
         assert_eq!(mixed.unpriced_volume, 1_000_000);
         assert_eq!(mixed.complete_usd(), None);
 

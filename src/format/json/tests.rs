@@ -56,7 +56,7 @@ fn document_shape_dates_nulls_and_newline() {
             "window",
         ]
     );
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["generated_at"], "2026-09-15T16:09:30+09:00");
     assert_eq!(
         value["window"],
@@ -146,7 +146,6 @@ fn every_event_stream_uses_local_dates_and_drops_undated_rows() {
                 input_tokens: 10,
                 ..TokenUsage::default()
             },
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         });
         collection.duration_events.push(DurationEvent {
@@ -259,18 +258,17 @@ fn every_event_stream_uses_local_dates_and_drops_undated_rows() {
 }
 
 #[test]
-fn cost_separates_estimates_reported_charges_and_unpriced_tokens() {
+fn cost_estimate_is_null_while_tokens_are_unpriced() {
     let mut summary = crate::share::fixtures::sample_summary();
     summary.models[0].estimated = CostTally {
         priced_usd: 5.0,
         unpriced_volume: 0,
     };
-    summary.models[0].reported_cost_usd = Some(2.0);
     let value = serde_json::to_value(SummaryDto::new(&summary, offset!(+09:00))).unwrap();
     assert_eq!(
         value["cost"],
         json!({
-            "estimated_usd": 5.0, "reported_usd": 2.0, "unpriced_tokens": 0
+            "estimated_usd": 5.0, "unpriced_tokens": 0
         })
     );
     summary.models[0].estimated = CostTally {
@@ -281,7 +279,7 @@ fn cost_separates_estimates_reported_charges_and_unpriced_tokens() {
     assert_eq!(
         value["cost"],
         json!({
-            "estimated_usd": null, "reported_usd": 2.0, "unpriced_tokens": 1_000_000
+            "estimated_usd": null, "unpriced_tokens": 1_000_000
         })
     );
 }

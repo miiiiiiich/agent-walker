@@ -89,7 +89,6 @@ fn unpriced_cost_renders_as_dash_not_zero() {
             unpriced_volume: usage.token_volume(),
         },
         usage,
-        reported_cost_usd: None,
     });
     let card = ShareCard::from_summary(&summary);
     assert_eq!(card.cost, None);
@@ -145,8 +144,10 @@ fn caption_and_header_fit_their_budgets() {
         date: summary.period_end,
         model: "claude-opus-4-8".to_owned(),
         usage: crate::model::TokenUsage::default(),
-        estimated: crate::model::CostTally::default(),
-        reported_cost_usd: Some(1.0e18),
+        estimated: crate::model::CostTally {
+            priced_usd: 1.0e18,
+            unpriced_volume: 0,
+        },
     });
     let card = ShareCard::from_summary(&summary);
     let caption = card.caption();

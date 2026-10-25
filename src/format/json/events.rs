@@ -40,7 +40,6 @@ impl EventsDto {
                     skill: e.attribution_skill.clone(),
                     subagent: e.attribution_agent.clone(),
                     tokens: TokensDto::from(&e.usage),
-                    reported_cost_usd: e.reported_cost_usd,
                 },
             ),
             turns: window.rows(
@@ -169,7 +168,6 @@ struct UsageDto {
     skill: Option<String>,
     subagent: Option<String>,
     tokens: TokensDto,
-    reported_cost_usd: Option<f64>,
 }
 
 #[derive(Serialize)]

@@ -233,7 +233,6 @@ fn claude_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collectio
                     attribution_skill: pick_skill(rng, progress),
                     project: Some(pick_project(rng)),
                     usage: usage_block(rng, session_volume / chunks),
-                    reported_cost_usd: None,
                     granularity: crate::model::UsageGranularity::Aggregate,
                 });
                 collection.mode_events.push(ModeEvent {
@@ -343,7 +342,6 @@ fn codex_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collection
             attribution_skill: None,
             project: Some(pick_project(rng)),
             usage: usage_block(rng, volume),
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Aggregate,
         });
         collection.effort_events.push(EffortEvent {
@@ -443,7 +441,6 @@ fn copilot_collection(now: OffsetDateTime, days: u16, rng: &mut Rng) -> Collecti
             attribution_skill: None,
             project: Some(pick_project(rng)),
             usage: usage_block(rng, volume),
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Aggregate,
         });
         let credits = if day_index == total_days * 2 / 3 {

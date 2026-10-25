@@ -11,24 +11,15 @@ You can expect an initial response within a week.
 ## Scope notes
 
 agent-walker reads local log/usage stores written by AI coding agents
-(Claude Code, Codex CLI, Antigravity CLI, OpenCode, Cursor) and renders
-aggregate statistics.
+(Claude Code, Codex CLI, GitHub Copilot CLI, Grok Build, Antigravity CLI and
+app, OpenCode) and renders aggregate statistics. It never reads other apps'
+credentials, keychains or browser cookies, and never calls vendor web APIs.
 
-- **Network access.** Two kinds, both to read your own data — never any
-  telemetry, log content, or usage upload:
-  1. A fetch of public model-pricing metadata from
-     [LiteLLM's pricing database](https://github.com/BerriAI/litellm). A
-     successful fetch is kept in `~/.cache/agent-walker/pricing.json` and
-     reused for the rest of the UTC day; a failed one is retried next run.
-  2. **Cursor only:** Cursor keeps no usage on disk, so when you're signed in,
-     agent-walker reads your local Cursor session cookie and sends it to
-     `cursor.com` to fetch *your own* usage figures — the same request the
-     dashboard makes. This is the one collector that transmits a credential off
-     the machine. It runs when you're signed into Cursor locally and is
-     skipped when you're signed out (the anonymous LiteLLM pricing fetch
-     above still runs either way). The cookie goes
-     only to `cursor.com` (redirects are not followed) and is never written to
-     disk, logs, or the shareable card.
+- **Network access.** Only a fetch of public model-pricing metadata from
+  [LiteLLM's pricing database](https://github.com/BerriAI/litellm) — never any
+  telemetry, log content, or usage upload. A successful fetch is kept in
+  `~/.cache/agent-walker/pricing.json` and reused for the rest of the UTC day;
+  a failed one is retried next run.
 - Log lines and usage records are treated as untrusted input: malformed data is
   counted and skipped, never executed or evaluated. Numeric aggregation uses
   saturating arithmetic, and model labels are sanitized before they can reach the

@@ -13,12 +13,9 @@ pub struct CostTally {
 }
 
 impl CostTally {
-    /// Add a stat's estimate and its provider-reported cost.
-    pub fn add(&mut self, estimated: &Self, reported_cost_usd: Option<f64>) {
-        self.priced_usd += estimated.priced_usd + reported_cost_usd.unwrap_or(0.0);
-        self.unpriced_volume = self
-            .unpriced_volume
-            .saturating_add(estimated.unpriced_volume);
+    pub fn add(&mut self, other: &Self) {
+        self.priced_usd += other.priced_usd;
+        self.unpriced_volume = self.unpriced_volume.saturating_add(other.unpriced_volume);
     }
 
     pub fn is_complete(&self) -> bool {
@@ -49,12 +46,9 @@ pub struct ModelDailyStat {
     pub date: Date,
     pub model: String,
     pub usage: TokenUsage,
-    /// Kept apart from the reported cost so a model-day shared by reporting
-    /// and non-reporting providers adds both cost paths without double
-    /// pricing. Priced event by event at aggregation: long-context rates
-    /// switch per request, which a summed usage cannot show.
+    /// Priced event by event at aggregation: long-context rates switch per
+    /// request, which a summed usage cannot show.
     pub estimated: CostTally,
-    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +57,6 @@ pub struct ModelStat {
     pub usage: TokenUsage,
     pub estimated: CostTally,
     pub events: usize,
-    pub reported_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,8 +227,8 @@ impl ActiveTimeSummary {
     }
 
     /// The Total tab's record: a sum over the providers that measured any
-    /// working time. Providers with tokens but no turn durations (Cursor,
-    /// Antigravity) stay out — their tokens would inflate the rate without
+    /// working time. Providers with tokens but no turn durations
+    /// (Antigravity) stay out — their tokens would inflate the rate without
     /// adding a minute to divide by.
     pub fn merged<'a>(parts: impl IntoIterator<Item = &'a ActiveTimeSummary>) -> Option<Self> {
         let mut out: Option<Self> = None;

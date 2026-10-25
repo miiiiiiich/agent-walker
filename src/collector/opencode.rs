@@ -216,10 +216,9 @@ fn parse_messages(
                 .pointer("/path/cwd")
                 .and_then(Value::as_str)
                 .map(project_from_cwd),
+            // OpenCode records a per-message cost, but like every provider we
+            // price from LiteLLM for consistency (see docs/opencode).
             usage,
-            // OpenCode records a per-message cost, but like every non-Cursor
-            // provider we price from LiteLLM for consistency (see docs/opencode).
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         });
 
@@ -413,7 +412,6 @@ fn parse_session_messages(
                 .filter(|dir| !dir.is_empty())
                 .map(project_from_cwd),
             usage: token_usage(&value),
-            reported_cost_usd: None,
             granularity: crate::model::UsageGranularity::Call,
         });
         if kind == "assistant" {

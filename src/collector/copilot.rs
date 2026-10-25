@@ -249,7 +249,6 @@ fn read_call_ledger(
                 attribution_skill: None,
                 project: row.cwd.as_deref().map(project_from_cwd),
                 usage,
-                reported_cost_usd: None,
                 granularity: crate::model::UsageGranularity::Call,
             },
         });
@@ -571,7 +570,6 @@ fn collect_shutdown_usage(
                 attribution_skill: None,
                 project: project.map(ToOwned::to_owned),
                 usage,
-                reported_cost_usd: None,
                 granularity: crate::model::UsageGranularity::Aggregate,
             },
         });

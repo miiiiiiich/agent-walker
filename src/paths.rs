@@ -56,20 +56,6 @@ pub fn opencode_home() -> Result<PathBuf> {
     })
 }
 
-pub fn cursor_state_db() -> Result<PathBuf> {
-    let base =
-        dirs::config_dir().ok_or_else(|| anyhow!("could not locate the user config directory"))?;
-    Ok(base
-        .join("Cursor")
-        .join("User")
-        .join("globalStorage")
-        .join("state.vscdb"))
-}
-
-pub fn cursor_cli_config() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".cursor").join("cli-config.json"))
-}
-
 /// Keep the cache under `<home>/.cache/agent-walker` so existing macOS/Linux
 /// users do not lose their warmed cache.
 pub fn cache_dir() -> Result<PathBuf> {

@@ -181,21 +181,17 @@ struct CodenameDto {
 #[serde(rename_all = "snake_case")]
 struct CostDto {
     estimated_usd: Option<f64>,
-    reported_usd: f64,
     unpriced_tokens: u64,
 }
 
 impl CostDto {
     fn new(summary: &Summary) -> Self {
         let mut estimated = CostTally::default();
-        let mut reported_usd = 0.0;
         for model in &summary.models {
-            estimated.add(&model.estimated, None);
-            reported_usd += model.reported_cost_usd.unwrap_or(0.0);
+            estimated.add(&model.estimated);
         }
         Self {
             estimated_usd: estimated.complete_usd(),
-            reported_usd,
             unpriced_tokens: estimated.unpriced_volume,
         }
     }
