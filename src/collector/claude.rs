@@ -2,19 +2,21 @@ mod line;
 mod turns;
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::Path;
 use std::time::SystemTime;
 
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
+use crate::collector::ident::ident;
+use crate::collector::json::parse_line as parse_json_line;
+use crate::collector::read::{Lines, open_regular};
 use crate::collector::{
     FileEvents, KeyedPaceEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{Collection, PaceEvent, Provider, SourceKind};
+use crate::timestamp::parse_rfc3339;
 
 use line::{is_interrupt_marker, parse_line};
 use turns::{TurnState, is_human_turn};
@@ -84,7 +86,7 @@ fn normalize_project_name(directory: &str) -> String {
 }
 
 fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let mut events = FileEvents::default();
     let source_kind = path_source_kind(path);
     let file_agent_id = file_agent_id(path);
@@ -99,25 +101,18 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     // reopen (its replayed answer then finds nothing pending and is inert).
     let mut seen_prompts: HashSet<String> = HashSet::new();
     let mut seen_questions: HashSet<String> = HashSet::new();
-    let reader = BufReader::new(file);
 
-    for (line_index, line) in reader.lines().enumerate() {
-        events.lines_seen += 1;
-        let Ok(line) = line else {
-            events.parse_errors += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            events.parse_errors += 1;
+    while let Some((line_index, line)) = lines.next(&mut events) {
+        let Some(value) = parse_json_line(line, &mut events) else {
             continue;
         };
         if project.is_none()
-            && let Some(cwd) = string_field(&value, "cwd")
+            && let Some(cwd) = value
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
         {
-            project = Some(project_from_cwd(&cwd));
+            project = project_from_cwd(cwd);
         }
         if source_kind == SourceKind::Main {
             if is_interrupt_marker(&value) {
@@ -204,8 +199,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
 }
 
 fn parse_timestamp(value: Option<&Value>) -> Option<OffsetDateTime> {
-    let raw = value?.as_str()?;
-    OffsetDateTime::parse(raw, &Rfc3339).ok()
+    parse_rfc3339(value?.as_str()?)
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -213,6 +207,7 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+        .and_then(ident)
         .map(ToOwned::to_owned)
 }
 
@@ -258,6 +253,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::collector::ident::tests::{overlong_ident, overlong_path};
+    use crate::collector::json::tests::over_structured_line;
+    use crate::collector::read::tests::oversized_json;
+
+    fn assistant(timestamp: &str, id: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{timestamp}","sessionId":"s1","type":"assistant","message":{{"id":"{id}","model":"claude-opus-4-8","usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        )
+    }
 
     #[test]
     fn collects_usage_tools_and_subagent_files() {
@@ -319,5 +323,135 @@ mod tests {
 
         assert_eq!(collection.stats.files_seen, 0);
         assert!(collection.usage_events.is_empty());
+    }
+
+    #[test]
+    fn rows_dated_past_the_plausible_range_read_as_undated() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let lines = [
+            assistant("2026-10-25T00:00:00Z", "m0"),
+            assistant("9999-12-31T23:00:00-05:00", "m1"),
+            assistant("9999-12-31T23:00:00Z", "m2"),
+        ];
+        fs::write(temp.path().join("session.jsonl"), lines.join("\n"))
+            .expect("fixture should be written");
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(temp.path(), None, false, tokyo);
+
+        assert_eq!(collection.usage_events.len(), 3);
+        let undated = collection
+            .usage_events
+            .iter()
+            .filter(|e| e.timestamp.is_none());
+        assert_eq!(undated.count(), 2);
+        assert_eq!(collection.session_touches.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_count_as_unreadable_without_being_opened() {
+        use crate::collector::read::tests::{finishes_quickly, make_fifo};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("test dirs should be created");
+        make_fifo(&project.join("fifo.jsonl"));
+        std::os::unix::fs::symlink("/dev/null", project.join("null.jsonl"))
+            .expect("symlink should be created");
+        fs::write(
+            project.join("session.jsonl"),
+            assistant("2026-10-25T00:00:00Z", "m0"),
+        )
+        .expect("fixture should be written");
+
+        let root = temp.path().to_path_buf();
+        let collection = finishes_quickly(move || collect(&root, None, false, UtcOffset::UTC));
+
+        assert_eq!(collection.stats.files_seen, 3);
+        assert_eq!(collection.stats.unreadable_files, 2);
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn line_past_the_cap_is_skipped_as_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let text = format!(
+            "{}\n{}\n",
+            oversized_json(&assistant("2026-10-25T00:00:00Z", "m0")),
+            assistant("2026-10-25T00:01:00Z", "m1")
+        );
+        fs::write(temp.path().join("session.jsonl"), text).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn over_structured_line_is_skipped_as_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let text = format!(
+            "{}\n{}\n",
+            over_structured_line(),
+            assistant("2026-10-25T00:00:00Z", "m0")
+        );
+        fs::write(temp.path().join("session.jsonl"), text).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    /// Each tool event copies the line's session id: a 1 MiB id on a row of
+    /// 10,000 `tool_use` blocks grew to gigabytes.
+    #[test]
+    fn overlong_ids_are_missing_instead_of_copied_per_block() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let blocks = (0..1_000)
+            .map(|i| format!(r#"{{"type":"tool_use","id":"t{i}","name":"Read","input":{{}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let long = overlong_ident();
+        let deep = overlong_path();
+        let line = format!(
+            r#"{{"timestamp":"2026-10-25T00:00:00Z","sessionId":"{long}","cwd":"{deep}","type":"assistant","message":{{"id":"m0","model":"claude-opus-4-8","usage":{{"input_tokens":1,"output_tokens":1}},"content":[{blocks}]}}}}"#
+        );
+        fs::write(temp.path().join("session.jsonl"), line).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.tool_events.len(), 1_000);
+        assert!(
+            collection
+                .tool_events
+                .iter()
+                .all(|e| e.session_id.is_none())
+        );
+        assert_eq!(collection.usage_events[0].session_id, None);
+        let project = collection.usage_events[0].project.as_deref();
+        assert!(project.is_none_or(|project| project.len() < deep.len() - 1));
+    }
+
+    /// A cwd may be as long as Linux allows, far past the id bound.
+    #[test]
+    fn long_cwd_is_kept_as_the_project() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cwd = format!("/{}", "d".repeat(2_000));
+        let line = assistant("2026-10-25T00:00:00Z", "m0").replacen(
+            "\"sessionId\"",
+            &format!("\"cwd\":\"{cwd}\",\"sessionId\""),
+            1,
+        );
+        fs::write(temp.path().join("session.jsonl"), line).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(
+            collection.usage_events[0].project.as_deref(),
+            Some(&cwd[1..])
+        );
     }
 }

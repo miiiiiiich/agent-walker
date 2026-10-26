@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
-use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset};
 
+use rusqlite::types::Type;
+
+use crate::collector::ident::ident_string;
+use crate::collector::store::{open_store, read_deadline};
 use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
 use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent};
+use crate::timestamp::{parse_rfc3339, plausible};
 
 use super::{MAX_SANE_TOKENS, RawCounters};
 
@@ -69,6 +71,20 @@ impl CallLedger {
     }
 }
 
+const CALL_COLUMNS: [&str; 11] = [
+    "id",
+    "session_id",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "agent_id",
+    "initiator",
+    "created_at",
+];
+
 const CALLS_SQL: &str = "SELECT e.id, e.session_id, e.model, e.input_tokens, e.output_tokens, \
      e.cache_read_tokens, e.cache_write_tokens, e.reasoning_tokens, e.agent_id, e.initiator, \
      e.created_at, s.cwd \
@@ -84,8 +100,7 @@ struct CallRow {
     cwd: Option<String>,
 }
 
-/// Opened read-only like the OpenCode store: SQLite can never write the
-/// user's file, and the busy timeout rides out the CLI's brief write locks.
+/// Without both tables there is no ledger, as with a CLI that predates it.
 pub(super) fn read_call_ledger(
     path: &Path,
     local_offset: UtcOffset,
@@ -94,16 +109,26 @@ pub(super) fn read_call_ledger(
     if !path.is_file() {
         return None;
     }
-    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+    let Some(store) = open_store(path, read_deadline()) else {
         collection.stats.unreadable_files += 1;
         return None;
     };
-    let _ = conn.busy_timeout(Duration::from_millis(500));
-    let mut stmt = conn.prepare(CALLS_SQL).ok()?;
+    if !store.has_table("assistant_usage_events", &CALL_COLUMNS)
+        || !store.has_table("sessions", &["id", "cwd"])
+    {
+        return None;
+    }
+    let mut stmt = store.prepare(CALLS_SQL).ok()?;
     // The session id is read on its own so a row that fails elsewhere still
     // names the session it leaves incomplete.
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(1).ok(), call_row(row))))
+        .query_map([], |row| {
+            // Only the call's own columns: the joined `cwd` repeats the one
+            // session row on every call, and charging it per call cut a
+            // 10,000-call ledger short.
+            store.charge(row, CALL_COLUMNS.len())?;
+            Ok((ident_column(row, 1).ok(), call_row(row)))
+        })
         .ok()?;
 
     let mut ledger = CallLedger {
@@ -117,6 +142,9 @@ pub(super) fn read_call_ledger(
         let Ok((session_id, call)) = row else {
             ledger.events.parse_errors += 1;
             ledger.unattributed = true;
+            if store.spent() {
+                break;
+            }
             continue;
         };
         let Some((row, timestamp)) = call
@@ -158,7 +186,7 @@ pub(super) fn read_call_ledger(
                 },
                 attribution_agent: None,
                 attribution_skill: None,
-                project: row.cwd.as_deref().map(project_from_cwd),
+                project: row.cwd.as_deref().and_then(project_from_cwd),
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
             },
@@ -168,11 +196,17 @@ pub(super) fn read_call_ledger(
     Some(ledger)
 }
 
+fn ident_column(row: &rusqlite::Row, index: usize) -> rusqlite::Result<String> {
+    ident_string(row.get(index)?).ok_or_else(|| {
+        rusqlite::Error::InvalidColumnType(index, "identifier".to_owned(), Type::Text)
+    })
+}
+
 fn call_row(row: &rusqlite::Row) -> rusqlite::Result<CallRow> {
     Ok(CallRow {
         id: row.get(0)?,
-        session_id: row.get(1)?,
-        model: row.get(2)?,
+        session_id: ident_column(row, 1)?,
+        model: ident_column(row, 2)?,
         counters: RawCounters {
             input: db_count(row.get(3)?),
             output: db_count(row.get(4)?),
@@ -233,13 +267,14 @@ pub(super) fn supersede_snapshots(
 }
 
 fn parse_db_time(raw: &str) -> Option<OffsetDateTime> {
-    OffsetDateTime::parse(raw, &Rfc3339).ok().or_else(|| {
+    parse_rfc3339(raw).or_else(|| {
         PrimitiveDateTime::parse(
             raw,
             format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"),
         )
         .ok()
         .map(PrimitiveDateTime::assume_utc)
+        .and_then(plausible)
     })
 }
 
@@ -254,6 +289,7 @@ fn db_count(value: Option<i64>) -> u64 {
 mod tests {
     use std::fs;
 
+    use rusqlite::Connection;
     use tempfile::TempDir;
 
     use super::*;
@@ -577,5 +613,97 @@ mod tests {
 
         assert_eq!(total_volume(&collection), 1_100);
         assert_eq!(collection.stats.unreadable_files, 0);
+    }
+
+    /// A view of the same name would run whatever SQL the store chose; the
+    /// one that recursed forever is cut down here to a single row.
+    #[test]
+    fn usage_view_is_not_read_as_the_ledger() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::create_dir_all(temp.path()).expect("test root should be created");
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
+             CREATE VIEW assistant_usage_events AS SELECT 1 AS id, 's1' AS session_id,
+                 'gpt-5' AS model, 1000 AS input_tokens, 100 AS output_tokens,
+                 0 AS cache_read_tokens, 0 AS cache_write_tokens, 0 AS reasoning_tokens,
+                 NULL AS agent_id, 'user' AS initiator, '2026-07-27T10:00:00Z' AS created_at;",
+        )
+        .expect("schema should be created");
+        drop(conn);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.usage_events.is_empty());
+    }
+
+    #[test]
+    fn call_dated_past_the_plausible_range_is_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.000Z", 1_000, 100),
+                call("s1", "9999-12-31 23:00:00", 500, 50),
+            ],
+        );
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(temp.path(), None, false, tokyo);
+
+        assert_eq!(total_volume(&collection), 1_100);
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn call_with_an_overlong_model_is_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let long = crate::collector::ident::tests::overlong_ident();
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.000Z", 1_000, 100),
+                Call {
+                    model: &long,
+                    ..call("s1", "2026-07-27T11:00:00.000Z", 500, 50)
+                },
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 1_100);
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn a_long_ledger_with_a_long_cwd_is_read_in_full() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::create_dir_all(temp.path()).expect("test root should be created");
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(&format!(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, turn_index INTEGER,
+                 agent_id TEXT, model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
+                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+                 total_nano_aiu INTEGER, initiator TEXT, created_at TEXT);
+             INSERT INTO sessions VALUES ('s1', '/Users/me/{}');
+             WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 10000)
+             INSERT INTO assistant_usage_events (session_id, model, input_tokens, output_tokens,
+                 cache_read_tokens, cache_write_tokens, reasoning_tokens, created_at)
+             SELECT 's1', 'gpt-5-mini', 10, 1, 0, 0, 0, '2026-07-27T10:00:00.000Z' FROM r;",
+            "d".repeat(900)
+        ))
+        .expect("store should be written");
+        drop(conn);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 10_000);
+        assert_eq!(total_volume(&collection), 110_000);
+        assert_eq!(collection.stats.parse_errors, 0);
     }
 }

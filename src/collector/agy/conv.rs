@@ -10,13 +10,15 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::collector::ident::ident;
 use crate::collector::project_from_cwd;
+use crate::collector::store::{Store, open_store, read_deadline};
 use crate::model::{ScanStats, SourceKind, TokenUsage, UsageEvent};
+use crate::timestamp::{from_unix_millis, to_local};
 
 pub(super) fn collect_usage(
     stores: &[PathBuf],
@@ -43,6 +45,7 @@ pub(super) fn collect_usage(
     }
 
     let mut generations = Generations::default();
+    let deadline = read_deadline();
     for db in dbs {
         let newest = newest_mtime_ms(&db);
         // Skip whole files older than the window (cheap mtime gate, like the
@@ -54,7 +57,7 @@ pub(super) fn collect_usage(
         {
             continue;
         }
-        parse_db(&db, newest, local_offset, stats, &mut generations);
+        parse_db(&db, newest, deadline, local_offset, stats, &mut generations);
     }
     // Apply the window only after every copy has been weighed: filtering per row
     // lets an out-of-window copy (dated from its conversation start) claim the
@@ -131,6 +134,7 @@ fn newest_mtime_ms(db: &Path) -> Option<i64> {
 fn parse_db(
     db: &Path,
     db_mtime_ms: Option<i64>,
+    deadline: Instant,
     local_offset: UtcOffset,
     stats: &mut ScanStats,
     generations: &mut Generations,
@@ -140,7 +144,7 @@ fn parse_db(
     if std::fs::metadata(db).is_ok_and(|meta| meta.len() == 0) {
         return;
     }
-    let Some(conn) = open_readonly(db) else {
+    let Some(store) = open_store(db, deadline) else {
         stats.unreadable_files += 1;
         return;
     };
@@ -150,7 +154,7 @@ fn parse_db(
         .and_then(|stem| stem.to_str())
         .unwrap_or("antigravity")
         .to_owned();
-    let (session_ts, project) = trajectory_meta(&conn);
+    let (session_ts, project) = trajectory_meta(&store);
     // Fallback chain for a row's time: its own stamp → its step's created-at →
     // the conversation's created-at → the DB file mtime (so a missing timestamp
     // dates the event near when the file was written, never 1970).
@@ -160,10 +164,14 @@ fn parse_db(
         (TimeSource::FileMtime, db_mtime_ms.unwrap_or(0))
     };
 
-    let Ok(mut stmt) = conn.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx") else {
+    if !store.has_table("gen_metadata", &["idx", "data"]) {
+        return;
+    }
+    let Ok(mut stmt) = store.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx") else {
         return;
     };
     let Ok(rows) = stmt.query_map([], |row| {
+        store.charge(row, 2)?;
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     }) else {
         return;
@@ -173,6 +181,10 @@ fn parse_db(
         stats.lines_seen += 1;
         match row {
             Ok(blob) => blobs.push(blob),
+            Err(_) if store.spent() => {
+                stats.parse_errors += 1;
+                break;
+            }
             Err(_) => stats.parse_errors += 1,
         }
     }
@@ -181,7 +193,7 @@ fn parse_db(
         project: project.as_deref(),
         fallback,
         selected_models: selected_models(&blobs),
-        step_times_ms: step_times_by_response(&conn),
+        step_times_ms: step_times_by_response(&store),
     };
     for (idx, blob) in &blobs {
         match parse_gen(blob, *idx, &conversation, local_offset) {
@@ -258,7 +270,7 @@ fn parse_gen(
     let (source, timestamp_ms) = message_field(chat_model, 9)
         .and_then(|node| message_field(node, 4))
         .and_then(proto_timestamp_ms)
-        .filter(|&ms| ms > 0)
+        .filter(|&ms| plausible_ms(ms))
         .map(|ms| (TimeSource::Row, ms))
         .or_else(|| {
             response_id
@@ -299,7 +311,7 @@ fn parse_gen(
         source_kind: SourceKind::Main,
         attribution_agent: None,
         attribution_skill: None,
-        project: conversation.project.map(project_from_cwd),
+        project: conversation.project.and_then(project_from_cwd),
         usage,
         granularity: crate::model::UsageGranularity::Call,
     };
@@ -343,12 +355,18 @@ fn selected_models(blobs: &[(i64, Vec<u8>)]) -> Vec<String> {
 
 /// Keyed by response id, not matched by position: some conversations hold
 /// more planner steps than gen rows, so the n-th step is not the n-th row.
-fn step_times_by_response(conn: &Connection) -> HashMap<String, i64> {
+fn step_times_by_response(store: &Store) -> HashMap<String, i64> {
     let mut times = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT metadata FROM steps ORDER BY idx") else {
+    if !store.has_table("steps", &["idx", "metadata"]) {
+        return times;
+    }
+    let Ok(mut stmt) = store.prepare("SELECT metadata FROM steps ORDER BY idx") else {
         return times;
     };
-    let Ok(rows) = stmt.query_map([], |row| row.get::<_, Option<Vec<u8>>>(0)) else {
+    let Ok(rows) = stmt.query_map([], |row| {
+        store.charge(row, 1)?;
+        row.get::<_, Option<Vec<u8>>>(0)
+    }) else {
         return times;
     };
     for metadata in rows.flatten().flatten() {
@@ -360,7 +378,7 @@ fn step_times_by_response(conn: &Connection) -> HashMap<String, i64> {
         };
         let Some(ms) = message_field(&metadata, 1)
             .and_then(proto_timestamp_ms)
-            .filter(|&ms| ms > 0)
+            .filter(|&ms| plausible_ms(ms))
         else {
             continue;
         };
@@ -369,12 +387,18 @@ fn step_times_by_response(conn: &Connection) -> HashMap<String, i64> {
     times
 }
 
-fn trajectory_meta(conn: &Connection) -> (i64, Option<String>) {
-    let blob: Option<Vec<u8>> = conn
+fn trajectory_meta(store: &Store) -> (i64, Option<String>) {
+    if !store.has_table("trajectory_metadata_blob", &["data"]) {
+        return (0, None);
+    }
+    let blob: Option<Vec<u8>> = store
         .query_row(
             "SELECT data FROM trajectory_metadata_blob LIMIT 1",
             [],
-            |row| row.get(0),
+            |row| {
+                store.charge(row, 1)?;
+                row.get(0)
+            },
         )
         .ok();
     let Some(blob) = blob else {
@@ -382,9 +406,12 @@ fn trajectory_meta(conn: &Connection) -> (i64, Option<String>) {
     };
     let ts = message_field(&blob, 2)
         .and_then(proto_timestamp_ms)
+        .filter(|&ms| plausible_ms(ms))
         .unwrap_or(0);
+    // A path, held to the path bound by `project_from_cwd`, not the id bound.
     let project = message_field(&blob, 1)
-        .and_then(|folder| string_field(folder, 1))
+        .and_then(|folder| message_field(folder, 1))
+        .and_then(|uri| std::str::from_utf8(uri).ok())
         .map(file_uri_to_path);
     (ts, project)
 }
@@ -399,21 +426,19 @@ fn file_uri_to_path(uri: &str) -> String {
     }
 }
 
-fn open_readonly(db: &Path) -> Option<Connection> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    let _ = conn.busy_timeout(Duration::from_millis(500));
-    Some(conn)
-}
-
 fn systemtime_to_ms(time: SystemTime) -> Option<i64> {
     let nanos = time.duration_since(UNIX_EPOCH).ok()?.as_millis();
     i64::try_from(nanos).ok()
 }
 
 fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
-        .ok()
-        .map(|time| time.to_offset(local_offset))
+    to_local(from_unix_millis(ms)?, local_offset)
+}
+
+/// A stamp past the plausible range is treated like a missing one, so the
+/// row falls back to the next source instead of going undated.
+fn plausible_ms(ms: i64) -> bool {
+    ms > 0 && from_unix_millis(ms).is_some()
 }
 
 fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
@@ -503,11 +528,17 @@ fn varint_field(buf: &[u8], field: u64) -> Option<u64> {
 }
 
 fn string_field(buf: &[u8], field: u64) -> Option<&str> {
-    message_field(buf, field).and_then(|bytes| std::str::from_utf8(bytes).ok())
+    message_field(buf, field)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(ident)
 }
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::time::Duration;
+
+    use rusqlite::Connection;
+
     use super::*;
 
     fn varint(field: u64, value: u64) -> Vec<u8> {
@@ -793,6 +824,28 @@ pub(super) mod tests {
         assert_eq!(
             e.timestamp.map(OffsetDateTime::unix_timestamp),
             Some(1_780_000_000)
+        );
+    }
+
+    #[test]
+    fn row_stamp_past_the_plausible_range_falls_back_to_the_step_time() {
+        let mut usage = varint(3, 10);
+        usage.extend(varint(9, 10));
+        usage.extend(lenf(11, b"r1"));
+        let mut chat = lenf(4, &usage);
+        chat.extend(lenf(9, &lenf(4, &timestamp(253_402_290_000_000))));
+        let blob = lenf(1, &chat);
+        let conversation = Conversation {
+            step_times_ms: HashMap::from([("r1".to_owned(), 1_790_000_000_000)]),
+            ..conversation(1)
+        };
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let e = event_of(parse_gen(&blob, 0, &conversation, tokyo));
+
+        assert_eq!(
+            e.timestamp.map(OffsetDateTime::unix_timestamp),
+            Some(1_790_000_000)
         );
     }
 

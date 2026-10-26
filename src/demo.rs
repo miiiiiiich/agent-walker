@@ -497,7 +497,7 @@ pub(crate) fn demo_report_with_collections(
     config: &Config,
     days: u16,
 ) -> (AppSummary, Vec<Collection>) {
-    let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
+    let now = crate::timestamp::now_local(config.local_offset);
     let mut rng = Rng(0x5EED_CAFE_F00D_0001);
 
     let collections = vec![

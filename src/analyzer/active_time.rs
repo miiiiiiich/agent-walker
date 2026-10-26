@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use time::{Date, UtcOffset};
 
 use crate::model::{ActiveTimeSummary, Collection};
+use crate::timestamp::local_date;
 
 pub(super) fn active_time_summary(
     collection: &Collection,
@@ -20,7 +21,7 @@ pub(super) fn active_time_summary(
     for event in &collection.duration_events {
         let Some(date) = event
             .timestamp
-            .map(|timestamp| timestamp.to_offset(local_offset).date())
+            .and_then(|timestamp| local_date(timestamp, local_offset))
             .filter(|date| in_window(*date))
         else {
             continue;
@@ -50,7 +51,7 @@ pub(super) fn active_time_summary(
         .filter(|event| {
             event
                 .timestamp
-                .map(|timestamp| timestamp.to_offset(local_offset).date())
+                .and_then(|timestamp| local_date(timestamp, local_offset))
                 .is_some_and(in_window)
         })
         .map(|event| event.gap_ms)
@@ -59,7 +60,7 @@ pub(super) fn active_time_summary(
     for event in &collection.usage_events {
         let dated = event
             .timestamp
-            .map(|timestamp| timestamp.to_offset(local_offset).date())
+            .and_then(|timestamp| local_date(timestamp, local_offset))
             .is_some_and(in_window);
         if !dated {
             continue;

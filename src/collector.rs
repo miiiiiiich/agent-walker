@@ -7,8 +7,12 @@ pub mod opencode;
 
 mod cache;
 mod events;
+mod ident;
+mod json;
 mod merge;
 mod project;
+mod read;
+mod store;
 mod walk;
 
 pub use cache::{parse_files_cached, sweep_cache_dir};

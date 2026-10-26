@@ -5,6 +5,13 @@
 `~/.claude/projects/**/*.jsonl` — one JSONL transcript per session. agent-walker
 reads them directly and read-only. Nothing is uploaded.
 
+**Input bounds.** Only regular files are opened; a symlink to one is followed,
+while a FIFO or device counts as an unreadable file. A line longer than 64 MiB,
+or one holding more than 262,144 JSON array elements and object entries, is
+skipped as a parse error. A timestamp before 1970 or from year 3000 on is
+treated as missing. An id or name longer than 1,024 bytes, or a path longer
+than 4,096, is treated as missing.
+
 ## History retention (keep more than 30 days)
 
 Claude Code **deletes transcripts after 30 days by default**, so on first use the

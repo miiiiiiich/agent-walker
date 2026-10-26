@@ -192,7 +192,7 @@ struct EventWindow {
 
 impl EventWindow {
     fn at(self, timestamp: Option<OffsetDateTime>) -> Option<OffsetDateTime> {
-        let at = timestamp?.to_offset(self.offset);
+        let at = crate::timestamp::to_local(timestamp?, self.offset)?;
         (self.start..=self.end).contains(&at.date()).then_some(at)
     }
 

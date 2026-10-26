@@ -4,13 +4,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::collector::ident::ident;
+use crate::collector::json::parse_line;
+use crate::collector::read::Lines;
 use crate::collector::{
     FileEvents, list_files_matching, merge_into, parse_files_cached, project_from_cwd,
 };
 use crate::model::{Collection, Provider, SessionTouch};
+use crate::timestamp::parse_rfc3339;
 
 mod fork;
 mod rollout;
@@ -19,9 +22,7 @@ mod turns;
 mod usage;
 
 use fork::{Origin, in_fork_burst, is_copied_fork};
-use rollout::{
-    Line, MAX_LINE_BYTES, is_rollout_file, next_line, open_rollout, plain_rollout_path, supersedes,
-};
+use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
 use tools::collect_tool_event;
 use turns::{
     PaceState, TurnItems, collect_duration_event, collect_effort_event, collect_interrupt_event,
@@ -88,7 +89,7 @@ pub fn collect(
     reason = "One pass over the rollout feeding every collector; splitting adds indirection without logic."
 )]
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let mut reader = open_rollout(path)?;
+    let mut lines = Lines::new(open_rollout(path)?);
     // Keys and fallback ids come from the plain name, so a rollout parses the
     // same whichever representation is on disk this run.
     let logical_path = plain_rollout_path(path);
@@ -103,29 +104,9 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut own_thread_id: Option<String> = None;
     let mut origin = Origin::default();
     let mut recorded_usage: HashSet<String> = HashSet::new();
-    let mut line = Vec::new();
 
-    for line_index in 0.. {
-        let read = next_line(reader.as_mut(), &mut line, MAX_LINE_BYTES);
-        if matches!(read, Ok(None)) {
-            break;
-        }
-        events.lines_seen += 1;
-        // A broken zstd frame returns the same error on every read; skipping
-        // it like a bad line would loop forever.
-        let Ok(Some(read)) = read else {
-            events.parse_errors += 1;
-            break;
-        };
-        if matches!(read, Line::Oversized) {
-            events.parse_errors += 1;
-            continue;
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
-            events.parse_errors += 1;
+    while let Some((line_index, line)) = lines.next(&mut events) {
+        let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
 
@@ -144,8 +125,11 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             }
             current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
             current_model = session_model(&value).or(current_model);
-            current_project =
-                string_path(&value, &["payload", "cwd"]).map(|cwd| project_from_cwd(&cwd));
+            current_project = value
+                .pointer("/payload/cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .and_then(project_from_cwd);
         }
         // Fork/spawn copies rewrite timestamps to the fork instant and shift
         // line positions (GH-36). Skip the replay burst even without a parent
@@ -239,8 +223,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 }
 
 fn parse_timestamp(value: Option<&Value>) -> Option<OffsetDateTime> {
-    let raw = value?.as_str()?;
-    OffsetDateTime::parse(raw, &Rfc3339).ok()
+    parse_rfc3339(value?.as_str()?)
 }
 
 fn string_path(value: &Value, path: &[&str]) -> Option<String> {
@@ -251,6 +234,7 @@ fn string_path(value: &Value, path: &[&str]) -> Option<String> {
     cursor
         .as_str()
         .filter(|value| !value.is_empty())
+        .and_then(ident)
         .map(ToOwned::to_owned)
 }
 

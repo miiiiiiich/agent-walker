@@ -1,6 +1,7 @@
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
+use crate::collector::ident::ident;
 use crate::model::SourceKind;
 
 use super::string_path;
@@ -45,6 +46,7 @@ impl Origin {
             source
                 .get("internal")
                 .and_then(Value::as_str)
+                .and_then(ident)
                 .map(ToOwned::to_owned)
         };
         Self { agent }
@@ -63,7 +65,7 @@ impl Origin {
 /// spawn and would split one role into many rows), else the subagent kind.
 fn subagent_name(subagent: &Value, payload: &Value) -> String {
     let name = match subagent {
-        Value::String(kind) => Some(kind.clone()),
+        Value::String(kind) => ident(kind).map(ToOwned::to_owned),
         Value::Object(variant) => match variant.get("thread_spawn") {
             Some(spawn) => Some(
                 string_path(spawn, &["agent_role"])
@@ -74,8 +76,9 @@ fn subagent_name(subagent: &Value, payload: &Value) -> String {
             None => variant
                 .get("other")
                 .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .or_else(|| variant.keys().next().cloned()),
+                .or_else(|| variant.keys().next().map(String::as_str))
+                .and_then(ident)
+                .map(ToOwned::to_owned),
         },
         _ => None,
     };
@@ -463,8 +466,17 @@ mod tests {
             ],
         );
 
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let collection = collect(
+            temp.path(),
+            None,
+            false,
+            UtcOffset::from_hms(9, 0, 0).expect("offset"),
+        );
 
-        assert!(collection.usage_events.is_empty());
+        // Rows dated at the edge are implausible (crate::timestamp) and read
+        // as undated, so no fork instant is known to skip a burst from.
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].timestamp, None);
+        assert!(collection.session_touches.is_empty());
     }
 }

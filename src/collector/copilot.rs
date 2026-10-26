@@ -1,15 +1,16 @@
 mod ledger;
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::collector::ident::ident;
+use crate::collector::json::parse_line;
+use crate::collector::read::{Lines, open_regular};
 use crate::collector::{
     FileEvents, KeyedCreditSample, KeyedDurationEvent, KeyedToolEvent, KeyedUsageEvent, merge_into,
     parse_files_cached, project_from_cwd,
@@ -18,6 +19,7 @@ use crate::model::{
     Collection, CreditSample, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
     ToolEvent, UsageEvent,
 };
+use crate::timestamp::parse_rfc3339;
 
 use ledger::{read_call_ledger, supersede_snapshots};
 
@@ -107,11 +109,12 @@ fn event_files(
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let session_id = path
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
+        .and_then(ident)
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
     let mut project: Option<String> = None;
@@ -120,30 +123,20 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut last_nano_aiu = 0u64;
     let mut credit_index = 0usize;
     let mut turn_starts: HashMap<String, OffsetDateTime> = HashMap::new();
-    let reader = BufReader::new(file);
 
-    for line in reader.lines() {
-        events.lines_seen += 1;
-        let Ok(line) = line else {
-            events.parse_errors += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            events.parse_errors += 1;
+    while let Some((_, line)) = lines.next(&mut events) {
+        let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
 
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
-            .and_then(|raw| OffsetDateTime::parse(raw, &Rfc3339).ok());
+            .and_then(parse_rfc3339);
         let line = Line {
             timestamp,
             session_id: session_id.as_ref(),
-            event_id: value.get("id").and_then(Value::as_str),
+            event_id: value.get("id").and_then(Value::as_str).and_then(ident),
         };
         if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
             events.session_touches.push(SessionTouch {
@@ -160,7 +153,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     .and_then(|context| context.get("cwd"))
                     .and_then(Value::as_str)
                 {
-                    project = Some(project_from_cwd(cwd));
+                    project = project_from_cwd(cwd);
                 }
             }
             Some("tool.execution_start") => {
@@ -285,7 +278,7 @@ fn collect_shutdown_usage(
         return;
     };
     for (model, entry) in metrics {
-        let Some(usage) = entry.get("usage") else {
+        let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
             continue;
         };
         // A syntactically valid but incomplete usage object would read as
@@ -374,6 +367,7 @@ fn turn_id(value: &Value) -> Option<String> {
         .get("data")
         .and_then(|data| data.get("turnId"))
         .and_then(Value::as_str)
+        .and_then(ident)
         .map(ToOwned::to_owned)
 }
 
@@ -428,7 +422,7 @@ fn collect_tool_event(value: &Value, line: &Line, events: &mut FileEvents) {
     let Some(data) = value.get("data") else {
         return;
     };
-    let Some(tool_name) = data.get("toolName").and_then(Value::as_str) else {
+    let Some(tool_name) = data.get("toolName").and_then(Value::as_str).and_then(ident) else {
         return;
     };
     // Without an event id, namespace tool-call IDs by session because the
@@ -436,7 +430,9 @@ fn collect_tool_event(value: &Value, line: &Line, events: &mut FileEvents) {
     let key = match (
         line.event_id,
         line.session_id,
-        data.get("toolCallId").and_then(Value::as_str),
+        data.get("toolCallId")
+            .and_then(Value::as_str)
+            .and_then(ident),
     ) {
         (Some(id), _, _) => Some(format!("copilot-tool:{id}")),
         (None, Some(sid), Some(call)) => Some(format!("copilot-tool:{sid}:{call}")),
@@ -467,8 +463,11 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
+    use time::format_description::well_known::Rfc3339;
 
     use super::*;
+    use crate::collector::ident::tests::{overlong_ident, overlong_path};
+    use crate::collector::read::tests::oversized_json;
 
     pub(super) fn write_session(root: &Path, session: &str, lines: &str) {
         let dir = root.join("session-state").join(session);
@@ -898,5 +897,87 @@ mod tests {
             .map(|event| event.usage.token_volume())
             .sum();
         assert_eq!(total, 110 + 220);
+    }
+
+    #[test]
+    fn shutdown_dated_past_the_plausible_range_reads_as_undated() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                shutdown("e-1", "2026-07-27T10:00:00.000Z", 1_000, 100),
+                shutdown("e-2", "9999-12-31T23:00:00.000Z", 1_500, 150)
+            ),
+        );
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(temp.path(), None, false, tokyo);
+
+        assert_eq!(total_volume(&collection), 1_100);
+        assert_eq!(collection.session_touches.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn event_stream_that_is_a_fifo_is_not_opened() {
+        use crate::collector::read::tests::{finishes_quickly, make_fifo};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let session = temp.path().join("session-state").join("s1");
+        fs::create_dir_all(&session).expect("test dirs should be created");
+        make_fifo(&session.join("events.jsonl"));
+
+        let root = temp.path().to_path_buf();
+        let collection = finishes_quickly(move || collect(&root, None, false, UtcOffset::UTC));
+
+        assert_eq!(collection.stats.unreadable_files, 1);
+    }
+
+    #[test]
+    fn event_past_the_line_cap_is_skipped_as_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                oversized_json(&shutdown("e-1", "2026-07-27T10:00:00.000Z", 1_000, 100)),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 1_500, 150)
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(total_volume(&collection), 1_650);
+    }
+
+    #[test]
+    fn overlong_cwd_and_tool_name_are_missing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let long = overlong_ident();
+        let deep = overlong_path();
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                format_args!(
+                    r#"{{"type":"session.start","id":"e-0","timestamp":"2026-07-27T09:00:00.000Z","data":{{"context":{{"cwd":"{deep}"}}}}}}"#
+                ),
+                format_args!(
+                    r#"{{"type":"tool.execution_start","id":"e-1","timestamp":"2026-07-27T09:30:00.000Z","data":{{"toolName":"{long}","toolCallId":"c1"}}}}"#
+                ),
+                shutdown("e-2", "2026-07-27T10:00:00.000Z", 1_000, 100)
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.tool_events.is_empty());
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.usage_events[0].project, None);
     }
 }

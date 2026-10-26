@@ -1,11 +1,14 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use time::UtcOffset;
 
+use crate::collector::ident::{ident, ident_string};
+use crate::collector::json::parse_bounded;
 use crate::collector::project_from_cwd;
+use crate::collector::store::Store;
 use crate::model::{Collection, DurationEvent, SessionTouch, SourceKind, ToolEvent, UsageEvent};
 
 use super::{Generation, ms_to_offset, token_usage};
@@ -17,13 +20,19 @@ struct SessionMeta {
 }
 
 pub(super) fn parse_session_messages(
-    conn: &Connection,
+    conn: &Store,
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
     tools_from: &mut HashMap<String, Generation>,
 ) {
+    if !conn.has_table(
+        "session_message",
+        &["id", "session_id", "type", "seq", "time_created", "data"],
+    ) {
+        return;
+    }
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, session_id, type, seq, time_created, data FROM session_message \
          WHERE time_created >= ?1",
@@ -32,9 +41,10 @@ pub(super) fn parse_session_messages(
     };
     let sessions = session_meta(conn);
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
+        conn.charge(row, 6)?;
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
+            ident_string(row.get::<_, String>(1)?),
             row.get::<_, String>(2)?,
             row.get::<_, i64>(3)?,
             row.get::<_, i64>(4)?,
@@ -46,8 +56,11 @@ pub(super) fn parse_session_messages(
 
     for row in rows {
         collection.stats.lines_seen += 1;
-        let Ok((id, session_id, kind, seq, time_created, data)) = row else {
+        let Ok((id, Some(session_id), kind, seq, time_created, data)) = row else {
             collection.stats.parse_errors += 1;
+            if conn.spent() {
+                break;
+            }
             continue;
         };
         if seen.contains(&id) {
@@ -62,7 +75,7 @@ pub(super) fn parse_session_messages(
         {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        let Some(value) = parse_bounded(&data) else {
             collection.stats.parse_errors += 1;
             continue;
         };
@@ -93,6 +106,7 @@ pub(super) fn parse_session_messages(
             model: value
                 .pointer("/model/id")
                 .and_then(Value::as_str)
+                .and_then(ident)
                 .map(ToOwned::to_owned),
             source_kind: SourceKind::Main,
             attribution_agent: None,
@@ -100,7 +114,7 @@ pub(super) fn parse_session_messages(
             project: meta
                 .and_then(|meta| meta.directory.as_deref())
                 .filter(|dir| !dir.is_empty())
-                .map(project_from_cwd),
+                .and_then(project_from_cwd),
             usage: token_usage(&value),
             granularity: crate::model::UsageGranularity::Call,
         });
@@ -150,7 +164,7 @@ fn push_tools(
         .flatten()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"));
     for tool in tools {
-        let Some(name) = tool.get("name").and_then(Value::as_str) else {
+        let Some(name) = tool.get("name").and_then(Value::as_str).and_then(ident) else {
             continue;
         };
         let start_ms = tool
@@ -167,13 +181,17 @@ fn push_tools(
     }
 }
 
-fn session_meta(conn: &Connection) -> HashMap<String, SessionMeta> {
+fn session_meta(conn: &Store) -> HashMap<String, SessionMeta> {
     let mut sessions: HashMap<String, SessionMeta> = HashMap::new();
     for table in ["session_v2", "session"] {
+        if !conn.has_table(table, &["id", "directory"]) {
+            continue;
+        }
         let Ok(mut stmt) = conn.prepare(&format!("SELECT id, directory FROM {table}")) else {
             continue;
         };
         let Ok(rows) = stmt.query_map([], |row| {
+            conn.charge(row, 2)?;
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         }) else {
             continue;
@@ -194,7 +212,10 @@ fn session_meta(conn: &Connection) -> HashMap<String, SessionMeta> {
 /// The highest parent `seq` each fork copied. A fork whose parent or
 /// boundary row is gone keeps all its rows: they may be the only surviving
 /// copy of that history.
-fn fork_cutoffs(conn: &Connection) -> Vec<(String, i64)> {
+fn fork_cutoffs(conn: &Store) -> Vec<(String, i64)> {
+    if !conn.has_table("session_v2", &["id", "fork_session_id", "fork_boundary"]) {
+        return Vec::new();
+    }
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, fork_session_id, fork_boundary FROM session_v2 \
          WHERE fork_session_id IS NOT NULL AND fork_boundary IS NOT NULL",
@@ -202,6 +223,7 @@ fn fork_cutoffs(conn: &Connection) -> Vec<(String, i64)> {
         return Vec::new();
     };
     let Ok(rows) = stmt.query_map([], |row| {
+        conn.charge(row, 3)?;
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -212,7 +234,7 @@ fn fork_cutoffs(conn: &Connection) -> Vec<(String, i64)> {
     };
     rows.flatten()
         .filter_map(|(fork, parent, boundary)| {
-            let boundary = serde_json::from_str::<Value>(&boundary).ok()?;
+            let boundary = parse_bounded(&boundary)?;
             let inclusive = match boundary.get("type").and_then(Value::as_str)? {
                 "through" => true,
                 "before" => false,

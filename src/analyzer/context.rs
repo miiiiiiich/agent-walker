@@ -7,6 +7,7 @@ use crate::model::{
     Collection, ContextBand, ContextReason, ContextSummary, Provider, SourceKind, UsageEvent,
     UsageGranularity,
 };
+use crate::timestamp::local_date;
 
 /// Shared context-size bands let the Total tab add provider summaries element-wise.
 const BANDS: [(&str, u64); 4] = [
@@ -178,8 +179,8 @@ pub(super) fn context_summary(
         return None;
     }
     let in_window = |timestamp: OffsetDateTime| {
-        let date = timestamp.to_offset(local_offset).date();
-        date >= window_start && date <= period_end
+        local_date(timestamp, local_offset)
+            .is_some_and(|date| date >= window_start && date <= period_end)
     };
 
     let mut summary = empty_summary();

@@ -1,21 +1,27 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde_json::Value;
 use time::UtcOffset;
 
+use crate::collector::ident::{ident, ident_string};
+use crate::collector::json::parse_bounded;
 use crate::collector::project_from_cwd;
+use crate::collector::store::Store;
 use crate::model::{Collection, DurationEvent, SessionTouch, SourceKind, ToolEvent, UsageEvent};
 
 use super::{Generation, ms_to_offset, token_usage};
 
 pub(super) fn parse_messages(
-    conn: &Connection,
+    conn: &Store,
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
 ) {
+    if !conn.has_table("message", &["id", "session_id", "time_created", "data"]) {
+        return;
+    }
     // Filter on the indexed `time_created` column so SQLite skips out-of-window
     // rows before we ever parse their JSON in Rust.
     let Ok(mut stmt) =
@@ -27,9 +33,12 @@ pub(super) fn parse_messages(
         // `session_id` is NOT NULL in OpenCode's own schema, but a corrupt DB
         // could still carry a NULL — default it rather than dropping the row
         // (and its tokens) as a type-mismatch parse error.
+        conn.charge(row, 3)?;
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            row.get::<_, Option<String>>(1)?
+                .and_then(ident_string)
+                .unwrap_or_default(),
             row.get::<_, String>(2)?,
         ))
     }) else {
@@ -42,6 +51,9 @@ pub(super) fn parse_messages(
             // A row-level SQLite error (type mismatch, mid-scan corruption)
             // should surface in the stats, not vanish like `flatten()` would.
             collection.stats.parse_errors += 1;
+            if conn.spent() {
+                break;
+            }
             continue;
         };
         if seen.contains(&id) {
@@ -49,7 +61,7 @@ pub(super) fn parse_messages(
         }
         // Claim the id only once the row parses, so a corrupt legacy row
         // doesn't hide its intact migrated copy.
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        let Some(value) = parse_bounded(&data) else {
             collection.stats.parse_errors += 1;
             continue;
         };
@@ -77,6 +89,7 @@ pub(super) fn parse_messages(
             model: value
                 .get("modelID")
                 .and_then(Value::as_str)
+                .and_then(ident)
                 .map(ToOwned::to_owned),
             source_kind: SourceKind::Main,
             attribution_agent: None,
@@ -84,7 +97,7 @@ pub(super) fn parse_messages(
             project: value
                 .pointer("/path/cwd")
                 .and_then(Value::as_str)
-                .map(project_from_cwd),
+                .and_then(project_from_cwd),
             // OpenCode records a per-message cost, but like every provider we
             // price from LiteLLM for consistency (see docs/opencode).
             usage,
@@ -111,13 +124,19 @@ pub(super) fn parse_messages(
 }
 
 pub(super) fn parse_tool_parts(
-    conn: &Connection,
+    conn: &Store,
     floor_ms: i64,
     local_offset: UtcOffset,
     collection: &mut Collection,
     seen: &mut HashSet<String>,
     tools_from: &mut HashMap<String, Generation>,
 ) {
+    if !conn.has_table(
+        "part",
+        &["id", "message_id", "session_id", "time_created", "data"],
+    ) {
+        return;
+    }
     // Filter only on the indexed `time_created` integer column in SQL, and do the
     // `type == "tool"` check in Rust. Putting `json_extract` in the WHERE clause
     // makes a single malformed `data` row raise "malformed JSON" and abort the
@@ -131,10 +150,13 @@ pub(super) fn parse_tool_parts(
         // `session_id` is NOT NULL in OpenCode's own schema, but a corrupt DB
         // could still carry a NULL — default it rather than dropping the row as
         // a type-mismatch parse error.
+        conn.charge(row, 5)?;
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            row.get::<_, Option<String>>(2)?
+                .and_then(ident_string)
+                .unwrap_or_default(),
             row.get::<_, i64>(3)?,
             row.get::<_, String>(4)?,
         ))
@@ -146,16 +168,19 @@ pub(super) fn parse_tool_parts(
         collection.stats.lines_seen += 1;
         let Ok((id, message_id, session_id, time_created, data)) = row else {
             collection.stats.parse_errors += 1;
+            if conn.spent() {
+                break;
+            }
             continue;
         };
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        let Some(value) = parse_bounded(&data) else {
             collection.stats.parse_errors += 1;
             continue;
         };
         if value.get("type").and_then(Value::as_str) != Some("tool") {
             continue;
         }
-        let Some(tool_name) = value.get("tool").and_then(Value::as_str) else {
+        let Some(tool_name) = value.get("tool").and_then(Value::as_str).and_then(ident) else {
             continue;
         };
         if let Some(message_id) = message_id
@@ -189,9 +214,21 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
+    use crate::collector::ident::tests::{overlong_ident, overlong_path};
+    use crate::collector::json::tests::over_structured_line;
     use crate::collector::opencode::collect;
     use crate::collector::opencode::fixtures::{ASSISTANT_DONE_MS, ASSISTANT_MS, write_db};
     use crate::model::Provider;
+
+    fn insert_message(dir: &std::path::Path, id: &str, created_ms: i64, data: &str) {
+        Connection::open(dir.join("opencode.db"))
+            .expect("open temp db")
+            .execute(
+                "INSERT INTO message VALUES (?1, 's1', ?2, ?2, ?3)",
+                params![id, created_ms, data],
+            )
+            .expect("insert message");
+    }
 
     #[test]
     fn parses_tokens_tools_durations() {
@@ -316,5 +353,128 @@ mod tests {
         let collection = collect(dir.path(), None, false, UtcOffset::UTC);
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 0);
+    }
+
+    #[test]
+    fn message_dated_past_the_plausible_range_is_skipped() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        insert_message(
+            dir.path(),
+            "m9",
+            0,
+            r#"{"role":"assistant","modelID":"x","tokens":{"input":1,"output":1},"time":{"created":253402290000000}}"#,
+        );
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(dir.path(), None, false, tokyo);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert!(collection.usage_events[0].timestamp.is_some());
+    }
+
+    #[test]
+    fn over_structured_message_is_a_parse_error() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        insert_message(dir.path(), "m9", ASSISTANT_MS, &over_structured_line());
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn message_view_is_not_read() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE hidden (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE VIEW message AS SELECT * FROM hidden;",
+        )
+        .expect("create schema");
+        drop(conn);
+        Connection::open(dir.path().join("opencode.db"))
+            .expect("open temp db")
+            .execute(
+                "INSERT INTO hidden VALUES ('m1', 's1', ?1, ?1, ?2)",
+                params![
+                    ASSISTANT_MS,
+                    r#"{"role":"assistant","tokens":{"input":1,"output":1},"time":{"created":1781542363256}}"#
+                ],
+            )
+            .expect("insert");
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert!(collection.usage_events.is_empty());
+    }
+
+    #[test]
+    fn overlong_session_model_and_cwd_are_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        let long = overlong_ident();
+        let deep = overlong_path();
+        Connection::open(dir.path().join("opencode.db"))
+            .expect("open temp db")
+            .execute(
+                "INSERT INTO message VALUES ('m9', ?1, ?2, ?2, ?3)",
+                params![
+                    long,
+                    ASSISTANT_MS,
+                    format!(
+                        r#"{{"role":"assistant","modelID":"{long}","path":{{"cwd":"{deep}"}},"tokens":{{"input":1,"output":1}},"time":{{"created":{ASSISTANT_MS}}}}}"#
+                    )
+                ],
+            )
+            .expect("insert message");
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        let event = collection
+            .usage_events
+            .iter()
+            .find(|e| e.usage.token_volume() == 2)
+            .expect("the row still counts");
+        assert_eq!(event.session_id.as_deref(), Some(""));
+        assert_eq!(event.model, None);
+        assert_eq!(event.project, None);
+    }
+
+    /// The table-type check once matched SQL text, which a line break
+    /// inside `CREATE VIRTUAL TABLE` defeated; FTS5 then read the view
+    /// named as its external content. SQLite writes that prefix itself, so
+    /// only a crafted file carries the line break.
+    #[test]
+    fn virtual_message_table_is_not_read() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(
+            "CREATE TABLE hidden (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE VIEW shown AS SELECT rowid, * FROM hidden;
+             CREATE VIRTUAL TABLE message USING fts5(id, session_id, time_created, data, content='shown');
+             PRAGMA writable_schema = ON;
+             UPDATE sqlite_schema SET sql = replace(sql, 'VIRTUAL TABLE', 'VIRTUAL' || char(10) || 'TABLE')
+                 WHERE name = 'message';
+             PRAGMA writable_schema = OFF;",
+        )
+        .expect("create schema");
+        conn.execute(
+            "INSERT INTO hidden VALUES ('m1', 's1', ?1, ?2)",
+            params![
+                ASSISTANT_MS,
+                r#"{"role":"assistant","tokens":{"input":1,"output":1},"time":{"created":1781542363256}}"#
+            ],
+        )
+        .expect("insert");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert!(collection.usage_events.is_empty());
     }
 }

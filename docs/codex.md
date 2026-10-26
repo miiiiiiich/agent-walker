@@ -22,9 +22,13 @@ directory); between two of the same kind the larger file wins. The frame
 header's content size is not trusted for this choice. Keys come from the plain
 name, so a file that flips representation between runs is not counted twice.
 
-Decoding is bounded: a line longer than 64 MiB is skipped as a parse error
-without being buffered, and a `.zst` stops parsing (one parse error, earlier
-rows kept) once it decodes past 64× its on-disk size (at least 64 MiB).
+Decoding is bounded: a line longer than 64 MiB, or one holding more than
+262,144 JSON array elements and object entries, is skipped as a parse error
+without being parsed. A `.zst` is decoded to its end like the plain rollout it
+came from. Only regular files are opened; a symlink to one is followed, while a
+FIFO or device counts as an unreadable file. A timestamp before 1970 or from
+year 3000 on is treated as missing. An id or name longer than 1,024 bytes, or a
+path longer than 4,096, is treated as missing.
 
 ## What's captured
 

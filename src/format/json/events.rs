@@ -144,8 +144,8 @@ fn sessions(collection: &Collection, window: EventWindow) -> Vec<SessionDto> {
         .map(|((session_id, date), (first_at, last_at))| SessionDto {
             session_id: session_id.to_owned(),
             date,
-            first_at: first_at.to_offset(window.offset),
-            last_at: last_at.to_offset(window.offset),
+            first_at: crate::timestamp::to_local(first_at, window.offset).unwrap_or(first_at),
+            last_at: crate::timestamp::to_local(last_at, window.offset).unwrap_or(last_at),
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
