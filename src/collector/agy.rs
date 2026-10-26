@@ -9,6 +9,8 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
 use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
 
+mod conv;
+
 const CLI_STORE: &str = "antigravity-cli";
 const APP_STORE: &str = "antigravity";
 
@@ -44,7 +46,7 @@ pub fn collect(
     });
     merge_into(&mut collection, per_file);
 
-    let usage = super::agy_conv::collect_usage(
+    let usage = conv::collect_usage(
         &[cli, root.join(APP_STORE)],
         mtime_floor,
         local_offset,
@@ -256,10 +258,8 @@ mod tests {
     use tempfile::TempDir;
     use time::macros::{date, datetime};
 
+    use super::conv::tests::{served_only_gen_blob, step_metadata, write_dated_conversation};
     use super::*;
-    use crate::collector::agy_conv::tests::{
-        served_only_gen_blob, step_metadata, write_dated_conversation,
-    };
 
     #[test]
     fn collects_antigravity_history_model_events_and_tool_confirmations() {
