@@ -46,11 +46,15 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # no cache: this job holds the X credentials, so its dependencies
+      # come only from PyPI, hash-checked against scripts/uv.lock
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           python-version: "3.12"
+          enable-cache: false
       - name: Install dependencies
-        run: pip install requests-oauthlib==2.0.0
+        working-directory: scripts
+        run: uv sync --locked --no-dev
       - name: Resolve release payload
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,7 +63,7 @@ jobs:
           # package-qualified tags contain a slash, which must not become
           # an extra path segment
           TAG_PATH=$(jq -rn --arg t "$TAG" '$t|@uri')
-          gh api "repos/${{ github.repository }}/releases/tags/$TAG_PATH" \
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_PATH" \
             --jq '{tag_name, body, draft, prerelease}' > release.json
           if [ "$(jq -r .draft release.json)" = "true" ]; then
             echo "release $TAG is still a draft; not tweeting"
@@ -97,7 +101,8 @@ jobs:
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-        run: python scripts/tweet_release.py
+        # run from the repo root: the script reads ./release.json
+        run: uv run --project scripts --no-sync python scripts/tweet_release.py
 
   # a failed host step can leave partially uploaded assets on the draft;
   # cleared here (not in the draft job) because "re-run failed jobs"
@@ -111,7 +116,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     permissions:
-      contents: write
+      contents: write # delete assets from the draft release
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.workflow_run.head_branch }}
@@ -122,7 +127,7 @@ jobs:
     steps:
       - name: Clear assets that predate the failed run
         run: |
-          if [ "$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
+          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" != "true" ]; then
             echo "no draft for $TAG; nothing to clean"
             exit 0
           fi
@@ -132,8 +137,8 @@ jobs:
           # agent-walker-notes.zip survive recovery
           TRIPLES='aarch64-apple-darwin|aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc'
           DIST_NAMES="^(agent-walker-($TRIPLES)\\.(tar\\.xz|zip)(\\.sha256)?|agent-walker-npm-package\\.tar\\.gz|dist-manifest\\.json|sha256\\.sum|source\\.tar\\.gz(\\.sha256)?)$"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq ".assets[] | select(.createdAt < \"$CUTOFF\" and (.name | test(\"$DIST_NAMES\"))) | .name" | while IFS= read -r asset; do
             echo "deleting stale asset: $asset"
-            gh release delete-asset "$TAG" "$asset" -y --repo "${{ github.repository }}"
+            gh release delete-asset "$TAG" "$asset" -y --repo "$GITHUB_REPOSITORY"
           done

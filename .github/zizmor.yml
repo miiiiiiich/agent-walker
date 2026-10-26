@@ -1,0 +1,47 @@
+# Every entry below is in release.yml, which cargo-dist generates from
+# dist-workspace.toml (`dist generate`; its plan job rejects hand edits), and
+# none of them can be changed through dist's config — only in dist's template.
+# Entries are pinned to file:line, so a regenerated release.yml that moves a
+# finding fails the zizmor job until the finding is reviewed here again.
+rules:
+  excessive-permissions:
+    ignore:
+      # workflow-level `contents: write` is hardcoded in dist; the host job
+      # needs it to upload into and publish the draft release
+      - release.yml:18
+  template-injection:
+    ignore:
+      # github.ref_name, directly or via the plan job's `tag` / `tag-flag`
+      # outputs. It is expanded only on tag pushes (on pull_request the
+      # expressions take the 'plan' / '' branch). Pushing a tag needs write
+      # access and runs the tagged commit's own copy of this workflow, so a
+      # crafted tag name can do nothing its author could not already do by
+      # editing the workflow on that commit.
+      - release.yml:80
+      - release.yml:154
+      - release.yml:211
+      - release.yml:261
+      - release.yml:288
+      - release.yml:290
+      # matrix.* is `dist plan` output over the checked-out commit's own dist
+      # config: the same trust as the workflow file itself
+      - release.yml:140
+      - release.yml:150
+  secrets-inherit:
+    ignore:
+      # dist emits `secrets: inherit` for every custom job; neither called
+      # workflow (draft-release.yml, publish-npm.yml) reads a secret
+      - release.yml:91
+      - release.yml:297
+  unpinned-images:
+    ignore:
+      # no target in dist-workspace.toml configures a container, so the
+      # expression is always null
+      - release.yml:116
+  self-repository:
+    ignore:
+      # dist renders custom jobs as `uses: ./.github/workflows/<job>.yml`
+      # and has no option for the `$/` form; a reusable-workflow call is
+      # resolved from the run's own commit, not from the runner's checkout
+      - release.yml:91
+      - release.yml:297

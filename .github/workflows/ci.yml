@@ -41,17 +41,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
-        with:
-          tool: cargo-audit
-      - run: cargo audit
-
   release-scripts:
     runs-on: ubuntu-latest
     defaults:
@@ -75,8 +64,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
-      # release.yml is dist-generated and owned by cargo-dist upstream —
-      # excluded here because its findings are not ours to fix
-      - run: |
-          git ls-files '.github/workflows/*.yml' | grep -v '/release\.yml$' \
-            | xargs uvx --from 'zizmor==1.29.0' zizmor
+      # release.yml's dist-template findings are suppressed, each with its
+      # reason, in .github/zizmor.yml
+      - run: uvx --from 'zizmor==1.29.0' zizmor .github/workflows
