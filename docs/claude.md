@@ -105,6 +105,27 @@ base value, as in LiteLLM's own calculator. Claude Haiku 5.5 is tiered this way
 (over 100,000 prompt tokens); Opus and Sonnet 5.5 price their whole 1M window
 at the base rates, and LiteLLM lists no tier for them.
 
+**Rates are bounds-checked**, for every provider. A rate must be a number from
+0 to $0.01 per token ($10,000 per million tokens). That is about 16× the
+highest rate agent-walker reads from LiteLLM's table (o1-pro output, $600 per
+million), so no listed model is refused, but a corrupted or tampered entry
+cannot price a month of tokens in the millions. A base rate outside the bounds
+drops its model, which then shows as unpriced (—), never as $0. A tier rate
+outside the bounds drops only the tier, and the model prices at its base
+rates. A tier threshold under 1,000 prompt tokens is ignored, and the next
+listed threshold is used. The same checks run again when the stored copy,
+`~/.cache/agent-walker/pricing.json`, is read back. A stored fetch stamp that
+is not a date is dropped, so the table is fetched again.
+
+The table is fetched over HTTPS only, redirects included (at most 3), and a
+body over 32 MB once decoded is refused. Only the fields pricing uses are
+kept while the table is parsed, and a table with more than 50,000 entries is
+refused whole (LiteLLM's has about 4,300); the stored copy is read under the
+same limit. When the server answers but the table
+is refused, agent-walker prints a warning and keeps pricing with the stored
+copy; the date in the COST panel ("rates YYYY-MM-DD") shows how old it is.
+Being offline prints nothing (`--verbose` shows it).
+
 If you are on a Claude subscription (Pro/Max), this is **not your bill** — it is
 what the same usage would cost at pay-as-you-go API rates. Use it to answer "is
 the subscription worth it," not "what did I pay."
