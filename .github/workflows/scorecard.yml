@@ -1,0 +1,39 @@
+name: Scorecard
+
+# Results go only to the public Scorecard viewer
+# (https://scorecard.dev/viewer/?uri=github.com/miiiiiiich/agent-walker),
+# not to code scanning, so the job needs no `security-events: write`.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 3 * * 2"
+  branch_protection_rule:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read the repository and its workflows
+      actions: read # read workflow runs (CI-Tests, Dangerous-Workflow)
+      id-token: write # OIDC token that signs the published results
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Exception to digest pinning: this commit's action.yaml runs
+      # docker://ghcr.io/ossf/scorecard-action:v2.5.0 by tag, and no upstream
+      # release pins the image by digest.
+      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
