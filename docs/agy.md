@@ -83,7 +83,7 @@ three output fields:
 So a re-meaning of the *output* fields degrades to "no/less data"; the gap is a
 silent re-meaning of an *input* field, which no row-level invariant can catch
 without an input checksum the format doesn't provide. See
-`src/collector/agy_conv.rs`.
+`src/collector/agy/conv.rs`.
 
 ## Row time
 
