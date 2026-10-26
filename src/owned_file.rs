@@ -1,7 +1,8 @@
-//! Files agent-walker writes on its own (the parse cache, the card saved to
-//! Downloads) and reads back. Their names are fixed and their directories are
-//! ones other software also writes into — an archive unpacked into Downloads
-//! can carry a symlink — so nothing found at those paths is trusted.
+//! Files agent-walker writes on its own (the parse cache, the pricing
+//! snapshot, the card saved to Downloads) and reads back. Their names are
+//! fixed and their directories are ones other software also writes into — an
+//! archive unpacked into Downloads can carry a symlink — so nothing found at
+//! those paths is trusted.
 
 use std::collections::hash_map::RandomState;
 use std::ffi::{OsStr, OsString};

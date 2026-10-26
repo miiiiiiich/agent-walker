@@ -1,68 +1,48 @@
 //! Map `LiteLLM`'s pricing table onto the rates `cost` prices with.
 use std::collections::HashMap;
 
-use serde_json::Value;
-
+use super::validate::in_bounds;
 use super::{LongContext, ModelPricing, Pricing};
 
-pub(super) fn models_from_upstream(
-    upstream: &HashMap<String, Value>,
-) -> HashMap<String, ModelPricing> {
-    let mut models = HashMap::new();
-    for (key, entry) in upstream {
-        // Provider/region variants are dropped in favor of bare model ids —
-        // EXCEPT `xai/`: LiteLLM registers Grok models only under the
-        // provider prefix (`xai/grok-4.5`, no bare key), so the prefix is
-        // stripped so those models can resolve to a price.
-        let key = key.strip_prefix("xai/").unwrap_or(key);
-        if key.contains('/')
-            || key.starts_with("anthropic.")
-            || key.starts_with("global.")
-            || key.starts_with("us.")
-            || key.starts_with("eu.")
-            || key.starts_with("au.")
-            || key.starts_with("apac.")
-        {
-            continue; // provider/region variants; keep bare model ids only
-        }
-        if !matches!(
-            entry.get("mode").and_then(Value::as_str),
-            Some("chat" | "completion" | "responses")
-        ) {
-            continue;
-        }
-        // Reject non-finite, negative, or absurd rates (> $1/token) so a bad
-        // upstream entry cannot poison cached cost estimates.
-        let cost = |field: &str| {
-            entry
-                .get(field)
-                .and_then(Value::as_f64)
-                .filter(|value| value.is_finite() && (0.0..1.0).contains(value))
-        };
-        let Some(input) = cost("input_cost_per_token") else {
-            continue;
-        };
-        let (write_short, write_long) = write_rates(
-            input,
-            cost("cache_creation_input_token_cost"),
-            cost("cache_creation_input_token_cost_above_1hr"),
-        );
-        let base = Pricing {
-            input,
-            output: cost("output_cost_per_token").unwrap_or(0.0),
-            cache_read: cost("cache_read_input_token_cost").unwrap_or(0.0),
-            cache_write_5m: write_short,
-            cache_write_1h: write_long,
-        };
-        models.insert(
-            key.to_owned(),
-            ModelPricing {
-                base,
-                long_context: long_context(entry, &base, &cost),
-            },
-        );
+mod table;
+
+use table::{CACHE_READ, Entry, INPUT, OUTPUT, Rates, Table, WRITE_1H, WRITE_5M};
+
+/// A listed rate out of bounds refuses its model (or tier) instead of
+/// counting as unlisted: an unlisted output or cache-read rate prices at $0,
+/// and the total would pass as complete.
+fn refuses(rates: &Rates) -> bool {
+    rates.iter().flatten().any(|rate| !in_bounds(*rate))
+}
+
+pub(super) fn models_from_table(
+    raw: &[u8],
+) -> Result<HashMap<String, ModelPricing>, serde_json::Error> {
+    let Table(entries) = serde_json::from_slice(raw)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|(id, entry)| Some((id, model_pricing(&entry)?)))
+        .collect())
+}
+
+fn model_pricing(entry: &Entry) -> Option<ModelPricing> {
+    if refuses(&entry.rates) {
+        return None;
     }
-    models
+    let listed = |slot: usize| entry.rates[slot];
+    let input = listed(INPUT)?;
+    let (write_short, write_long) = write_rates(input, listed(WRITE_5M), listed(WRITE_1H));
+    let base = Pricing {
+        input,
+        output: listed(OUTPUT).unwrap_or(0.0),
+        cache_read: listed(CACHE_READ).unwrap_or(0.0),
+        cache_write_5m: write_short,
+        cache_write_1h: write_long,
+    };
+    Some(ModelPricing {
+        base,
+        long_context: long_context(entry, &base),
+    })
 }
 
 /// A write rate that is missing or 0 falls back to the input rate: write
@@ -78,44 +58,35 @@ fn write_rates(input: f64, short: Option<f64>, long: Option<f64>) -> (f64, f64) 
 /// A rate the tier leaves out keeps its listed base value, matching
 /// `LiteLLM`'s own calculator; a write rate listed nowhere follows the tier's
 /// input rate, by the `write_rates` rule. Of several thresholds only the
-/// lowest is kept: one tier per model keeps pricing a plain `Copy` value.
-fn long_context(
-    entry: &Value,
-    base: &Pricing,
-    cost: &impl Fn(&str) -> Option<f64>,
-) -> Option<LongContext> {
-    let (above_prompt_tokens, label) = entry
-        .as_object()?
-        .keys()
-        .filter_map(|key| {
-            let label = key
-                .strip_prefix("input_cost_per_token_above_")?
-                .strip_suffix("_tokens")?;
-            let tokens = match label.strip_suffix('k') {
-                Some(thousands) => thousands.parse::<u64>().ok()?.checked_mul(1_000)?,
-                None => label.parse::<u64>().ok()?,
-            };
-            (tokens > 0).then_some((tokens, label))
-        })
-        .min_by_key(|(tokens, _)| *tokens)?;
-    let tier = |field: &str| cost(&format!("{field}_above_{label}_tokens"));
-    let input = tier("input_cost_per_token")?;
-    let write = |field: &str| {
-        tier(field)
+/// lowest at or over the floor is kept: one tier per model keeps pricing a
+/// plain `Copy` value.
+fn long_context(entry: &Entry, base: &Pricing) -> Option<LongContext> {
+    if entry.too_many_tiers {
+        return None;
+    }
+    let tier = entry
+        .tiers
+        .iter()
+        .filter(|tier| tier.has_input)
+        .min_by(|left, right| {
+            (left.above_prompt_tokens, &left.label).cmp(&(right.above_prompt_tokens, &right.label))
+        })?;
+    if refuses(&tier.rates) {
+        return None;
+    }
+    let input = tier.rates[INPUT]?;
+    let write = |slot: usize| {
+        tier.rates[slot]
             .filter(|rate| *rate > 0.0)
-            .or_else(|| cost(field))
+            .or(entry.rates[slot])
     };
-    let (write_short, write_long) = write_rates(
-        input,
-        write("cache_creation_input_token_cost"),
-        write("cache_creation_input_token_cost_above_1hr"),
-    );
+    let (write_short, write_long) = write_rates(input, write(WRITE_5M), write(WRITE_1H));
     Some(LongContext {
-        above_prompt_tokens,
+        above_prompt_tokens: tier.above_prompt_tokens,
         rates: Pricing {
             input,
-            output: tier("output_cost_per_token").unwrap_or(base.output),
-            cache_read: tier("cache_read_input_token_cost").unwrap_or(base.cache_read),
+            output: tier.rates[OUTPUT].unwrap_or(base.output),
+            cache_read: tier.rates[CACHE_READ].unwrap_or(base.cache_read),
             cache_write_5m: write_short,
             cache_write_1h: write_long,
         },
@@ -144,14 +115,13 @@ pub(super) fn backfill_write_rates(models: &mut HashMap<String, ModelPricing>) {
 mod tests {
     use super::*;
 
-    fn upstream(entries: Value) -> HashMap<String, ModelPricing> {
-        let upstream: HashMap<String, Value> = serde_json::from_value(entries).unwrap();
-        models_from_upstream(&upstream)
+    fn upstream(entries: &serde_json::Value) -> HashMap<String, ModelPricing> {
+        models_from_table(entries.to_string().as_bytes()).unwrap()
     }
 
     #[test]
     fn long_context_tiers_parse_with_every_rate() {
-        let models = upstream(serde_json::json!({
+        let models = upstream(&serde_json::json!({
             "claude-haiku-5-5": {
                 "mode": "chat",
                 "input_cost_per_token": 1e-7,
@@ -184,7 +154,7 @@ mod tests {
     /// tier at all.
     #[test]
     fn partial_or_unusable_tiers_fall_back() {
-        let models = upstream(serde_json::json!({
+        let models = upstream(&serde_json::json!({
             "gpt-5.5": {
                 "mode": "chat",
                 "input_cost_per_token": 5e-6,
@@ -211,11 +181,80 @@ mod tests {
         assert!(models["batch-only"].long_context.is_none());
     }
 
+    /// Out of bounds, a base rate drops its model (unpriced, never $0) and a
+    /// tier rate drops only the tier.
+    #[test]
+    fn rates_out_of_bounds_refuse_their_model_or_tier() {
+        let models = upstream(&serde_json::json!({
+            "o1-pro-like": {
+                "mode": "chat",
+                "input_cost_per_token": 1.5e-4,
+                "output_cost_per_token": 6e-4
+            },
+            "inflated-input": {"mode": "chat", "input_cost_per_token": 0.5},
+            "inflated-output": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 0.05
+            },
+            "negative-cache-read": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "cache_read_input_token_cost": -1e-7
+            },
+            "inflated-write": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "cache_creation_input_token_cost_above_1hr": 0.9
+            },
+            "inflated-tier-output": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "input_cost_per_token_above_200k_tokens": 2e-6,
+                "output_cost_per_token_above_200k_tokens": 0.5
+            }
+        }));
+        let mut kept: Vec<&str> = models.keys().map(String::as_str).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["inflated-tier-output", "o1-pro-like"]);
+        assert!(models["inflated-tier-output"].long_context.is_none());
+    }
+
+    /// A threshold of a few tokens would bill nearly every request at the
+    /// tier; it is skipped and the next listed threshold is used.
+    #[test]
+    fn thresholds_below_the_floor_are_skipped() {
+        let models = upstream(&serde_json::json!({
+            "one-token": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "input_cost_per_token_above_1_tokens": 9e-3,
+                "input_cost_per_token_above_200k_tokens": 2e-6
+            },
+            "below-floor-only": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "input_cost_per_token_above_999_tokens": 2e-6
+            },
+            "at-floor": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "input_cost_per_token_above_1k_tokens": 2e-6
+            }
+        }));
+        let tier = models["one-token"].long_context.expect("200k tier");
+        assert_eq!(tier.above_prompt_tokens, 200_000);
+        assert!((tier.rates.input - 2e-6).abs() < 1e-15);
+        assert!(models["below-floor-only"].long_context.is_none());
+        let floor = models["at-floor"].long_context.expect("1k tier");
+        assert_eq!(floor.above_prompt_tokens, 1_000);
+    }
+
     /// Codex reports cache writes apart from input; a model with no write
     /// rate in `LiteLLM` must not price them at $0.
     #[test]
     fn missing_or_zero_write_rates_fall_back_to_input() {
-        let models = upstream(serde_json::json!({
+        let models = upstream(&serde_json::json!({
             "gpt-5.5": {
                 "mode": "chat",
                 "input_cost_per_token": 5e-6,
