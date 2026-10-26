@@ -1,0 +1,50 @@
+# Supply-chain gate run by the `audit` job (.github/workflows/audit.yml).
+# Every exception below carries its reason; adding one without a reason is
+# a review blocker.
+
+[graph]
+# no `targets` filter: a crate that only builds for another platform still
+# lands in Cargo.lock and still ships in source.tar.gz
+all-features = true
+
+[advisories]
+version = 2
+# vulnerabilities always fail; unsound, unmaintained and yanked fail too —
+# a warning-only gate lets them sit in the lockfile unnoticed
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2025-0141", reason = "bincode 1.x is unmaintained, not vulnerable; it only encodes the local parse cache and is replaced by the cache-format change" },
+]
+
+[licenses]
+version = 2
+# exactly what the current graph needs; a new license is a decision, not a
+# lockfile side effect
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  # webpki-roots (via ureq/rustls): the Mozilla CA bundle is data, licensed
+  # as such; permissive, no copyleft
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  # option-ext (via dirs): file-level copyleft only, unmodified upstream
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+wildcards = "deny"
+# duplicates cost binary size, not safety; not this gate's job
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

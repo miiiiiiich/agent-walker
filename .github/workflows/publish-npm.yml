@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
-      id-token: write
+      id-token: write # npm trusted publishing + provenance
     env:
       PLAN: ${{ inputs.plan }}
     steps:

@@ -11,7 +11,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-All of these must pass; CI enforces them and additionally runs `cargo audit`. The crate uses `clippy::pedantic` —
+All of these must pass; CI enforces them and additionally runs `cargo deny check` (policy in `deny.toml`). The crate uses `clippy::pedantic` —
 narrow `#[allow]`s with a `reason` are fine where the lint hurts readability.
 
 ## Useful dev flags
