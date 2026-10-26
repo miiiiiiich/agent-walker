@@ -24,6 +24,7 @@ mod cost;
 mod demo;
 mod format;
 mod model;
+mod owned_file;
 mod paths;
 mod share;
 mod ui;
