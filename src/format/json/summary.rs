@@ -143,8 +143,10 @@ impl SummaryDto {
                     .busiest_hour
                     .map(|(hour, tokens)| HourDto { hour, tokens }),
                 longest_session: summary.longest_session.as_ref().map(|span| SessionSpanDto {
-                    started_at: span.started_at.to_offset(offset),
-                    ended_at: span.ended_at.to_offset(offset),
+                    started_at: crate::timestamp::to_local(span.started_at, offset)
+                        .unwrap_or(span.started_at),
+                    ended_at: crate::timestamp::to_local(span.ended_at, offset)
+                        .unwrap_or(span.ended_at),
                     duration_ms: u64::try_from(
                         (span.ended_at - span.started_at)
                             .whole_milliseconds()

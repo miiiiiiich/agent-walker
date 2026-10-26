@@ -34,6 +34,28 @@ skipped without being opened (it's still in rollback-journal mode, where even a
 read lock would block agy's first write). Conversations agy is still writing are
 in WAL mode and are read alongside the writer.
 
+**Input bounds.** Only regular files are opened; a symlink to one is followed,
+while a FIFO or device counts as an unreadable file. A line longer than 64 MiB,
+or one holding more than 262,144 JSON array elements and object entries, is
+skipped as a parse error. The same timestamp range as [Row time](#row-time)
+applies to `history.jsonl` and logs. An id or name longer than 1,024 bytes, or
+a path longer than 4,096, is treated as missing.
+
+Each conversation DB is opened read-only: SQLite never writes, checkpoints or
+recovers it. A WAL-mode store still gets `-wal` / `-shm` files beside it when
+they are missing (any reader creates them, and a read-only one can't remove
+them); `immutable` mode, which would avoid that, reads torn pages while the
+agent writes. A store, `-wal`, `-shm` or `-journal` that is not a regular file
+(with a single link, checked on unix) is not opened at all: SQLite truncates
+`-shm` even on a read-only open, so a linked one would damage the other file.
+Only ordinary tables and their stored columns are read under the names queried
+(a view, virtual table or generated column of that name is ignored), a value
+over 64 MiB is a read error, a store's queries stop after returning 1 GiB, and
+SQLite reads across all of a provider's stores stop after 30 s. These are cheap
+checks, not a sandbox: a crafted store planted in an agent's directory is
+outside the threat model, since writing there already means running code as the
+user.
+
 ## What's captured
 
 - ✅ **Tokens** — per generation: input (system prompt + new input), cache-read,
@@ -90,7 +112,8 @@ without an input checksum the format doesn't provide. See
 Field paths in this section and the next start at the gen blob root, where the
 generation is `#1` (so the output total above is `#1.#4.#3`).
 
-Each generation is dated by the first of these that exists:
+Each generation is dated by the first of these that exists (a timestamp before
+1970 or from year 3000 on counts as missing):
 
 1. its own timestamp (`#1.#9.#4`);
 2. the created-at (`metadata.#1`) of the `steps` row whose `metadata.#9` copies

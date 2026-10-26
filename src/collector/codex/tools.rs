@@ -3,6 +3,8 @@ use std::path::Path;
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::collector::ident::ident;
+use crate::collector::json::parse_bounded;
 use crate::collector::{FileEvents, KeyedToolEvent};
 use crate::model::ToolEvent;
 
@@ -65,29 +67,33 @@ fn is_shell_wrapper(name: &str) -> bool {
 }
 
 fn exec_command_basename(value: &Value) -> Option<String> {
-    let arguments = string_path(value, &["payload", "arguments"])?;
-    let parsed = serde_json::from_str::<Value>(&arguments).ok()?;
+    // Command text, not an id, so not held to the id bound (`string_path`).
+    let arguments = value
+        .pointer("/payload/arguments")
+        .and_then(Value::as_str)?;
+    // JSON inside a string, so the line's own structure count never saw it.
+    let parsed = parse_bounded(arguments)?;
     let command = parsed.get("command").or_else(|| parsed.get("cmd"))?;
     let tokens = command_tokens(command)?;
-    let effective = effective_command(&tokens)?;
-    basename(&effective)
+    basename(effective_command(&tokens)?)
 }
 
-fn command_tokens(command: &Value) -> Option<Vec<String>> {
-    match command {
-        Value::Array(items) => {
-            let tokens: Vec<String> = items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                .collect();
-            (!tokens.is_empty()).then_some(tokens)
-        }
-        Value::String(text) => {
-            let tokens: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
-            (!tokens.is_empty()).then_some(tokens)
-        }
-        _ => None,
-    }
+/// Leading tokens a command is resolved from. The command sits among the
+/// first few (after `env`, assignments or a shell's `-c`), so the rest is
+/// never split: a 48 MiB `cmd` of `a a a …` became ~25M owned strings.
+const MAX_COMMAND_TOKENS: usize = 64;
+
+fn command_tokens(command: &Value) -> Option<Vec<&str>> {
+    let tokens: Vec<&str> = match command {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .take(MAX_COMMAND_TOKENS)
+            .collect(),
+        Value::String(text) => text.split_whitespace().take(MAX_COMMAND_TOKENS).collect(),
+        _ => return None,
+    };
+    (!tokens.is_empty()).then_some(tokens)
 }
 
 fn is_shell_command_flag(token: &str) -> bool {
@@ -105,7 +111,7 @@ fn is_var_assignment(token: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn effective_command(tokens: &[String]) -> Option<String> {
+fn effective_command<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     let first = tokens.first()?;
     let is_shell = matches!(
         basename(first).as_deref(),
@@ -117,18 +123,14 @@ fn effective_command(tokens: &[String]) -> Option<String> {
         // `position` is relative to the skipped slice; +1 realigns to `tokens`,
         // and the script string is the token right after the flag.
         let script = tokens.get(flag_index + 2)?;
-        return script
-            .split_whitespace()
-            .next()
-            .map(trim_quotes)
-            .map(ToOwned::to_owned);
+        return script.split_whitespace().next().map(trim_quotes);
     }
 
     let effective = tokens.iter().find(|token| {
         let bare = trim_quotes(token);
         !is_var_assignment(bare) && !RUN_PREFIXES.contains(&basename(bare).as_deref().unwrap_or(""))
     })?;
-    Some(trim_quotes(effective).to_owned())
+    Some(trim_quotes(effective))
 }
 
 fn trim_quotes(token: &str) -> &str {
@@ -149,7 +151,10 @@ fn basename(command: &str) -> Option<String> {
         return None;
     }
     let base = command.rsplit('/').next()?;
-    (!base.is_empty()).then(|| base.to_owned())
+    (!base.is_empty())
+        .then_some(base)
+        .and_then(ident)
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -160,6 +165,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::codex::collect;
+    use crate::collector::json::tests::over_structured_line;
 
     #[test]
     fn decomposes_exec_command_to_real_command_basename() {
@@ -213,5 +219,55 @@ mod tests {
                 "ls",           // {"cmd":"ls -la"} -> cmd fallback field
             ]
         );
+    }
+
+    /// Arguments are JSON inside a string, invisible to the line's own
+    /// structure count, so they are bounded again when parsed.
+    #[test]
+    fn over_structured_arguments_fall_back_to_the_wrapper() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let inner = format!(r#"{{"command":["ls"],"pad":{}}}"#, over_structured_line());
+        let line = format!(
+            r#"{{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{{"type":"function_call","call_id":"c1","name":"exec_command","arguments":{}}}}}"#,
+            serde_json::Value::String(inner)
+        );
+        fs::write(temp.path().join("rollout-s1.jsonl"), line).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.tool_events[0].tool_name, "exec_command");
+    }
+
+    /// Arguments are command text, not an id: a long command still names its
+    /// tool.
+    #[test]
+    fn long_arguments_still_name_the_command() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let script = format!("grep x {}", "y".repeat(4 << 10));
+        let inner = serde_json::json!({ "command": ["bash", "-lc", script] }).to_string();
+        let line = format!(
+            r#"{{"timestamp":"2026-06-01T00:00:00Z","type":"response_item","payload":{{"type":"function_call","call_id":"c1","name":"exec_command","arguments":{}}}}}"#,
+            serde_json::Value::String(inner)
+        );
+        fs::write(temp.path().join("rollout-s1.jsonl"), line).expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.tool_events[0].tool_name, "grep");
+    }
+
+    #[test]
+    fn only_the_leading_tokens_are_split() {
+        let huge = serde_json::Value::String("a ".repeat(4 << 20));
+        let tokens = super::command_tokens(&huge).expect("tokens");
+        assert_eq!(tokens.len(), super::MAX_COMMAND_TOKENS);
+
+        let buried = serde_json::Value::String(format!(
+            "{}grep x",
+            "A=1 ".repeat(super::MAX_COMMAND_TOKENS)
+        ));
+        let tokens = super::command_tokens(&buried).expect("tokens");
+        assert_eq!(super::effective_command(&tokens), None);
     }
 }

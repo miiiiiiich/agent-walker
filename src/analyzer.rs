@@ -17,6 +17,7 @@ use time::{Date, Duration, OffsetDateTime, UtcOffset};
 use crate::model::{
     Collection, DailySessions, DailyStat, ModelDailyStat, SkillStat, Summary, TokenUsage, ToolStat,
 };
+use crate::timestamp::{local_date, to_local};
 
 use self::aggregates::Aggregates;
 pub(crate) use self::concurrency::session_day_bounds;
@@ -33,7 +34,7 @@ pub fn summarize(
     local_offset: UtcOffset,
 ) -> Summary {
     let safe_period_days = period_days.max(1);
-    let period_end = now.to_offset(local_offset).date();
+    let period_end = to_local(now, local_offset).unwrap_or(now).date();
     let period_start = period_end - Duration::days(i64::from(safe_period_days) - 1);
 
     let aggregates = build_aggregates(
@@ -161,7 +162,7 @@ pub fn summarize(
     let mut recent_active_days = std::collections::HashSet::new();
     let mut skill_map: BTreeMap<String, TokenUsage> = BTreeMap::new();
     for event in &collection.usage_events {
-        let Some(date) = event.timestamp.map(|ts| ts.to_offset(local_offset).date()) else {
+        let Some(date) = event.timestamp.and_then(|ts| local_date(ts, local_offset)) else {
             continue;
         };
         if date < period_start || date > period_end {
@@ -304,6 +305,78 @@ mod tests {
     use crate::model::{
         Collection, InterruptEvent, Provider, SessionTouch, SourceKind, TokenUsage, UsageEvent,
     };
+
+    /// Collectors keep only plausible timestamps, but a parse cache written by
+    /// another build can still hand over one that overflows in the local
+    /// offset: every section skips it instead of panicking.
+    #[test]
+    fn timestamps_that_overflow_locally_are_skipped() {
+        let edge = datetime!(9999-12-31 23:00 UTC);
+        let now = datetime!(2026-06-08 12:00 UTC);
+        let collection = Collection {
+            usage_events: vec![UsageEvent {
+                timestamp: Some(edge),
+                session_id: Some("s1".to_owned()),
+                model: Some("claude-opus-4-8".to_owned()),
+                source_kind: SourceKind::Main,
+                attribution_agent: None,
+                attribution_skill: None,
+                project: None,
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    ..TokenUsage::default()
+                },
+                granularity: crate::model::UsageGranularity::Call,
+            }],
+            tool_events: vec![crate::model::ToolEvent {
+                timestamp: Some(edge),
+                session_id: Some("s1".to_owned()),
+                tool_name: "Read".to_owned(),
+                subagent_type: None,
+                source_kind: SourceKind::Main,
+            }],
+            session_touches: vec![SessionTouch {
+                timestamp: edge,
+                session_id: "s1".to_owned(),
+            }],
+            duration_events: vec![crate::model::DurationEvent {
+                timestamp: Some(edge),
+                session_id: Some("s1".to_owned()),
+                duration_ms: 1_000,
+                human_wait_ms: 0,
+                model_ms: None,
+                status: None,
+            }],
+            rate_limit_samples: vec![crate::model::RateLimitSample {
+                timestamp: edge,
+                used_percent: 50.0,
+            }],
+            credit_samples: vec![crate::model::CreditSample {
+                timestamp: edge,
+                nano_aiu: 1,
+            }],
+            interrupt_events: vec![InterruptEvent {
+                timestamp: Some(edge),
+            }],
+            pace_events: vec![crate::model::PaceEvent {
+                timestamp: Some(edge),
+                gap_ms: 1,
+            }],
+            mode_events: vec![crate::model::ModeEvent {
+                timestamp: Some(edge),
+                has_thinking: true,
+                fast: false,
+            }],
+            ..Collection::new(Provider::Codex, "/tmp".into())
+        };
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let summary = summarize(&collection, now, 7, tokyo);
+
+        assert_eq!(summary.total_usage.token_volume(), 0);
+        assert_eq!(summary.sessions, 0);
+        assert_eq!(summary.interrupted, 0);
+    }
 
     #[test]
     fn interruptions_are_counted_independently_of_durations() {

@@ -1,6 +1,8 @@
 /// Normalize Windows separators so native and npm/Node cwds share one project key.
 /// Render a home-directory cwd as "~" so the project label is not empty.
-pub fn project_from_cwd(cwd: &str) -> String {
+/// `None` for a path too long to be one (`ident::path`).
+pub fn project_from_cwd(cwd: &str) -> Option<String> {
+    let cwd = super::ident::path(cwd)?;
     let home = crate::paths::home_dir()
         .ok()
         .and_then(|home| home.to_str().map(ToOwned::to_owned));
@@ -8,9 +10,9 @@ pub fn project_from_cwd(cwd: &str) -> String {
         .and_then(|home| strip_home_prefix(cwd, &home))
         .unwrap_or_else(|| cwd.trim_start_matches(['/', '\\']).to_owned());
     if stripped.is_empty() {
-        "~".to_owned()
+        Some("~".to_owned())
     } else {
-        stripped
+        Some(stripped)
     }
 }
 
@@ -98,7 +100,7 @@ mod tests {
     #[test]
     fn project_from_cwd_renames_home_to_tilde() {
         if !cfg!(windows) {
-            assert_eq!(project_from_cwd("/"), "~");
+            assert_eq!(project_from_cwd("/").as_deref(), Some("~"));
         }
     }
 

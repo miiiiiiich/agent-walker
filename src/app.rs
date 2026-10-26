@@ -3,7 +3,7 @@ use std::time::{Duration as StdDuration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
-use time::{OffsetDateTime, UtcOffset};
+use time::UtcOffset;
 
 use crate::analyzer::summarize;
 use crate::collector::{agy, claude, codex, copilot, grok, opencode};
@@ -222,7 +222,7 @@ fn load_report_inner(
     }
 
     let started = Instant::now();
-    let now = OffsetDateTime::now_utc().to_offset(config.local_offset);
+    let now = crate::timestamp::now_local(config.local_offset);
 
     let mtime_floor =
         SystemTime::now().checked_sub(StdDuration::from_secs(history_days(days) * 86_400));

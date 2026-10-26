@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use time::{Date, Duration, UtcOffset};
 
 use crate::model::{Collection, CreditsHistory};
+use crate::timestamp::local_date;
 
 #[allow(
     clippy::cast_precision_loss,
@@ -16,7 +17,9 @@ pub(super) fn credits_history(
 ) -> Option<CreditsHistory> {
     let mut daily: BTreeMap<Date, u64> = BTreeMap::new();
     for sample in &collection.credit_samples {
-        let date = sample.timestamp.to_offset(local_offset).date();
+        let Some(date) = local_date(sample.timestamp, local_offset) else {
+            continue;
+        };
         if date < window_start || date > period_end {
             continue;
         }

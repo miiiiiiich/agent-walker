@@ -311,3 +311,29 @@ fn project_ids_units_and_large_integer_literals_are_preserved() {
         .sum();
     assert!((share_sum - 1.0).abs() < 1e-9);
 }
+
+/// A parse cache written by another build can hold an instant that overflows
+/// in the local offset; the export skips it instead of panicking.
+#[test]
+fn events_that_overflow_locally_are_left_out() {
+    let edge = datetime!(9999-12-31 23:00 UTC);
+    let mut collection = collection();
+    collection.tool_events.push(ToolEvent {
+        timestamp: Some(edge),
+        session_id: Some("s1".to_owned()),
+        tool_name: "Read".to_owned(),
+        subagent_type: None,
+        source_kind: SourceKind::Main,
+    });
+    collection.session_touches.push(SessionTouch {
+        timestamp: edge,
+        session_id: "s1".to_owned(),
+    });
+    let mut bytes = Vec::new();
+
+    write_json(&mut bytes, &report(), &[collection], offset!(+09:00)).unwrap();
+
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["providers"][0]["tools"], json!([]));
+    assert_eq!(value["providers"][0]["sessions"], json!([]));
+}
