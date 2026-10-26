@@ -13,7 +13,7 @@ use crate::owned_file;
 
 /// Parsing, attribution, or encoding changes require a version bump so cached
 /// events are never read with old semantics.
-const CACHE_VERSION: u32 = 24;
+const CACHE_VERSION: u32 = 25;
 
 /// Far above what months of heavy use encode to; bounds what a crafted or
 /// runaway file can make a load read into memory.
