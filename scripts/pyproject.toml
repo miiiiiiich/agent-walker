@@ -14,6 +14,13 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 
+[tool.ruff.lint]
+extend-select = ["S"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest asserts
+"tests/**" = ["S101"]
+
 [tool.pyright]
 venvPath = "."
 venv = ".venv"

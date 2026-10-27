@@ -1,0 +1,17 @@
+# Every entry below is in release.yml, which cargo-dist generates (see
+# .github/zizmor.yml); the scripts come from dist's template and cannot be
+# changed through its config. Each pattern is the full message, including the
+# line:col inside the script, so a template change that moves or rewords a
+# finding fails the workflows job until the finding is reviewed here again.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      # `>> $GITHUB_PATH` in the rustup step, which runs only for container
+      # builds; no target in dist-workspace.toml configures a container
+      - '^shellcheck reported issue in this script: SC2086:info:3:30: Double quote to prevent globbing and word splitting$'
+      # repeated `>> "$GITHUB_OUTPUT"` in the two post-build steps (style only)
+      - '^shellcheck reported issue in this script: SC2129:style:2:1: Consider using \{ cmd1; cmd2; \} >> file instead of individual redirects$'
+      - '^shellcheck reported issue in this script: SC2129:style:5:1: Consider using \{ cmd1; cmd2; \} >> file instead of individual redirects$'
+      # $PRERELEASE_FLAG is unquoted on purpose: when empty it must expand to
+      # no argument rather than to ''
+      - '^shellcheck reported issue in this script: SC2086:info:4:76: Double quote to prevent globbing and word splitting$'

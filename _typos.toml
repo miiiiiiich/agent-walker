@@ -1,0 +1,15 @@
+[files]
+# check .github/ too; hidden paths are skipped by default
+ignore-hidden = false
+extend-exclude = [
+  ".git",
+  # test data: the .jsonl must stay the decompressed copy of its .zst twin
+  "tests/fixtures/",
+  # license texts are reproduced verbatim
+  "LICENSE-*",
+  "THIRD_PARTY_NOTICES",
+]
+
+[default.extend-identifiers]
+# typos splits "PNGs" into "PN" + "Gs"
+PNGs = "PNGs"

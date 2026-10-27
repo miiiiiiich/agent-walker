@@ -2,7 +2,7 @@
 # dist-workspace.toml (`dist generate`; its plan job rejects hand edits), and
 # none of them can be changed through dist's config — only in dist's template.
 # Entries are pinned to file:line, so a regenerated release.yml that moves a
-# finding fails the zizmor job until the finding is reviewed here again.
+# finding fails the workflows job until the finding is reviewed here again.
 rules:
   excessive-permissions:
     ignore:

@@ -2,7 +2,7 @@
 //! to year ±9999, but shifting one near that edge into another offset panics
 //! (`to_offset`): a single row dated `9999-12-31T23:00:00-05:00` aborted every
 //! run. Parsing keeps only plausible instants, so such a row reads like an
-//! unparseable one, and conversions to the local offset are checked.
+//! unparsable one, and conversions to the local offset are checked.
 
 use std::ops::Range;
 

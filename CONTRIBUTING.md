@@ -6,13 +6,26 @@ PRs are welcome.
 ## Development
 
 ```sh
-cargo test
+cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo machete   # unused dependencies (cargo install cargo-machete)
+typos           # spelling, exceptions in _typos.toml (cargo install typos-cli)
 ```
 
-All of these must pass; CI enforces them and additionally runs `cargo deny check` (policy in `deny.toml`). The crate uses `clippy::pedantic` —
-narrow `#[allow]`s with a `reason` are fine where the lint hurts readability.
+All of these must pass; CI enforces them (tool versions are pinned in
+`.github/workflows/`) and additionally runs:
+
+- `cargo deny check` — dependency policy in `deny.toml`
+- `actionlint` (needs `shellcheck`) and
+  `uvx --from 'zizmor==1.29.0' zizmor .github/workflows`, from the repo root —
+  release.yml's exceptions are in `.github/actionlint.yaml` and `.github/zizmor.yml`
+- when `scripts/` or a workflow that runs the scripts changes:
+  `cd scripts && uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run pyright`
+
+The crate uses `clippy::pedantic` — narrow `#[allow]`s with a `reason` are fine
+where the lint hurts readability.
 
 ## Useful dev flags
 
