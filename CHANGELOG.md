@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-27
+
+### Security
+
+- Crafted log records can't crash it or exhaust memory. Out-of-range
+  timestamps, FIFOs or device links in log folders, oversized lines, names and
+  commands, and hostile SQLite stores are now bounded or skipped.
+- Saving the card no longer follows a planted link. Images and caches are
+  written to a fresh file and renamed into place; caches are private (0600 in a
+  0700 folder).
+- The price table is HTTPS-only and validated. Out-of-range rates are dropped
+  on fetch and when the stored copy is read.
+- `--json` escapes invisible and control characters. C1 controls, bidi,
+  zero-width and tag characters in names from logs come out as `\uXXXX`.
+
+### Changed
+
+- The parse cache has a new format and is rebuilt once on the first run.
+
 ## [0.20.0] - 2026-10-25
 
 ### Added
@@ -395,6 +414,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.21.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.18.1...v0.19.0
