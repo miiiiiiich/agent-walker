@@ -137,7 +137,7 @@ impl ShareCard {
         });
 
         let days = u64::from(summary.period_days.max(1));
-        let complete_usd = tally.complete_usd();
+        let usd = tally.usd();
 
         let codename = crate::codename::for_summary(summary);
         Self {
@@ -155,8 +155,8 @@ impl ShareCard {
                     format_hours(time.active_per_day_ms()),
                 )
             }),
-            cost: complete_usd.map(format_usd),
-            cost_per_day: complete_usd.map(|usd| format_usd(usd / days as f64)),
+            cost: usd.map(format_usd),
+            cost_per_day: usd.map(|usd| format_usd(usd / days as f64)),
             // Every section reads the same window, so the cache share is on the
             // same footing as the rest of the card.
             cached: summary

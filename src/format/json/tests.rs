@@ -56,7 +56,7 @@ fn document_shape_dates_nulls_and_newline() {
             "window",
         ]
     );
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 3);
     assert_eq!(value["generated_at"], "2026-09-15T16:09:30+09:00");
     assert_eq!(
         value["window"],
