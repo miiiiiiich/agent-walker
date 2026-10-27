@@ -24,6 +24,10 @@ All of these must pass; CI enforces them (tool versions are pinned in
 - when `scripts/` or a workflow that runs the scripts changes:
   `cd scripts && uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run pyright`
 
+The Smoke workflow runs the release binary on Windows and macOS; each run's
+`smoke-windows-latest` / `smoke-macos-latest` artifacts hold what it rendered
+(tabs, JSON, share card), so Windows output can be checked without Windows.
+
 The crate uses `clippy::pedantic` — narrow `#[allow]`s with a `reason` are fine
 where the lint hurts readability.
 

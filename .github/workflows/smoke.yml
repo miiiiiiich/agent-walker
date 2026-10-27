@@ -1,0 +1,148 @@
+name: Smoke
+
+# Runs the release binary on Windows, with macOS as the reference, and uploads
+# what it printed and wrote as the smoke-<os> artifacts. Not a required check:
+# it is for looking at the output, and the npm step depends on the network.
+
+on:
+  push:
+    branches: [main]
+  # only this file: a change to the workflow runs before it is merged
+  pull_request:
+    paths:
+      - .github/workflows/smoke.yml
+  # the runner images and the published npm package change without a commit
+  # here
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      # a Windows failure still needs the macOS output to compare against
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            exe: .exe
+          - os: macos-latest
+            exe: ""
+    defaults:
+      run:
+        # Git Bash on Windows: PowerShell's `>` decodes a native program's
+        # stdout through the console code page and re-encodes it, so the
+        # files would not hold the bytes the binary wrote
+        shell: bash
+    env:
+      BIN: target/release/agent-walker${{ matrix.exe }}
+      OUT: smoke
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # the toolchain step from ci.yml, so a toolchain bump changes both alike
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.95.0 # zizmor: ignore[superfluous-actions]
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo build --release --locked
+
+      - name: Record the environment
+        run: |
+          mkdir -p "$OUT"
+          probe() {
+            echo "\$ $*"
+            "$@" 2>&1 || echo "(exit $?)"
+            echo
+          }
+          {
+            probe uname -a
+            if [ "$RUNNER_OS" = Windows ]; then
+              probe cmd.exe //c ver
+              probe chcp.com
+            else
+              probe sw_vers
+              probe locale
+            fi
+            echo "TERM=${TERM-}"
+            echo "LANG=${LANG-}"
+            echo
+            probe "$BIN" --version
+            probe node --version
+            probe npm --version
+          } > "$OUT/env.txt"
+          cat "$OUT/env.txt"
+
+      - name: Render every tab (demo data)
+        env:
+          AGENT_WALKER_DEMO: "1"
+        run: |
+          "$BIN" --render > "$OUT/render.txt"
+          "$BIN" --render=80 > "$OUT/render-80.txt"
+
+      # Validated with node rather than jq or python: it is on both runner
+      # images, and the npm step needs it anyway.
+      - name: Export JSON (demo data)
+        env:
+          AGENT_WALKER_DEMO: "1"
+        run: |
+          "$BIN" --json > "$OUT/demo.json"
+          node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$OUT/demo.json"
+
+      - name: Render the share card (demo data)
+        env:
+          AGENT_WALKER_DEMO: "1"
+        run: |
+          "$BIN" --share "$OUT/card.png" > "$OUT/caption.txt"
+          sig=$(head -c 8 "$OUT/card.png" | od -An -tx1 | tr -d ' \n')
+          if [ "$sig" != 89504e470d0a1a0a ]; then
+            echo "::error::card.png does not start with the PNG signature (got: $sig)"
+            exit 1
+          fi
+
+      # On Windows the home directory comes from the shell's profile folder,
+      # which HOME and USERPROFILE do not move: there only the per-agent
+      # variables point into the empty directory, and ~/.gemini (which has no
+      # override) is read from the runner's own profile.
+      - name: Export JSON with no agent logs
+        run: |
+          unset OPENCODE_DB
+          home="$RUNNER_TEMP/empty-home"
+          mkdir "$home"
+          HOME="$home" USERPROFILE="$home" XDG_DATA_HOME="$home/.local/share" \
+            CLAUDE_CONFIG_DIR="$home/.claude" CODEX_HOME="$home/.codex" \
+            COPILOT_HOME="$home/.copilot" GROK_HOME="$home/.grok" \
+            OPENCODE_HOME="$home/.local/share/opencode" \
+            "$BIN" --json > "$OUT/empty-home.json"
+          node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$OUT/empty-home.json"
+
+      # The installer users run: it downloads the release archive for this OS
+      # and unpacks it. A registry error fails the job too: a tolerated
+      # "unreachable" branch would also swallow an unpublished package.
+      - name: Run the published npm package
+        run: |
+          latest=$(npm view agent-walker@latest version)
+          echo "agent-walker@$latest" > "$OUT/npx.txt"
+          npx --yes "agent-walker@$latest" --version 2>&1 | tee -a "$OUT/npx.txt"
+
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-${{ matrix.os }}
+          path: ${{ env.OUT }}/
+          retention-days: 14
