@@ -15,6 +15,28 @@ retired `gh copilot` extension):
 Auto-detected: the Copilot tab appears only when either source exists.
 Everything is read locally; nothing leaves the machine.
 
+**Input bounds.** Only regular files are opened; a symlink to one is followed,
+while a FIFO or device counts as an unreadable file. A line longer than 64 MiB,
+or one holding more than 262,144 JSON array elements and object entries, is
+skipped as a parse error. A timestamp before 1970 or from year 3000 on is
+treated as missing. An id or name longer than 1,024 bytes, or a path longer
+than 4,096, is treated as missing.
+
+The session store is opened read-only: SQLite never writes, checkpoints or
+recovers it. A WAL-mode store still gets `-wal` / `-shm` files beside it when
+they are missing (any reader creates them, and a read-only one can't remove
+them); `immutable` mode, which would avoid that, reads torn pages while the
+agent writes. A store, `-wal`, `-shm` or `-journal` that is not a regular file
+(with a single link, checked on unix) is not opened at all: SQLite truncates
+`-shm` even on a read-only open, so a linked one would damage the other file.
+Only ordinary tables and their stored columns are read under the names queried
+(a view, virtual table or generated column of that name is ignored), a value
+over 64 MiB is a read error, a store's queries stop after returning 1 GiB, and
+SQLite reads across all of a provider's stores stop after 30 s. These are cheap
+checks, not a sandbox: a crafted store planted in an agent's directory is
+outside the threat model, since writing there already means running code as the
+user.
+
 ## What's captured
 
 - **Token usage**, from two sources with a fixed precedence:

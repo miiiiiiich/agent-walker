@@ -6,6 +6,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{AppSummary, Collection, Provider, TokenUsage};
 
+mod escape;
 mod events;
 mod histories;
 mod panels;
@@ -25,7 +26,7 @@ pub(crate) fn write_json(
     offset: UtcOffset,
 ) -> Result<()> {
     let dto = ReportDto::new(report, collections, offset)?;
-    let written = serde_json::to_writer_pretty(&mut *writer, &dto)
+    let written = escape::to_writer_pretty(&mut *writer, &dto)
         .map_err(io::Error::from)
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush());
@@ -192,7 +193,7 @@ struct EventWindow {
 
 impl EventWindow {
     fn at(self, timestamp: Option<OffsetDateTime>) -> Option<OffsetDateTime> {
-        let at = timestamp?.to_offset(self.offset);
+        let at = crate::timestamp::to_local(timestamp?, self.offset)?;
         (self.start..=self.end).contains(&at.date()).then_some(at)
     }
 

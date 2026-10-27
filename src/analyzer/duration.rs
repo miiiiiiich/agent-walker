@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{Collection, DurationBucket, DurationSummary, SessionSpan};
+use crate::timestamp::local_date;
 
 pub(super) fn longest_session_span(
     collection: &Collection,
@@ -14,7 +15,9 @@ pub(super) fn longest_session_span(
     // days, so a raw per-session min/max would report multi-day "sessions".
     let mut bounds: HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
     for touch in &collection.session_touches {
-        let date = touch.timestamp.to_offset(local_offset).date();
+        let Some(date) = local_date(touch.timestamp, local_offset) else {
+            continue;
+        };
         if date < period_start || date > period_end {
             continue;
         }
@@ -47,8 +50,8 @@ pub(super) fn completion_duration_summary(
         .iter()
         .filter(|event| {
             event.timestamp.is_none_or(|timestamp| {
-                let date = timestamp.to_offset(local_offset).date();
-                date >= period_start && date <= period_end
+                local_date(timestamp, local_offset)
+                    .is_some_and(|date| date >= period_start && date <= period_end)
             })
         })
         // The human's answer time inside a turn is not the agent running.
@@ -84,7 +87,7 @@ pub(super) fn interrupted_count(
         .filter(|event| {
             event
                 .timestamp
-                .map(|timestamp| timestamp.to_offset(local_offset).date())
+                .and_then(|timestamp| local_date(timestamp, local_offset))
                 .is_some_and(|date| date >= period_start && date <= period_end)
         })
         .count()

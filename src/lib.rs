@@ -24,8 +24,10 @@ mod cost;
 mod demo;
 mod format;
 mod model;
+mod owned_file;
 mod paths;
 mod share;
+mod timestamp;
 mod ui;
 
 // The binaries are the only consumers; expose just the entry point.

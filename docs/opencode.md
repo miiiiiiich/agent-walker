@@ -13,11 +13,29 @@ follows OpenCode's own database resolver:
   default `opencode.db` and the `opencode-<channel>.db` a non-stable install
   (e.g. a `dev` build) writes.
 
-It opens each DB **read-only** and reads it directly. The read-only flag means
-SQLite can't write, checkpoint, or recover your live store; in WAL mode the read
-doesn't block OpenCode's writes, and a short busy-timeout rides out the rare
-exclusive moment. Reading directly (rather than copying the whole DB first) keeps
-memory proportional to the recent rows actually parsed, not the full history.
+It reads each DB directly; in WAL mode the read doesn't block OpenCode's
+writes, and a short busy-timeout rides out the rare exclusive moment. Reading
+directly (rather than copying the whole DB first) keeps memory proportional to
+the recent rows actually parsed, not the full history.
+
+Each DB is opened read-only: SQLite never writes, checkpoints or recovers it. A
+WAL-mode store still gets `-wal` / `-shm` files beside it when they are missing
+(any reader creates them, and a read-only one can't remove them); `immutable`
+mode, which would avoid that, reads torn pages while the agent writes. A store,
+`-wal`, `-shm` or `-journal` that is not a regular file (with a single link,
+checked on unix) is not opened at all: SQLite truncates `-shm` even on a
+read-only open, so a linked one would damage the other file. Only ordinary
+tables and their stored columns are read under the names queried (a view,
+virtual table or generated column of that name is ignored), a value over 64 MiB
+is a read error, a store's queries stop after returning 1 GiB, and SQLite reads
+across all of a provider's stores stop after 30 s. These are cheap checks, not
+a sandbox: a crafted store planted in an agent's directory is outside the
+threat model, since writing there already means running code as the user. A
+row's JSON holding more than 262,144 array elements and object entries is a
+parse error, and a row dated before 1970 or from year 3000 on is skipped like
+an undated one. An id or name longer than 1,024 bytes, or a path longer than
+4,096, is treated as missing.
+
 Storage location is documented at
 [opencode.ai/docs/troubleshooting](https://opencode.ai/docs/troubleshooting/);
 the schema lives in the OSS repo (`anomalyco/opencode`, formerly

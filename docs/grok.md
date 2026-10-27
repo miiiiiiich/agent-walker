@@ -8,6 +8,14 @@ per session, written by Grok Build (xAI's agentic CLI, OSS at
 Auto-detected: the Grok tab appears only when session logs
 exist. Everything is read locally; nothing leaves the machine.
 
+**Input bounds.** Only regular files are opened; a symlink to one is followed,
+while a FIFO or device counts as an unreadable file. A line longer than 64 MiB,
+or one holding more than 262,144 JSON array elements and object entries, is
+skipped as a parse error. A timestamp before 1970 or from year 3000 on is
+treated as missing. An id or name longer than 1,024 bytes, or a path longer
+than 4,096, is treated as missing. A `summary.json` is held to the same bounds
+as one line.
+
 ## What's captured
 
 - **Token usage** from the durable `turn_completed` update every prompt ends

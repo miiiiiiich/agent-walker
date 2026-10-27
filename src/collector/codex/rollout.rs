@@ -1,21 +1,11 @@
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use ruzstd::decoding::StreamingDecoder;
 
+use crate::collector::read::open_regular;
+
 const COMPRESSED_SUFFIX: &str = ".zst";
-
-/// Bounds the memory one line can take; a longer line is skipped as a parse
-/// error instead of being buffered.
-pub(super) const MAX_LINE_BYTES: u64 = 64 << 20;
-
-/// Decoded bytes a `.zst` may expand to, per on-disk byte: far above what
-/// JSONL compresses to, far below what a run-length frame can claim. Past the
-/// budget the file stops parsing.
-const MAX_DECODE_RATIO: u64 = 64;
-/// Floor of the decode budget, so a tiny file's frame overhead never trips it.
-const MIN_DECODE_BUDGET: u64 = 64 << 20;
 
 fn is_compressed(path: &Path) -> bool {
     path.file_name()
@@ -51,70 +41,18 @@ pub(super) fn supersedes(candidate: &Path, existing: &Path) -> bool {
     }
 }
 
+/// A `.zst` is decoded without a size budget, like the plain rollout Codex
+/// compressed it from: memory is bounded per line (the line cap and the JSON
+/// structure check), so only CPU grows with the decoded size. A budget tied to
+/// the on-disk size cut legitimate rollouts short, since repetitive tool output
+/// compresses far past any fixed ratio.
 pub(super) fn open_rollout(path: &Path) -> Option<Box<dyn BufRead>> {
-    let file = File::open(path).ok()?;
+    let file = open_regular(path).ok()?;
     if is_compressed(path) {
-        let budget = file
-            .metadata()
-            .ok()?
-            .len()
-            .saturating_mul(MAX_DECODE_RATIO)
-            .max(MIN_DECODE_BUDGET);
         let decoder = StreamingDecoder::new(BufReader::new(file)).ok()?;
-        return Some(Box::new(BufReader::new(DecodeBudget {
-            inner: decoder,
-            remaining: budget,
-        })));
+        return Some(Box::new(BufReader::new(decoder)));
     }
     Some(Box::new(BufReader::new(file)))
-}
-
-/// Fails the read once more than `remaining` bytes would come out, so the
-/// overrun surfaces as an error rather than a silently truncated file.
-struct DecodeBudget<R> {
-    inner: R,
-    remaining: u64,
-}
-
-impl<R: Read> Read for DecodeBudget<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.remaining == 0 {
-            let mut probe = [0_u8; 1];
-            return match self.inner.read(&mut probe)? {
-                0 => Ok(0),
-                _ => Err(io::Error::other("decoded rollout exceeds its budget")),
-            };
-        }
-        let allowed = usize::try_from(self.remaining).map_or(buf.len(), |left| left.min(buf.len()));
-        let read = self.inner.read(&mut buf[..allowed])?;
-        self.remaining -= read as u64;
-        Ok(read)
-    }
-}
-
-pub(super) enum Line {
-    Text,
-    Oversized,
-}
-
-/// Reads the next line into `line`; `Ok(None)` at end of input. A line past
-/// `max_bytes` is consumed without being kept.
-pub(super) fn next_line(
-    reader: &mut dyn BufRead,
-    line: &mut Vec<u8>,
-    max_bytes: u64,
-) -> io::Result<Option<Line>> {
-    line.clear();
-    let read = reader.take(max_bytes + 1).read_until(b'\n', line)?;
-    if read == 0 {
-        return Ok(None);
-    }
-    if line.last() != Some(&b'\n') && line.len() as u64 > max_bytes {
-        line.clear();
-        reader.skip_until(b'\n')?;
-        return Ok(Some(Line::Oversized));
-    }
-    Ok(Some(Line::Text))
 }
 
 #[cfg(test)]
@@ -130,6 +68,8 @@ mod tests {
         meta_line, record_line, token_count_line, total_volume, usage_json, write_lines,
     };
     use crate::collector::codex::{collect, parse_file};
+    use crate::collector::ident::tests::{overlong_ident, overlong_path};
+    use crate::collector::json::tests::over_structured_line;
 
     const COMPRESSED_PLAIN: &str =
         include_str!("../../../tests/fixtures/codex/rollout-compressed.jsonl");
@@ -326,60 +266,62 @@ mod tests {
         frame
     }
 
+    /// Repetitive tool output compresses far past any ratio: a legitimate
+    /// rollout of ~2.2 MB in a few hundred bytes once stopped decoding at
+    /// 1 MiB, before its usage record.
     #[test]
-    fn oversized_line_is_skipped_without_being_buffered() {
-        let usage_line = format!(
-            "{}\n",
-            token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110)
-        );
-        let frame = run_length_frame(
-            br#"{"pad":""#,
-            b'a',
-            1 << 20,
-            format!("\"}}\n{usage_line}").as_bytes(),
-        );
-        let mut reader = BufReader::new(
-            StreamingDecoder::new(frame.as_slice()).expect("frame header should parse"),
-        );
-        let mut line = Vec::new();
-
-        let first = next_line(&mut reader, &mut line, 64 << 10).expect("decodes");
-        assert!(matches!(first, Some(Line::Oversized)));
-        assert!(line.capacity() < 1 << 20);
-        let second = next_line(&mut reader, &mut line, 64 << 10).expect("decodes");
-        assert!(matches!(second, Some(Line::Text)));
-        assert_eq!(line, usage_line.as_bytes());
-        assert!(
-            next_line(&mut reader, &mut line, 64 << 10)
-                .expect("decodes")
-                .is_none()
-        );
-    }
-
-    /// A few kilobytes of run-length blocks claim more than the decode
-    /// budget; parsing stops with a parse error, keeping the rows before it.
-    #[test]
-    fn decompression_bomb_stops_at_the_decode_budget() {
+    fn highly_compressible_rollout_is_read_to_its_end() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let usage_line = format!(
-            "{}\n{}\n",
+        let head = format!(
+            "{}\n{}",
             meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":""#
+        );
+        let tail = format!(
+            "\"}}}}\n{}\n",
             token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110)
         );
-        let after_budget = format!(
-            "\n{}\n",
-            token_count_line("2026-06-01T00:00:09Z", &usage_json(200, 0, 20), 330)
-        );
-        let run = usize::try_from(MIN_DECODE_BUDGET).expect("budget fits");
-        let frame = run_length_frame(usage_line.as_bytes(), b'a', run, after_budget.as_bytes());
-        assert!(frame.len() < 8 << 10);
+        let frame = run_length_frame(head.as_bytes(), b'a', 2_200_000, tail.as_bytes());
+        assert!(frame.len() < 1 << 10);
         let path = temp.path().join("rollout-s1.jsonl.zst");
         fs::write(&path, frame).expect("fixture should be written");
 
         let events = parse_file(&path, UtcOffset::UTC).expect("frame header should parse");
 
+        assert_eq!(events.parse_errors, 0);
         assert_eq!(events.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn over_structured_line_is_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let path = temp.path().join("rollout-s1.jsonl");
+        write_lines(
+            &path,
+            &[
+                meta_line("2026-06-01T00:00:00Z", "s1", r#""cli""#, ""),
+                over_structured_line(),
+                token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
+            ],
+        );
+
+        let events = parse_file(&path, UtcOffset::UTC).expect("plain rollout parses");
+
         assert_eq!(events.parse_errors, 1);
+        assert_eq!(events.usage_events.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollout_linked_to_a_device_is_unreadable() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        std::os::unix::fs::symlink("/dev/null", temp.path().join("rollout-z.jsonl"))
+            .expect("symlink should be created");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.stats.unreadable_files, 1);
     }
 
     #[test]
@@ -405,5 +347,26 @@ mod tests {
 
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.stats.unreadable_files, 1);
+    }
+
+    #[test]
+    fn overlong_session_id_and_cwd_are_missing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let long = overlong_ident();
+        let path = temp.path().join("rollout-s1.jsonl");
+        write_lines(
+            &path,
+            &[
+                meta_line("2026-06-01T00:00:00Z", &long, r#""cli""#, "")
+                    .replace("/tmp/p", &overlong_path()),
+                token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
+            ],
+        );
+
+        let events = parse_file(&path, UtcOffset::UTC).expect("plain rollout parses");
+
+        let usage = &events.usage_events[0].event;
+        assert_eq!(usage.session_id.as_deref(), Some("rollout-s1"));
+        assert_eq!(usage.project, None);
     }
 }

@@ -311,3 +311,144 @@ fn project_ids_units_and_large_integer_literals_are_preserved() {
         .sum();
     assert!((share_sum - 1.0).abs() < 1e-9);
 }
+
+/// A parse cache written by another build can hold an instant that overflows
+/// in the local offset; the export skips it instead of panicking.
+#[test]
+fn events_that_overflow_locally_are_left_out() {
+    let edge = datetime!(9999-12-31 23:00 UTC);
+    let mut collection = collection();
+    collection.tool_events.push(ToolEvent {
+        timestamp: Some(edge),
+        session_id: Some("s1".to_owned()),
+        tool_name: "Read".to_owned(),
+        subagent_type: None,
+        source_kind: SourceKind::Main,
+    });
+    collection.session_touches.push(SessionTouch {
+        timestamp: edge,
+        session_id: "s1".to_owned(),
+    });
+    let mut bytes = Vec::new();
+
+    write_json(&mut bytes, &report(), &[collection], offset!(+09:00)).unwrap();
+
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["providers"][0]["tools"], json!([]));
+    assert_eq!(value["providers"][0]["sessions"], json!([]));
+}
+
+fn invisible_code_points() -> Vec<char> {
+    [
+        (0x7F, 0x9F),
+        (0x061C, 0x061C),
+        (0x200B, 0x200F),
+        (0x2028, 0x202E),
+        (0x2060, 0x2064),
+        (0x2066, 0x2069),
+        (0xFEFF, 0xFEFF),
+        (0xE0000, 0xE007F),
+    ]
+    .into_iter()
+    .flat_map(|(first, last)| first..=last)
+    .map(|code| char::from_u32(code).unwrap())
+    .collect()
+}
+
+fn assert_escaped(bytes: &[u8], code_points: &[char]) {
+    let text = std::str::from_utf8(bytes).unwrap();
+    for &ch in code_points {
+        let code = u32::from(ch);
+        let escape = ch
+            .encode_utf16(&mut [0; 2])
+            .iter()
+            .map(|unit| format!("\\u{unit:04x}"))
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(!text.contains(ch), "raw U+{code:04X} in output");
+        assert!(text.contains(&escape), "U+{code:04X} not escaped");
+    }
+}
+
+#[test]
+fn invisible_code_points_are_escaped_and_round_trip() {
+    let hostile = invisible_code_points()
+        .into_iter()
+        .flat_map(|ch| [ch, 'x'])
+        .collect::<String>();
+    let value = std::collections::BTreeMap::from([(
+        hostile.clone(),
+        vec![hostile.clone(), format!("\u{1b}[2J\u{9b}31m{hostile}")],
+    )]);
+    let mut bytes = Vec::new();
+    escape::to_writer_pretty(&mut bytes, &value).unwrap();
+    assert_escaped(&bytes, &invisible_code_points());
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("\\udb40\\udc41")
+    );
+    assert!(!bytes.contains(&0x1B));
+    assert_eq!(
+        serde_json::from_slice::<std::collections::BTreeMap<String, Vec<String>>>(&bytes).unwrap(),
+        value
+    );
+}
+
+#[test]
+fn ordinary_values_serialize_byte_identically_to_serde_json() {
+    let neighbors = "~\u{a0}\u{61b}\u{61d}\u{200a}\u{2010}\u{2027}\u{202f}\u{205f}\u{2065}\u{206a}\u{fefe}\u{fffd}\u{dffff}\u{e0080}";
+    let value = json!({
+        "ascii": "quote \" slash / backslash \\ tab \t newline \n bell \u{7} esc \u{1b}",
+        "text": "日本語 café 🦁",
+        "neighbors": neighbors,
+        neighbors: [neighbors],
+        "numbers": [0, -3, u64::MAX, i64::MIN, 1.5, -0.25],
+        "flags": [true, false, null],
+        "empty": {"array": [], "object": {}},
+        "nested": [[1, {"k": "v"}], []],
+    });
+    let mut bytes = Vec::new();
+    escape::to_writer_pretty(&mut bytes, &value).unwrap();
+    assert_eq!(bytes, serde_json::to_vec_pretty(&value).unwrap());
+}
+
+#[test]
+fn export_bytes_match_plain_serde_json() {
+    let report = report();
+    let dto = ReportDto::new(&report, &[collection()], offset!(+09:00)).unwrap();
+    let mut expected = serde_json::to_vec_pretty(&dto).unwrap();
+    expected.push(b'\n');
+    let mut bytes = Vec::new();
+    write_json(&mut bytes, &report, &[collection()], offset!(+09:00)).unwrap();
+    assert_eq!(bytes, expected);
+}
+
+#[test]
+fn export_escapes_hostile_names_without_changing_values() {
+    let mut report = report();
+    report.providers[0].projects[0].path = "work/\u{9b}31mrepo\u{202e}gpj.exe".to_owned();
+    report.providers[0].favorite_model =
+        Some("model\u{200b}\u{2066}\u{7f}\u{feff}\u{2028}\u{2062}\u{e0041}".to_owned());
+    let mut bytes = Vec::new();
+    write_json(&mut bytes, &report, &[collection()], offset!(+09:00)).unwrap();
+    assert_escaped(
+        &bytes,
+        &[
+            '\u{9b}',
+            '\u{202e}',
+            '\u{200b}',
+            '\u{2066}',
+            '\u{7f}',
+            '\u{feff}',
+            '\u{2028}',
+            '\u{2062}',
+            '\u{e0041}',
+        ],
+    );
+    let dto = ReportDto::new(&report, &[collection()], offset!(+09:00)).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        serde_json::to_value(&dto).unwrap()
+    );
+}

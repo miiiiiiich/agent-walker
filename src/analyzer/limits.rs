@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use time::{Date, Duration, UtcOffset};
 
 use crate::model::{Collection, LimitDay, LimitsHistory};
+use crate::timestamp::local_date;
 
 /// Keep measured zero, missing samples, and no activity distinct so an unused
 /// day cannot be mistaken for measured 0%.
@@ -15,7 +16,9 @@ pub(super) fn limits_history(
 ) -> Option<LimitsHistory> {
     let mut daily_peak: BTreeMap<Date, f64> = BTreeMap::new();
     for sample in &collection.rate_limit_samples {
-        let date = sample.timestamp.to_offset(local_offset).date();
+        let Some(date) = local_date(sample.timestamp, local_offset) else {
+            continue;
+        };
         if date < window_start || date > period_end {
             continue;
         }

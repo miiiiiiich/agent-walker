@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::collector::ident::ident;
+use crate::collector::json::{parse_bounded, parse_line};
+use crate::collector::read::{Lines, MAX_LINE_BYTES, open_regular};
 use crate::collector::{
     FileEvents, KeyedDurationEvent, KeyedToolEvent, KeyedUsageEvent, merge_into,
     parse_files_cached, project_from_cwd,
@@ -15,6 +17,7 @@ use crate::model::{
     Collection, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage, ToolEvent,
     UsageEvent,
 };
+use crate::timestamp::from_unix_seconds;
 
 /// Subagent usage and durations are suppressed because coordinator totals
 /// include them; unique tools and activity remain marked as subagent work.
@@ -195,8 +198,8 @@ struct DirMeta {
 /// summary may hide a subagent marker, and that usage is already folded into
 /// the coordinator.
 fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
-    let raw = match std::fs::read_to_string(session_dir.join("summary.json")) {
-        Ok(raw) => raw,
+    let file = match open_regular(&session_dir.join("summary.json")) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(DirMeta {
                 kind: None,
@@ -206,7 +209,15 @@ fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
         }
         Err(_) => return Err(()),
     };
-    let summary = serde_json::from_str::<Value>(&raw).map_err(|_| ())?;
+    // One JSON document, held to the same bounds as a log line.
+    let mut raw = String::new();
+    file.take(MAX_LINE_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|_| ())?;
+    if raw.len() as u64 > MAX_LINE_BYTES {
+        return Err(());
+    }
+    let summary = parse_bounded(&raw).ok_or(())?;
     Ok(DirMeta {
         kind: summary
             .get("session_kind")
@@ -216,42 +227,34 @@ fn read_summary(session_dir: &Path) -> Result<DirMeta, ()> {
             .get("info")
             .and_then(|info| info.get("cwd"))
             .and_then(Value::as_str)
-            .map(project_from_cwd),
+            .and_then(project_from_cwd),
         parent_session_id: summary
             .get("parent_session_id")
             .and_then(Value::as_str)
+            .and_then(ident)
             .map(ToOwned::to_owned),
     })
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let session_dir = path.parent()?;
     let session_id = session_dir
         .file_name()
         .and_then(|name| name.to_str())
+        .and_then(ident)
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
-    let reader = BufReader::new(file);
 
-    for line in reader.lines() {
-        events.lines_seen += 1;
-        let Ok(line) = line else {
-            events.parse_errors += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            events.parse_errors += 1;
+    while let Some((_, line)) = lines.next(&mut events) {
+        let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
 
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_u64)
-            .and_then(|secs| OffsetDateTime::from_unix_timestamp(i64::try_from(secs).ok()?).ok());
+            .and_then(|secs| from_unix_seconds(i64::try_from(secs).ok()?));
         if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
             events.session_touches.push(SessionTouch {
                 timestamp,
@@ -285,7 +288,11 @@ fn collect_turn_usage(
     session_id: Option<&String>,
     events: &mut FileEvents,
 ) {
-    let Some(prompt_id) = update.get("prompt_id").and_then(Value::as_str) else {
+    let Some(prompt_id) = update
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .and_then(ident)
+    else {
         return;
     };
     let Some(usage) = update.get("usage") else {
@@ -298,6 +305,7 @@ fn collect_turn_usage(
     let entries: Vec<(Option<String>, &Value)> = match model_usage {
         Some(models) if !models.is_empty() => models
             .iter()
+            .filter(|(model, _)| ident(model).is_some())
             .map(|(model, entry)| (Some(model.clone()), entry))
             .collect(),
         _ => vec![(None, usage)],
@@ -366,7 +374,7 @@ fn collect_tool_event(
     session_id: Option<&String>,
     events: &mut FileEvents,
 ) {
-    let Some(tool_name) = update.get("title").and_then(Value::as_str) else {
+    let Some(tool_name) = update.get("title").and_then(Value::as_str).and_then(ident) else {
         return;
     };
     // Keyed GLOBALLY by call id (a UUID, `call-<uuid>-<n>`): a fork copies
@@ -376,6 +384,7 @@ fn collect_tool_event(
     let key = update
         .get("toolCallId")
         .and_then(Value::as_str)
+        .and_then(ident)
         .map(|id| format!("grok-tool:{id}"));
     events.tool_events.push(KeyedToolEvent {
         key,
@@ -407,6 +416,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::collector::ident::tests::overlong_ident;
+    use crate::collector::read::tests::oversized_json;
 
     fn write_session(root: &Path, cwd: &str, session: &str, updates: &str, summary: Option<&str>) {
         let dir = root.join("sessions").join(cwd).join(session);
@@ -750,5 +761,86 @@ mod tests {
 
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn update_dated_past_the_plausible_range_reads_as_undated() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let late = TURN
+            .replace("1785170203", "253402290000")
+            .replace("\"p1\"", "\"p2\"");
+        write_session(
+            temp.path(),
+            "cwd1",
+            "sess1",
+            &format!("{TURN}\n{late}\n"),
+            None,
+        );
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(temp.path(), None, false, tokyo);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(collection.usage_events[1].timestamp, None);
+        assert_eq!(collection.session_touches.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_updates_and_summary_are_not_opened() {
+        use crate::collector::read::tests::{finishes_quickly, make_fifo};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let fifo_updates = temp.path().join("sessions/cwd1/sess1");
+        fs::create_dir_all(&fifo_updates).expect("test dirs should be created");
+        make_fifo(&fifo_updates.join("updates.jsonl"));
+        write_session(temp.path(), "cwd1", "sess2", &format!("{TURN}\n"), None);
+        make_fifo(&temp.path().join("sessions/cwd1/sess2/summary.json"));
+
+        let root = temp.path().to_path_buf();
+        let collection = finishes_quickly(move || collect(&root, None, false, UtcOffset::UTC));
+
+        assert_eq!(collection.stats.unreadable_files, 2);
+        assert!(collection.usage_events.is_empty());
+    }
+
+    #[test]
+    fn update_past_the_line_cap_is_skipped_as_a_parse_error() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let second = TURN.replace("\"p1\"", "\"p2\"");
+        write_session(
+            temp.path(),
+            "cwd1",
+            "sess1",
+            &format!("{}\n{second}\n", oversized_json(TURN)),
+            None,
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(collection.usage_events.len(), 1);
+    }
+
+    #[test]
+    fn overlong_prompt_id_and_tool_title_are_missing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let long = overlong_ident();
+        let turn = TURN.replace("\"p1\"", &format!("\"{long}\""));
+        let tool = format!(
+            r#"{{"timestamp":1785170203,"params":{{"update":{{"sessionUpdate":"tool_call","title":"{long}","toolCallId":"c1"}}}}}}"#
+        );
+        write_session(
+            temp.path(),
+            "cwd1",
+            "sess1",
+            &format!("{turn}\n{tool}\n"),
+            None,
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.usage_events.is_empty());
+        assert!(collection.tool_events.is_empty());
     }
 }
