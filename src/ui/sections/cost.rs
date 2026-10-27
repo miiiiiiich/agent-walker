@@ -4,7 +4,8 @@ use crate::ui::{theme, utils};
 use ratatui::prelude::*;
 use time::Duration;
 
-/// Never sum unknown prices as $0; show the gap rather than an understated total.
+/// Unknown prices are left out of the sums, never counted as $0; the title
+/// reports the tokens they cover.
 pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'static>> {
     let label_width = utils::kv_label_width(width);
     let mut total = CostTally::default();
@@ -38,14 +39,14 @@ pub(in crate::ui) fn cost_lines(summary: &Summary, width: u16) -> Vec<Line<'stat
         }
         lines.push(cost_row(
             label,
-            window_cost(summary, window_days).complete_usd(),
+            window_cost(summary, window_days).usd(),
             false,
             label_width,
         ));
     }
     lines.push(cost_row(
         &format!("{} days", summary.period_days),
-        total.complete_usd(),
+        total.usd(),
         true,
         label_width,
     ));
@@ -126,6 +127,33 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn a_partly_unpriced_window_totals_what_is_priced() {
+        let mut summary = crate::share::fixtures::sample_summary();
+        let priced: f64 = summary
+            .models
+            .iter()
+            .map(|model| model.estimated.priced_usd)
+            .sum();
+        let mut unpriced = summary.models[0].clone();
+        unpriced.name = "model-nobody-priced".to_owned();
+        unpriced.estimated = CostTally {
+            priced_usd: 0.0,
+            unpriced_volume: 1_000_000,
+        };
+        summary.models.push(unpriced);
+
+        let lines = cost_lines(&summary, 100);
+        let title = rendered(&lines[0]);
+        assert!(title.contains("1.0M tokens unpriced"), "{title:?}");
+        let total = lines
+            .iter()
+            .map(rendered)
+            .find(|line| line.starts_with(&format!("{} days", summary.period_days)))
+            .expect("the window total renders");
+        assert!(total.contains(&format_usd(priced)), "{total:?}");
     }
 
     #[test]

@@ -625,7 +625,7 @@ pub(crate) mod tests {
     }
 
     /// An unpriced model's volume never lands in the sum as $0: the tally
-    /// records the gap and refuses to call the partial sum a total.
+    /// records the gap and the sum leaves the model out.
     #[test]
     fn tally_keeps_unpriced_volume_out_of_the_sum() {
         install_test_pricing();
@@ -636,7 +636,7 @@ pub(crate) mod tests {
 
         let priced = estimate("claude-opus-4-8", &usage, UsageGranularity::Call);
         assert!(priced.is_complete());
-        assert!((priced.complete_usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
+        assert!((priced.usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
 
         let unpriced = estimate("model-nobody-priced", &usage, UsageGranularity::Call);
         let mut mixed = CostTally::default();
@@ -644,7 +644,12 @@ pub(crate) mod tests {
         mixed.add(&unpriced);
         assert!((mixed.priced_usd - 5.0).abs() < 1e-9);
         assert_eq!(mixed.unpriced_volume, 1_000_000);
-        assert_eq!(mixed.complete_usd(), None);
+        assert!((mixed.usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
+        assert_eq!(
+            unpriced.usd(),
+            None,
+            "nothing priced reads as unknown, not $0"
+        );
 
         let empty = estimate(
             "model-nobody-priced",

@@ -193,7 +193,7 @@ impl CostDto {
             estimated.add(&model.estimated);
         }
         Self {
-            estimated_usd: estimated.complete_usd(),
+            estimated_usd: estimated.usd(),
             unpriced_tokens: estimated.unpriced_volume,
         }
     }
