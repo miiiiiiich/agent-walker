@@ -7,8 +7,8 @@ name: Post release
 # default GITHUB_TOKEN, and GitHub suppresses events caused by that
 # token — a `release: published` trigger would never fire.
 
-# deliberate workflow_run: gated to same-repo tag pushes, secrets only
-# meet code from the pinned default branch
+# deliberate workflow_run: gated to same-repo tag pushes; the X keys sit in
+# the `tweet` environment, which only main may use
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [Release]
@@ -29,6 +29,9 @@ permissions:
 jobs:
   tweet:
     runs-on: ubuntu-latest
+    # Repository secrets would let a workflow_dispatch from any branch run
+    # that branch's copy of this file with the X keys.
+    environment: tweet
     # Release also runs (plan-only, successfully) on pull_request — only tag
     # pushes from this repo may tweet
     if: >-
