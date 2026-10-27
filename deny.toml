@@ -14,9 +14,7 @@ version = 2
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = [
-  { id = "RUSTSEC-2025-0141", reason = "bincode 1.x is unmaintained, not vulnerable; it only encodes the local parse cache and is replaced by the cache-format change" },
-]
+ignore = []
 
 [licenses]
 version = 2

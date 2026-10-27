@@ -7,6 +7,7 @@ use crate::model::{
     Collection, ContextBand, ContextReason, ContextSummary, Provider, SourceKind, UsageEvent,
     UsageGranularity,
 };
+use crate::timestamp::local_date;
 
 /// Shared context-size bands let the Total tab add provider summaries element-wise.
 const BANDS: [(&str, u64); 4] = [
@@ -19,6 +20,10 @@ const BANDS: [(&str, u64); 4] = [
 const DEFAULT_READ_MULTIPLIER: f64 = 0.1;
 const DEFAULT_WRITE_5M_MULTIPLIER: f64 = 1.25;
 const DEFAULT_WRITE_1H_MULTIPLIER: f64 = 2.0;
+/// Far above any cache-to-input ratio a priced model lists. Past it the
+/// ratio comes from a near-zero input rate, not from caching, and would
+/// weight every cached token into the panel's ceiling.
+const MAX_MULTIPLIER: f64 = 10.0;
 
 /// Infer retention from the serving model; leave unknown families unclassified
 /// rather than fabricating expiry rows.
@@ -65,10 +70,18 @@ fn multipliers(model: Option<&str>) -> Multipliers {
     if pricing.input <= 0.0 {
         return fallback;
     }
+    let ratio = |rate: f64, default: f64| {
+        let ratio = rate / pricing.input;
+        if (0.0..=MAX_MULTIPLIER).contains(&ratio) {
+            ratio
+        } else {
+            default
+        }
+    };
     Multipliers {
-        read: pricing.cache_read / pricing.input,
-        write_5m: pricing.cache_write_5m / pricing.input,
-        write_1h: pricing.cache_write_1h / pricing.input,
+        read: ratio(pricing.cache_read, fallback.read),
+        write_5m: ratio(pricing.cache_write_5m, fallback.write_5m),
+        write_1h: ratio(pricing.cache_write_1h, fallback.write_1h),
     }
 }
 
@@ -166,8 +179,8 @@ pub(super) fn context_summary(
         return None;
     }
     let in_window = |timestamp: OffsetDateTime| {
-        let date = timestamp.to_offset(local_offset).date();
-        date >= window_start && date <= period_end
+        local_date(timestamp, local_offset)
+            .is_some_and(|date| date >= window_start && date <= period_end)
     };
 
     let mut summary = empty_summary();
@@ -463,6 +476,23 @@ mod tests {
         // Use nonfallback cache ratios so this test distinguishes the pricing-table path.
         let mut e = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 10_000, 100_000);
         e.model = Some("gpt-5.5".to_owned());
+        let summary = context_summary(
+            &collection(Provider::Codex, vec![e]),
+            date!(2026 - 06 - 01),
+            date!(2026 - 06 - 30),
+            UtcOffset::UTC,
+        )
+        .expect("summary");
+        assert_eq!(summary.effective_tokens, 10_000);
+    }
+
+    /// Each rate is in bounds, but cache reads at 1e298× input would weight
+    /// every cached token to the counter's ceiling.
+    #[test]
+    fn a_near_zero_input_rate_falls_back_to_default_multipliers() {
+        crate::cost::tests::install_test_pricing();
+        let mut e = event("s1", datetime!(2026-06-08 10:00 UTC), 0, 0, 100_000);
+        e.model = Some("tiny-input".to_owned());
         let summary = context_summary(
             &collection(Provider::Codex, vec![e]),
             date!(2026 - 06 - 01),

@@ -22,13 +22,16 @@ path = "src/bin/agw.rs"
 
 [dependencies]
 anyhow = "1.0.100"
-bincode = "1.3.3"
 clap = { version = "4.5.53", features = ["derive"] }
 crossterm = "0.29.0"
 dirs = "7.0.0"
+# Parse-cache encoding. Not bincode: unmaintained (RUSTSEC-2025-0141).
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 ratatui = "0.30.1"
 rayon = "1.11.0"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+# `hooks` for the progress handler and `limits` for the value cap that bound
+# reads of an untrusted agent store (collector/store.rs).
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "limits"] }
 # Pure-Rust zstd decoder over the `zstd` crate: no libzstd C build per
 # cargo-dist target. Checksums are not verified (`hash` off); a corrupt frame
 # surfaces as unparseable lines.
@@ -41,6 +44,11 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 resvg = "0.48"
 arboard = "3.6.1"
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW / O_NONBLOCK for opening cache files and agent logs without
+# following a swapped-in link or blocking on a FIFO; std has no constants for them.
+libc = "0.2.186"
 
 [dev-dependencies]
 # OpenCode collector tests build throwaway SQLite fixtures in a temp dir.

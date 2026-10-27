@@ -10,6 +10,7 @@ use crate::model::{CostTally, TokenUsage, UsageGranularity};
 
 mod litellm;
 mod remote;
+mod validate;
 
 pub use remote::spawn_pricing_refresh;
 
@@ -40,11 +41,44 @@ pub struct Pricing {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(from = "StoredModel")]
 struct ModelPricing {
     #[serde(flatten)]
     base: Pricing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     long_context: Option<LongContext>,
+}
+
+/// A stored model as written, base rates inline. Read through this rather
+/// than `flatten`, which buffers every field of the entry, unknown ones
+/// included, before sorting them out.
+#[derive(Deserialize)]
+struct StoredModel {
+    input: f64,
+    output: f64,
+    #[serde(default)]
+    cache_read: f64,
+    #[serde(default)]
+    cache_write_5m: f64,
+    #[serde(default)]
+    cache_write_1h: f64,
+    #[serde(default)]
+    long_context: Option<LongContext>,
+}
+
+impl From<StoredModel> for ModelPricing {
+    fn from(stored: StoredModel) -> Self {
+        Self {
+            base: Pricing {
+                input: stored.input,
+                output: stored.output,
+                cache_read: stored.cache_read,
+                cache_write_5m: stored.cache_write_5m,
+                cache_write_1h: stored.cache_write_1h,
+            },
+            long_context: stored.long_context,
+        }
+    }
 }
 
 /// Rates for every token of a request whose prompt is over
@@ -80,15 +114,31 @@ struct Snapshot {
     fetched: Option<String>,
     #[serde(rename = "_format", default)]
     format: u32,
+    #[serde(deserialize_with = "validate::bounded_map")]
     models: HashMap<String, ModelPricing>,
+    /// Model name as logged -> its pricing, or `None` when nothing matches.
+    #[serde(skip)]
+    resolved: RwLock<HashMap<String, Option<ModelPricing>>>,
 }
 
 fn loaded() -> &'static RwLock<Option<Snapshot>> {
     LOADED.get_or_init(|| RwLock::new(None))
 }
 
+/// The fetched table and the stored snapshot both come through here, so a
+/// file on disk meets the same bounds as a fresh fetch.
 fn parse_snapshot_json(raw: &str) -> Option<Snapshot> {
-    let snapshot = serde_json::from_str::<Snapshot>(raw).ok()?;
+    let mut snapshot = serde_json::from_str::<Snapshot>(raw).ok()?;
+    validate::retain_in_bounds(&mut snapshot.models);
+    // The stamp is printed in the COST panel; anything but a date would
+    // reach the terminal as is. Without one the snapshot is refetched.
+    snapshot.fetched = snapshot.fetched.filter(|stamp| {
+        time::Date::parse(
+            stamp,
+            time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .is_ok()
+    });
     (!snapshot.models.is_empty()).then_some(snapshot)
 }
 
@@ -135,28 +185,51 @@ pub fn pricing_for(model_name: &str) -> Option<Pricing> {
     model_pricing(model_name).map(|pricing| pricing.base)
 }
 
-/// Look up pricing: exact snapshot match first, then the longest snapshot key
-/// the name extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
-/// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`). A
-/// plain word suffix (`gemini-pro-default`) must not match a shorter base
-/// key. Retry dotted version segments as dashed only as a fallback, so ids whose pricing
-/// keys genuinely contain dots (`gpt-3.5-turbo`) resolve exactly first.
 fn model_pricing(model_name: &str) -> Option<ModelPricing> {
-    let mut name = normalize(model_name);
-    if name == "codex" || name == "openai" || name == "codex-auto-review" {
-        CODEX_DEFAULT_MODEL.clone_into(&mut name);
+    loaded().read().ok()?.as_ref()?.resolve(model_name)
+}
+
+impl Snapshot {
+    /// Every usage event looks its model up, and a name with no exact key
+    /// scans the whole table; each distinct name is resolved once per
+    /// snapshot instead.
+    fn resolve(&self, model_name: &str) -> Option<ModelPricing> {
+        if let Some(resolved) = self
+            .resolved
+            .read()
+            .ok()
+            .and_then(|memo| memo.get(model_name).copied())
+        {
+            return resolved;
+        }
+        let resolved = self.match_name(model_name);
+        if let Ok(mut memo) = self.resolved.write() {
+            memo.insert(model_name.to_owned(), resolved);
+        }
+        resolved
     }
 
-    let loaded = loaded().read().ok()?;
-    let snapshot = loaded.as_ref()?;
-    if let Some(pricing) = lookup(snapshot, &name) {
-        return Some(pricing);
+    /// Exact snapshot match first, then the longest snapshot key the name
+    /// extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
+    /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`).
+    /// A plain word suffix (`gemini-pro-default`) must not match a shorter
+    /// base key. Retry dotted version segments as dashed only as a fallback,
+    /// so ids whose pricing keys genuinely contain dots (`gpt-3.5-turbo`)
+    /// resolve exactly first.
+    fn match_name(&self, model_name: &str) -> Option<ModelPricing> {
+        let mut name = normalize(model_name);
+        if name == "codex" || name == "openai" || name == "codex-auto-review" {
+            CODEX_DEFAULT_MODEL.clone_into(&mut name);
+        }
+        if let Some(pricing) = lookup(self, &name) {
+            return Some(pricing);
+        }
+        let dashed = name.replace('.', "-");
+        if dashed != name {
+            return lookup(self, &dashed);
+        }
+        None
     }
-    let dashed = name.replace('.', "-");
-    if dashed != name {
-        return lookup(snapshot, &dashed);
-    }
-    None
 }
 
 fn lookup(snapshot: &Snapshot, name: &str) -> Option<ModelPricing> {
@@ -280,6 +353,7 @@ pub(crate) mod tests {
         replace_loaded(Some(Snapshot {
             fetched: Some("test".to_owned()),
             format: SNAPSHOT_FORMAT,
+            resolved: RwLock::default(),
             models: HashMap::from([
                 (
                     "claude-opus-4-8".to_owned(),
@@ -320,8 +394,49 @@ pub(crate) mod tests {
                     },
                 ),
                 ("gemini-3.5-flash".to_owned(), flat(openai(1.5, 9.0, 0.15))),
+                (
+                    "tiny-input".to_owned(),
+                    flat(Pricing {
+                        input: 1e-300,
+                        output: 1e-6,
+                        cache_read: 1e-2,
+                        cache_write_5m: 1e-2,
+                        cache_write_1h: 1e-2,
+                    }),
+                ),
             ]),
         }));
+    }
+
+    /// A hit is answered from the memo, not the table: clearing the table
+    /// afterwards changes nothing for names already resolved.
+    #[test]
+    fn each_model_name_is_resolved_once_per_snapshot() {
+        let mut snapshot = Snapshot {
+            fetched: None,
+            format: SNAPSHOT_FORMAT,
+            models: HashMap::from([(
+                "claude-sonnet-4-5".to_owned(),
+                ModelPricing {
+                    base: Pricing {
+                        input: 3e-6,
+                        output: 1.5e-5,
+                        cache_read: 3e-7,
+                        cache_write_5m: 3.75e-6,
+                        cache_write_1h: 6e-6,
+                    },
+                    long_context: None,
+                },
+            )]),
+            resolved: RwLock::default(),
+        };
+        let dated = "claude-sonnet-4-5-20250929";
+        assert!(snapshot.resolve(dated).is_some());
+        assert!(snapshot.resolve("unknown-model").is_none());
+        snapshot.models.clear();
+        assert!(snapshot.resolve(dated).is_some());
+        assert!(snapshot.resolve("unknown-model").is_none());
+        assert_eq!(snapshot.resolved.read().unwrap().len(), 2);
     }
 
     #[test]

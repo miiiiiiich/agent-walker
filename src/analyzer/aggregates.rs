@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use time::{Date, UtcOffset};
 
 use crate::model::{AgentStat, CostTally, ModelStat, ProjectStat, SourceKind, TokenUsage};
+use crate::timestamp::{local_date, to_local};
 
 #[derive(Default)]
 pub(super) struct Aggregates {
@@ -30,10 +31,12 @@ impl Aggregates {
         previous_start: Date,
         local_offset: UtcOffset,
     ) {
-        let Some(timestamp) = event.timestamp else {
+        let Some(timestamp) = event
+            .timestamp
+            .and_then(|timestamp| to_local(timestamp, local_offset))
+        else {
             return;
         };
-        let timestamp = timestamp.to_offset(local_offset);
         let date = timestamp.date();
         if date >= previous_start && date < period_start {
             self.previous_total_volume = self
@@ -101,10 +104,12 @@ impl Aggregates {
         period_end: Date,
         local_offset: UtcOffset,
     ) {
-        let Some(timestamp) = event.timestamp else {
+        let Some(date) = event
+            .timestamp
+            .and_then(|timestamp| local_date(timestamp, local_offset))
+        else {
             return;
         };
-        let date = timestamp.to_offset(local_offset).date();
         if date < period_start || date > period_end {
             return;
         }
@@ -130,7 +135,9 @@ impl Aggregates {
         previous_start: Date,
         local_offset: UtcOffset,
     ) {
-        let date = touch.timestamp.to_offset(local_offset).date();
+        let Some(date) = local_date(touch.timestamp, local_offset) else {
+            return;
+        };
         if date >= previous_start && date < period_start {
             return;
         }

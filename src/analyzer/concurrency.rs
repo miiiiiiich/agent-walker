@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{Collection, Orchestration};
+use crate::timestamp::local_date;
 
 /// Bound session spans per (session, local day): a resumed id reused across
 /// days must not collapse into one giant span.
@@ -14,7 +15,9 @@ pub(crate) fn session_day_bounds(
 ) -> HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> {
     let mut bounds: HashMap<(&str, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
     for touch in &collection.session_touches {
-        let date = touch.timestamp.to_offset(local_offset).date();
+        let Some(date) = local_date(touch.timestamp, local_offset) else {
+            continue;
+        };
         if date < period_start || date > period_end {
             continue;
         }

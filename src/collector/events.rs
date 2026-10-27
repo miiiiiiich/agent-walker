@@ -7,6 +7,7 @@ use crate::model::{
     CreditSample, DurationEvent, EffortEvent, InterruptEvent, ModeEvent, PaceEvent,
     PermissionEvent, RateLimitSample, SessionTouch, ToolEvent, UsageEvent,
 };
+use crate::timestamp::local_date;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileEvents {
@@ -103,10 +104,11 @@ impl FileEvents {
         }
         let mut bounds: HashMap<(String, Date), (OffsetDateTime, OffsetDateTime)> = HashMap::new();
         for touch in self.session_touches.drain(..) {
-            let key = (
-                touch.session_id,
-                touch.timestamp.to_offset(local_offset).date(),
-            );
+            // Undatable locally, the analyzer would drop the touch anyway.
+            let Some(date) = local_date(touch.timestamp, local_offset) else {
+                continue;
+            };
+            let key = (touch.session_id, date);
             bounds
                 .entry(key)
                 .and_modify(|(start, end)| {
@@ -127,5 +129,32 @@ impl FileEvents {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::{datetime, offset};
+
+    use super::*;
+
+    #[test]
+    fn touch_that_overflows_locally_is_dropped_not_a_panic() {
+        let touch = |timestamp| SessionTouch {
+            timestamp,
+            session_id: "s1".to_owned(),
+        };
+        let mut events = FileEvents {
+            session_touches: vec![
+                touch(datetime!(2026-10-25 00:00 UTC)),
+                touch(datetime!(2026-10-25 01:00 UTC)),
+                touch(datetime!(9999-12-31 23:00 UTC)),
+            ],
+            ..FileEvents::default()
+        };
+
+        events.compress_touches(offset!(+9));
+
+        assert_eq!(events.session_touches.len(), 2);
     }
 }

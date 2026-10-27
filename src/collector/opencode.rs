@@ -1,20 +1,20 @@
-//! We open the live DB **read-only** and read it directly. The read-only flag
-//! means SQLite can never write the user's store (no checkpoint, no recovery
-//! write); in WAL mode our reads don't block OpenCode's writes, and a brief
-//! `busy_timeout` rides out the rare exclusive moments. Reading directly — rather
-//! than copying the whole DB into memory first — keeps memory proportional to
-//! the recent-window rows we actually parse, not the entire history.
+//! We read the live DB directly, opened through `store::open_store` (read-only;
+//! see there for what that still creates beside a WAL store). In WAL mode our
+//! reads don't block OpenCode's writes. Reading directly — rather than copying
+//! the whole DB into memory first — keeps memory proportional to the
+//! recent-window rows we actually parse, not the entire history.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::collector::store::{open_store, read_deadline};
 use crate::model::{Collection, Provider, TokenUsage};
+use crate::timestamp::{from_unix_millis, to_local};
 
 mod legacy;
 mod v2;
@@ -48,8 +48,9 @@ pub fn collect(
     // whenever the copy was read first (an earlier-sorted DB file, or a
     // corrupt legacy message). A message's tools come from one generation.
     let mut tools_from = HashMap::new();
+    let deadline = read_deadline();
     for db_path in db_paths(root) {
-        let Some(conn) = open_readonly(&db_path) else {
+        let Some(conn) = open_store(&db_path, deadline) else {
             collection.stats.unreadable_files += 1;
             continue;
         };
@@ -133,17 +134,6 @@ fn resolve_db_paths(root: &Path, override_db: Option<OsString>) -> Vec<PathBuf> 
     paths
 }
 
-/// Open the live DB read-only. The read-only flag guarantees SQLite never writes
-/// the user's store; the `busy_timeout` rides out a brief write lock (e.g. a
-/// checkpoint restart) instead of failing immediately. A WAL DB that needs
-/// recovery with no `-shm` present can't be opened read-only; that DB is skipped
-/// rather than touched.
-fn open_readonly(db: &Path) -> Option<Connection> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    let _ = conn.busy_timeout(Duration::from_millis(500));
-    Some(conn)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Generation {
     Legacy,
@@ -169,9 +159,7 @@ fn token(value: &Value, pointer: &str) -> u64 {
 }
 
 fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
-        .ok()
-        .map(|time| time.to_offset(local_offset))
+    to_local(from_unix_millis(ms)?, local_offset)
 }
 
 #[cfg(test)]

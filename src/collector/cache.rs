@@ -9,9 +9,15 @@ use time::UtcOffset;
 use tracing::debug;
 
 use super::events::FileEvents;
+use crate::owned_file;
 
-/// Parsing or attribution changes require a version bump so cached events do not retain old semantics.
-const CACHE_VERSION: u32 = 23;
+/// Parsing, attribution, or encoding changes require a version bump so cached
+/// events are never read with old semantics.
+const CACHE_VERSION: u32 = 25;
+
+/// Far above what months of heavy use encode to; bounds what a crafted or
+/// runaway file can make a load read into memory.
+const MAX_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileStamp {
@@ -108,9 +114,11 @@ fn cache_is_reusable(cache: &CacheFile, offset_seconds: i32) -> bool {
 }
 
 fn load_cache(path: &Path, offset_seconds: i32) -> Option<CacheFile> {
-    let bytes = fs::read(path).ok()?;
-    match bincode::deserialize::<CacheFile>(&bytes) {
-        Ok(cache) if cache_is_reusable(&cache, offset_seconds) => Some(cache),
+    let bytes = owned_file::read_regular(path, MAX_CACHE_BYTES)
+        .inspect_err(|error| debug!(path = %path.display(), %error, "cache not read"))
+        .ok()?;
+    match decode(&bytes) {
+        Some(cache) if cache_is_reusable(&cache, offset_seconds) => Some(cache),
         _ => {
             debug!(path = %path.display(), "discarding stale, corrupt, or offset-changed cache");
             None
@@ -118,43 +126,33 @@ fn load_cache(path: &Path, offset_seconds: i32) -> Option<CacheFile> {
     }
 }
 
-/// The cache holds project paths and session ids derived from the logs, so
-/// it is written owner-only where the platform can express that.
-#[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?
-        .write_all(bytes)?;
-    // `mode` only applies on create; a leftover temp keeps its old bits.
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    fs::write(path, bytes)
+/// postcard stops where the struct ends, so a file in another encoding can
+/// decode as a short prefix (a bincode-era file stamped with the current
+/// version reads as an empty cache); only an exact fit counts.
+fn decode(bytes: &[u8]) -> Option<CacheFile> {
+    match postcard::take_from_bytes::<CacheFile>(bytes) {
+        Ok((cache, [])) => Some(cache),
+        _ => None,
+    }
 }
 
 fn store_cache(path: &Path, cache: &CacheFile) {
     let Some(parent) = path.parent() else {
         return;
     };
-    if fs::create_dir_all(parent).is_err() {
+    if owned_file::create_private_dir(parent).is_err() {
         return;
     }
-    let Ok(bytes) = bincode::serialize(cache) else {
+    let Ok(bytes) = postcard::to_stdvec(cache) else {
         return;
     };
-    // Per-process name: two concurrent runs must never share a temp inode.
-    let temp = path.with_extension(format!("tmp{}", std::process::id()));
-    if write_private(&temp, &bytes).is_ok() {
-        // Replace by rename without unlinking first, preserving atomic replacement on Unix.
-        let _ = fs::rename(&temp, path);
+    // Every later load would refuse it, so writing it only costs time.
+    if bytes.len() as u64 > MAX_CACHE_BYTES {
+        debug!(path = %path.display(), bytes = bytes.len(), "cache over the read limit; not stored");
+        return;
+    }
+    if let Err(error) = owned_file::write_replacing(path, &bytes, owned_file::PRIVATE_MODE) {
+        debug!(path = %path.display(), %error, "cache not stored; next run re-parses");
     }
 }
 
@@ -247,6 +245,29 @@ mod tests {
         }
     }
 
+    fn encoded(cache: &CacheFile) -> Vec<u8> {
+        postcard::to_stdvec(cache).unwrap()
+    }
+
+    /// `CacheFile` as bincode 1 wrote it: fixed-width little-endian integers
+    /// and u64 length prefixes, one entry with empty events.
+    fn bincode_era_cache(version: u32) -> Vec<u8> {
+        let path = b"/logs/a.jsonl";
+        let mut bytes = Vec::new();
+        bytes.extend(version.to_le_bytes());
+        bytes.extend(0_i32.to_le_bytes());
+        bytes.extend(1_u64.to_le_bytes());
+        bytes.extend((path.len() as u64).to_le_bytes());
+        bytes.extend(path);
+        bytes.extend(0_u128.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        // 11 event vectors, then lines_seen and parse_errors.
+        for _ in 0..13 {
+            bytes.extend(0_u64.to_le_bytes());
+        }
+        bytes
+    }
+
     #[test]
     fn cache_invalidated_on_offset_or_version_change() {
         let jst = 9 * 3600; // +09:00 in seconds
@@ -265,6 +286,7 @@ mod tests {
             "codex-v20.bin",
             "claude.tmp111",
             "claude.tmp222",
+            ".claude.bin.tmp333",
             "claude.bin",
             "claude-vx.bin",
             "pricing.json",
@@ -272,12 +294,14 @@ mod tests {
             fs::write(dir.path().join(name), b"x").unwrap();
         }
         let now = SystemTime::now();
-        fs::File::options()
-            .write(true)
-            .open(dir.path().join("claude.tmp222"))
-            .unwrap()
-            .set_modified(now - ORPHAN_TEMP_AGE * 2)
-            .unwrap();
+        for orphan in ["claude.tmp222", ".claude.bin.tmp333"] {
+            fs::File::options()
+                .write(true)
+                .open(dir.path().join(orphan))
+                .unwrap()
+                .set_modified(now - ORPHAN_TEMP_AGE * 2)
+                .unwrap();
+        }
         sweep(dir.path(), now);
         let mut left: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
@@ -301,7 +325,7 @@ mod tests {
     fn discarded_cache_is_replaced_even_with_no_files() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("claude.bin");
-        let stale = bincode::serialize(&cache_with(CACHE_VERSION - 1, 0)).unwrap();
+        let stale = encoded(&cache_with(CACHE_VERSION - 1, 0));
         fs::write(&cache, stale).unwrap();
         assert!(load_cache(&cache, 0).is_none());
 
@@ -358,5 +382,141 @@ mod tests {
         parse_files_with_cache(Some(&cache), &files, UtcOffset::UTC, parse);
         assert_eq!(parses.load(Ordering::SeqCst), 2, "changed file re-parses");
         assert_ne!(modified(), sentinel, "changed run rewrites");
+    }
+
+    #[test]
+    fn bincode_era_cache_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("claude.bin");
+        for version in [CACHE_VERSION - 1, CACHE_VERSION] {
+            fs::write(&cache, bincode_era_cache(version)).unwrap();
+            assert!(load_cache(&cache, 0).is_none(), "version {version}");
+        }
+    }
+
+    #[test]
+    fn length_prefixes_past_the_input_are_rejected() {
+        let huge = postcard::to_stdvec(&u64::MAX).unwrap();
+        // Version and offset; the trailing zero is the entry count.
+        let mut header = encoded(&cache_with(CACHE_VERSION, 0));
+        assert_eq!(header.pop(), Some(0));
+        let one_entry = [header.clone(), vec![1]].concat();
+        let path = postcard::to_stdvec(&PathBuf::from("/a")).unwrap();
+
+        // mtime_ns, size, 11 empty event vectors, lines_seen, parse_errors.
+        let valid = [one_entry.clone(), path.clone(), vec![0; 15]].concat();
+        assert!(
+            decode(&valid).is_some(),
+            "the crafted layout is a real cache"
+        );
+
+        let entry_count = [header, huge.clone()].concat();
+        let path_len = [one_entry.clone(), huge.clone()].concat();
+        let events_len = [one_entry, path, vec![0, 0], huge].concat();
+
+        for bytes in [entry_count, path_len, events_len] {
+            assert!(decode(&bytes).is_none());
+        }
+    }
+
+    #[test]
+    fn oversized_cache_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("claude.bin");
+        fs::write(&cache, encoded(&cache_with(CACHE_VERSION, 0))).unwrap();
+        assert!(load_cache(&cache, 0).is_some());
+
+        fs::File::options()
+            .write(true)
+            .open(&cache)
+            .unwrap()
+            .set_len(MAX_CACHE_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            owned_file::read_regular(&cache, MAX_CACHE_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::FileTooLarge
+        );
+        assert!(load_cache(&cache, 0).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_cache_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere.bin");
+        fs::write(&elsewhere, encoded(&cache_with(CACHE_VERSION, 0))).unwrap();
+        assert!(load_cache(&elsewhere, 0).is_some());
+        let cache = dir.path().join("claude.bin");
+        std::os::unix::fs::symlink(&elsewhere, &cache).unwrap();
+
+        assert!(load_cache(&cache, 0).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_at_the_cache_path_is_skipped_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("claude.bin");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&cache)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = cache.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(load_cache(&path, 0).is_none());
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(5));
+        if outcome.is_err() {
+            // Give the blocked open a writer so the thread can finish.
+            let _ = fs::File::options().write(true).open(&cache);
+        }
+        assert_eq!(outcome, Ok(true), "a FIFO must be skipped, not opened");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_ignores_a_symlink_planted_at_the_old_temp_name() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(
+            &victim,
+            dir.path().join(format!("claude.tmp{}", std::process::id())),
+        )
+        .unwrap();
+        let cache = dir.path().join("claude.bin");
+
+        parse_files_with_cache(Some(&cache), &[], UtcOffset::UTC, |_| None);
+
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(fs::symlink_metadata(&cache).unwrap().is_file());
+        assert!(load_cache(&cache, 0).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_cache_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("agent-walker").join("claude.bin");
+
+        parse_files_with_cache(Some(&cache), &[], UtcOffset::UTC, |_| None);
+
+        let parent = fs::metadata(cache.parent().unwrap()).unwrap();
+        assert_eq!(parent.permissions().mode() & 0o777, 0o700);
+        assert!(load_cache(&cache, 0).is_some());
     }
 }

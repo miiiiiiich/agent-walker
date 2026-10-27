@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{Collection, ModesSummary};
+use crate::timestamp::local_date;
 
 pub(super) fn modes_summary(
     collection: &Collection,
@@ -12,7 +13,7 @@ pub(super) fn modes_summary(
 ) -> ModesSummary {
     let in_window = |timestamp: Option<OffsetDateTime>| {
         timestamp
-            .map(|ts| ts.to_offset(local_offset).date())
+            .and_then(|ts| local_date(ts, local_offset))
             .is_some_and(|date| date >= window_start && date <= period_end)
     };
 

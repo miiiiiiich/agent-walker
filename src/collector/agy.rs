@@ -1,13 +1,16 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::Path;
 use std::time::SystemTime;
 
 use serde_json::Value;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
+use crate::collector::ident::ident;
+use crate::collector::json::parse_line;
+use crate::collector::read::{Lines, open_regular};
 use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
 use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
+use crate::timestamp::{from_unix_seconds, plausible};
 
 mod conv;
 
@@ -80,32 +83,19 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 }
 
 fn parse_history_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let mut events = FileEvents::default();
-    let reader = BufReader::new(file);
 
-    for (line_index, line) in reader.lines().enumerate() {
-        events.lines_seen += 1;
-        let Ok(line) = line else {
-            events.parse_errors += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            events.parse_errors += 1;
+    while let Some((line_index, line)) = lines.next(&mut events) {
+        let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
         // An unusable timestamp cannot be placed on the timeline; count it as a
         // parse error rather than dropping it silently.
-        let Some(timestamp) =
-            value
-                .get("timestamp")
-                .and_then(Value::as_i64)
-                .and_then(|timestamp_ms| {
-                    OffsetDateTime::from_unix_timestamp(timestamp_ms / 1_000).ok()
-                })
+        let Some(timestamp) = value
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .and_then(|timestamp_ms| from_unix_seconds(timestamp_ms / 1_000))
         else {
             events.parse_errors += 1;
             continue;
@@ -123,19 +113,17 @@ fn parse_history_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents
 }
 
 fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let file = File::open(path).ok()?;
+    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let mut events = FileEvents::default();
     let log_session_id = fallback_session_id(path);
     let mut current_conversation_id = None;
-    let reader = BufReader::new(file);
 
-    for line in reader.lines() {
-        events.lines_seen += 1;
-        let Ok(line) = line else {
+    while let Some((_, line)) = lines.next(&mut events) {
+        let Ok(line) = std::str::from_utf8(line) else {
             events.parse_errors += 1;
             continue;
         };
-        let timestamp = parse_log_timestamp(path, &line, local_offset);
+        let timestamp = parse_log_timestamp(path, line, local_offset);
 
         if line.contains("HandleUserInput called with text") {
             let session_id = current_conversation_id
@@ -151,7 +139,7 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
 
         if line.contains("Responding to tool confirmation") {
-            current_conversation_id = value_after(&line, "convID=").or(current_conversation_id);
+            current_conversation_id = value_after(line, "convID=").or(current_conversation_id);
             let session_id = current_conversation_id
                 .clone()
                 .or_else(|| log_session_id.clone());
@@ -165,7 +153,7 @@ fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     event: ToolEvent {
                         timestamp: Some(timestamp),
                         session_id: Some(session_id),
-                        tool_name: command_grant(&line)
+                        tool_name: command_grant(line)
                             .unwrap_or_else(|| "ToolConfirmation".to_owned()),
                         subagent_type: None,
                         source_kind: SourceKind::Main,
@@ -201,7 +189,7 @@ fn parse_log_timestamp(path: &Path, line: &str, local_offset: UtcOffset) -> Opti
     let time = Time::from_hms_micro(hour, minute, second, microsecond).ok()?;
     // Log lines carry no timezone; the CLI wrote them in this machine's local
     // time, so assume the local offset, not UTC.
-    Some(PrimitiveDateTime::new(date, time).assume_offset(local_offset))
+    plausible(PrimitiveDateTime::new(date, time).assume_offset(local_offset))
 }
 
 fn log_year(path: &Path) -> Option<i32> {
@@ -220,7 +208,7 @@ fn value_after(line: &str, marker: &str) -> Option<String> {
     if value.is_empty() {
         None
     } else {
-        Some(value.to_owned())
+        ident(value).map(ToOwned::to_owned)
     }
 }
 
@@ -228,7 +216,7 @@ fn command_grant(line: &str) -> Option<String> {
     let command_start = line.find("command(")? + "command(".len();
     let rest = line.get(command_start..)?;
     let command = rest.get(0..rest.find(')')?)?.trim();
-    let executable = command.split_whitespace().next()?;
+    let executable = ident(command.split_whitespace().next()?)?;
     if executable.is_empty() {
         None
     } else {
@@ -241,6 +229,7 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+        .and_then(ident)
         .map(ToOwned::to_owned)
 }
 
@@ -260,6 +249,10 @@ mod tests {
 
     use super::conv::tests::{served_only_gen_blob, step_metadata, write_dated_conversation};
     use super::*;
+    use crate::collector::ident::tests::overlong_ident;
+    use crate::collector::read::tests::oversized_json;
+
+    const INPUT_LOG_LINE: &str = r#"I0609 11:27:22.646388  8577 input_loop.go:34] HandleUserInput called with text: "redacted""#;
 
     #[test]
     fn collects_antigravity_history_model_events_and_tool_confirmations() {
@@ -359,5 +352,143 @@ mod tests {
                 .duration_secs(),
             7_200
         );
+    }
+
+    #[test]
+    fn history_and_log_rows_past_the_plausible_range_are_undated() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
+        fs::create_dir_all(&log_dir).expect("test dirs should be created");
+        fs::write(
+            cli.join("history.jsonl"),
+            concat!(
+                r#"{"timestamp":1780726748000,"conversationId":"c1"}"#,
+                "\n",
+                r#"{"timestamp":253402290000000,"conversationId":"c2"}"#,
+            ),
+        )
+        .expect("history fixture should be written");
+        fs::write(log_dir.join("cli-99991231_235900.log"), INPUT_LOG_LINE)
+            .expect("log fixture should be written");
+
+        let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
+        let collection = collect(temp.path(), None, false, tokyo);
+
+        assert_eq!(collection.session_touches.len(), 1);
+        assert_eq!(collection.stats.parse_errors, 1);
+    }
+
+    #[test]
+    fn history_and_log_lines_past_the_cap_are_parse_errors() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
+        fs::create_dir_all(&log_dir).expect("test dirs should be created");
+        let history = r#"{"timestamp":1780726748000,"conversationId":"c1"}"#;
+        fs::write(
+            cli.join("history.jsonl"),
+            format!("{}\n{history}\n", oversized_json(history)),
+        )
+        .expect("history fixture should be written");
+        let padded_log_line = format!(
+            "{INPUT_LOG_LINE}{}",
+            " ".repeat(usize::try_from(crate::collector::read::MAX_LINE_BYTES).expect("fits"))
+        );
+        fs::write(
+            log_dir.join("cli-20260609_112719.log"),
+            format!("{padded_log_line}\n{INPUT_LOG_LINE}\n"),
+        )
+        .expect("log fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.parse_errors, 2);
+        assert_eq!(collection.session_touches.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_that_is_a_fifo_is_not_opened() {
+        use crate::collector::read::tests::{finishes_quickly, make_fifo};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        fs::create_dir_all(&cli).expect("test dirs should be created");
+        make_fifo(&cli.join("history.jsonl"));
+
+        let root = temp.path().to_path_buf();
+        let collection = finishes_quickly(move || collect(&root, None, false, UtcOffset::UTC));
+
+        assert_eq!(collection.stats.unreadable_files, 1);
+    }
+
+    #[test]
+    fn generation_view_is_not_read() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let conversations = temp.path().join(CLI_STORE).join("conversations");
+        fs::create_dir_all(&conversations).expect("test dirs should be created");
+        let conn = rusqlite::Connection::open(conversations.join("c1.db"))
+            .expect("fixture db should open");
+        conn.execute_batch(
+            "CREATE TABLE hidden (idx INTEGER PRIMARY KEY, data BLOB);
+             CREATE VIEW gen_metadata AS SELECT idx, data FROM hidden;",
+        )
+        .expect("fixture schema should be created");
+        conn.execute(
+            "INSERT INTO hidden VALUES (0, ?1)",
+            [served_only_gen_blob("gemini-3.8-flash", "r1", None)],
+        )
+        .expect("generation row should insert");
+        drop(conn);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert!(collection.usage_events.is_empty());
+    }
+
+    #[test]
+    fn overlong_conversation_id_falls_back_to_the_log() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let log_dir = temp.path().join(CLI_STORE).join("log");
+        fs::create_dir_all(&log_dir).expect("test dirs should be created");
+        let long = overlong_ident();
+        fs::write(
+            log_dir.join("cli-20260609_112719.log"),
+            format!(
+                "I0609 11:38:30.959991  8577 input_loop.go:451] Responding to tool confirmation: convID={long}, stepIdx=38, approved=true, turnGrants=[command(bun run)]\n"
+            ),
+        )
+        .expect("log fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(
+            collection.tool_events[0].session_id.as_deref(),
+            Some("cli-20260609_112719")
+        );
+    }
+
+    #[test]
+    fn generated_generation_column_is_not_read() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let conversations = temp.path().join(CLI_STORE).join("conversations");
+        fs::create_dir_all(&conversations).expect("test dirs should be created");
+        let conn = rusqlite::Connection::open(conversations.join("c1.db"))
+            .expect("fixture db should open");
+        conn.execute_batch(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY,
+                 data BLOB GENERATED ALWAYS AS (zeroblob(65536)) VIRTUAL);
+             WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 128)
+             INSERT INTO gen_metadata (idx) SELECT n FROM r;",
+        )
+        .expect("fixture schema should be created");
+        drop(conn);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.stats.files_seen, 1);
+        assert_eq!(collection.stats.lines_seen, 0);
     }
 }
