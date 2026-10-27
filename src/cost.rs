@@ -21,7 +21,7 @@ static LOADED: OnceLock<RwLock<Option<Snapshot>>> = OnceLock::new();
 /// parses, and trusted for the rest of the day it would misprice until the
 /// next day's fetch, so a mismatch refetches and keeps the file only as the
 /// offline fallback.
-const SNAPSHOT_FORMAT: u32 = 2;
+const SNAPSHOT_FORMAT: u32 = 3;
 
 /// Codex logs only the provider (`openai`, `codex`) for some sessions, and
 /// `codex-auto-review` has no `LiteLLM` key; all of them price as the model

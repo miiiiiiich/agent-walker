@@ -2,6 +2,7 @@
 //! table is fetched from a repository this tool does not control, so
 //! nothing else in it is built in memory: a field, an entry or a whole value
 //! that pricing does not read is skipped while it is parsed.
+use std::collections::HashSet;
 use std::fmt;
 
 use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -48,20 +49,28 @@ pub(in crate::cost) struct Entry {
     pub(in crate::cost) too_many_tiers: bool,
 }
 
-/// Chat-like entries under bare model ids, in table order.
+/// Chat-like entries under bare model ids: listed bare keys in table order,
+/// then the models listed only under a stripped prefix.
 pub(in crate::cost) struct Table(pub(in crate::cost) Vec<(String, Entry)>);
 
-/// Provider/region variants are dropped in favor of bare model ids, EXCEPT
-/// `xai/`: `LiteLLM` registers Grok models only under the provider prefix
-/// (`xai/grok-4.5`, no bare key), so the prefix is stripped so those models
-/// can resolve to a price.
-fn bare_id(key: &str) -> Option<&str> {
-    let key = key.strip_prefix("xai/").unwrap_or(key);
-    let variant = key.contains('/')
+/// Provider prefixes stripped to a bare id. `LiteLLM` lists some models only
+/// under them (`xai/grok-4.5`, `gemini/gemini-4-argon`, no bare key); dropped
+/// like other variants, those models showed as unpriced, which blanks the
+/// total.
+const STRIPPED_PREFIXES: [&str; 2] = ["xai/", "gemini/"];
+
+/// The bare id, and whether a prefix was stripped to get it. Other
+/// provider/region variants are dropped in favor of bare model ids.
+fn bare_id(key: &str) -> Option<(&str, bool)> {
+    let stripped = STRIPPED_PREFIXES
+        .iter()
+        .find_map(|prefix| key.strip_prefix(prefix));
+    let id = stripped.unwrap_or(key);
+    let variant = id.contains('/')
         || ["anthropic.", "global.", "us.", "eu.", "au.", "apac."]
             .iter()
-            .any(|prefix| key.starts_with(prefix));
-    (!variant).then_some(key)
+            .any(|prefix| id.starts_with(prefix));
+    (!variant).then_some((id, stripped.is_some()))
 }
 
 enum Slot<'k> {
@@ -288,6 +297,7 @@ impl<'de> Visitor<'de> for TableVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Table, A::Error> {
         let mut entries = Vec::new();
+        let mut prefixed = Vec::new();
         let mut seen = 0_usize;
         while let Some(key) = map.next_key::<String>()? {
             seen += 1;
@@ -296,16 +306,25 @@ impl<'de> Visitor<'de> for TableVisitor {
                     "more than {MAX_TABLE_ENTRIES} entries"
                 )));
             }
-            let Some(id) = bare_id(&key) else {
+            let Some((id, stripped)) = bare_id(&key) else {
                 map.next_value::<IgnoredAny>()?;
                 continue;
             };
             if let MaybeEntry(Some(entry)) = map.next_value()?
                 && entry.chat
             {
-                entries.push((id.to_owned(), entry));
+                let into = if stripped {
+                    &mut prefixed
+                } else {
+                    &mut entries
+                };
+                into.push((id.to_owned(), entry));
             }
         }
+        // `gemini/gemini-3.8-flash` sits next to a bare `gemini-3.8-flash`;
+        // the bare key is the one the table maintains as the model's price.
+        let bare: HashSet<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+        entries.extend(prefixed.into_iter().filter(|(id, _)| !bare.contains(id)));
         Ok(Table(entries))
     }
 }
@@ -360,6 +379,24 @@ mod tests {
         let (id, entry) = &entries[0];
         assert_eq!(id, "gpt-x");
         assert_eq!(entry.rates, [Some(1e-6), None, None, None, None]);
+    }
+
+    #[test]
+    fn prefix_only_models_are_kept_and_bare_keys_win() {
+        let Table(entries) = read(
+            r#"{
+                "gemini/gemini-y": {"mode": "chat", "input_cost_per_token": 1e-6},
+                "gemini/gemini-z": {"mode": "chat", "input_cost_per_token": 9e-6},
+                "gemini-z": {"mode": "chat", "input_cost_per_token": 2e-6},
+                "vertex_ai/gemini-w": {"mode": "chat", "input_cost_per_token": 3e-6}
+            }"#,
+        )
+        .expect("table parses");
+        let rates: Vec<_> = entries
+            .iter()
+            .map(|(id, entry)| (id.as_str(), entry.rates[INPUT]))
+            .collect();
+        assert_eq!(rates, [("gemini-z", Some(2e-6)), ("gemini-y", Some(1e-6))]);
     }
 
     #[test]
