@@ -156,8 +156,8 @@ of their own, but an enum never identified a priced model: one display name,
 into several labels, and it prices whenever LiteLLM lists it. A served id that
 lines up with no selection is kept as served — usually versionless
 (`gemini-pro-default`) — and stays unpriced rather than guess a generation. A
-model LiteLLM doesn't list (`gemini-4-argon`) is labelled correctly and
-reported as unpriced, never as $0.
+model LiteLLM doesn't list is labelled correctly and reported as unpriced,
+never as $0.
 
 Residual risks. Every selection seen so far ends in a mode segment; one that
 didn't would lose its last model word. And a served id that differs from the

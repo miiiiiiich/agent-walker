@@ -84,7 +84,7 @@ impl ReportDto {
             .collect::<Result<Vec<_>>>()?;
         let stats = &report.combined.scan_stats;
         Ok(Self {
-            schema_version: 2,
+            schema_version: 3,
             generated_at: report.generated_at,
             window,
             time_basis: TimeBasisDto {

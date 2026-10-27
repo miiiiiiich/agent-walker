@@ -4,8 +4,7 @@ use time::{Date, OffsetDateTime};
 
 use super::{Provider, ScanStats, TokenUsage};
 
-/// Track unpriced volume separately so incomplete pricing cannot be reported
-/// as a complete zero-dollar total.
+/// Track unpriced volume separately so an unknown price never counts as $0.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CostTally {
     pub priced_usd: f64,
@@ -22,10 +21,12 @@ impl CostTally {
         self.unpriced_volume == 0
     }
 
-    /// The total, only when it is the whole picture — a partial sum is not
-    /// a total.
-    pub fn complete_usd(&self) -> Option<f64> {
-        self.is_complete().then_some(self.priced_usd)
+    /// The priced sum. Models with no known price are left out: one new
+    /// model would otherwise blank the whole total, and their volume stays in
+    /// `unpriced_volume` for the caller to report. `None` only when there was
+    /// usage and none of it could be priced, where a sum would read as $0.
+    pub fn usd(&self) -> Option<f64> {
+        (self.priced_usd > 0.0 || self.is_complete()).then_some(self.priced_usd)
     }
 }
 
