@@ -108,7 +108,10 @@ def test_platform_packages_carry_one_binary_and_their_npm_platform(cargo, archiv
         "version": VERSION,
         "license": "MIT OR Apache-2.0",
         "homepage": "https://github.com/miiiiiiich/agent-walker",
-        "repository": "https://github.com/miiiiiiich/agent-walker",
+        "repository": {
+            "type": "git",
+            "url": "git+https://github.com/miiiiiiich/agent-walker.git",
+        },
         "os": ["linux"],
         "cpu": ["x64"],
         "libc": ["glibc"],

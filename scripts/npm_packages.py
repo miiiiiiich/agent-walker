@@ -115,8 +115,9 @@ def common_fields(meta: dict, version: str) -> dict:
         "license": meta["license"],
         "homepage": meta["homepage"],
         # npm refuses a provenance statement whose source repository differs
-        # from this one
-        "repository": meta["repository"],
+        # from this one. The object form is what npm normalizes a bare URL
+        # to, with a warning on every publish.
+        "repository": {"type": "git", "url": f"git+{meta['repository']}.git"},
     }
 
 
