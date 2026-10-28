@@ -7,10 +7,10 @@ members = ["cargo:."]
 cargo-dist-version = "0.33.1"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["npm"]
-# The npm package should have this name
-npm-package = "agent-walker"
+# No installers: dist's npm installer downloads the binary from the Release
+# at install time. publish-npm builds platform packages instead
+# (scripts/npm_packages.py).
+installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
@@ -24,7 +24,7 @@ include = ["THIRD_PARTY_NOTICES"]
 # Publish jobs to run in CI
 publish-jobs = ["./publish-npm"]
 # Permissions for custom jobs
-github-custom-job-permissions = { "publish-npm" = { id-token = "write" } }
+github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" } }
 # Plan jobs to run in CI
 plan-jobs = ["./draft-release"]
 

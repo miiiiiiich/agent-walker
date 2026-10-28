@@ -1,14 +1,17 @@
 name: Publish npm
 
-# Publishes the npm package with trusted publishing (OIDC) — no npm token is
-# stored anywhere. Wired into release.yml as a dist custom publish-job
-# (dist-workspace.toml: publish-jobs = ["./publish-npm"]) instead of dist's
-# built-in npm job, which pins an npm too old for OIDC and only takes a token.
+# Builds the npm packages from the release archives and publishes them with
+# trusted publishing (OIDC) — no npm token is stored anywhere. Wired into
+# release.yml as a dist custom publish-job (dist-workspace.toml:
+# publish-jobs = ["./publish-npm"]). dist's own npm installer is off: its
+# package downloads the binary from the Release at install time, outside
+# the registry's integrity check and the provenance.
 #
 # npm matches the *calling* workflow (release.yml) plus the `release`
-# environment. The environment is what matters: release.yml's build jobs can
-# also mint OIDC tokens (for attestations) and run dependency build scripts,
-# and without it they could publish too.
+# environment, for each of the five packages. The environment is what
+# matters: release.yml's build jobs can also mint OIDC tokens (for
+# attestations) and run dependency build scripts, and without it they could
+# publish too.
 #
 # Published directly rather than staged for a 2FA approval on npm: releases
 # stay fully automatic, at the cost that whoever can push a v* tag can publish.
@@ -27,15 +30,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: read # the package builder at the tagged commit
       id-token: write # npm trusted publishing + provenance
     env:
       PLAN: ${{ inputs.plan }}
     steps:
-      - name: Fetch npm package
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the release archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-*
-          path: npm/
+          path: artifacts/
           merge-multiple: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -43,14 +50,51 @@ jobs:
           # Node, whose bundled npm may predate trusted publishing (needs >= 11.5.1)
           node-version: "24.21.0"
           registry-url: "https://registry.npmjs.org"
-      - name: Publish
+      - name: Build the packages
         run: |
-          pkgs=$(jq -r '.releases[].artifacts[] | select(endswith("-npm-package.tar.gz"))' <<<"$PLAN")
-          # a release that silently skips npm would still be tweeted as shipped
-          if [ -z "$pkgs" ]; then
-            echo "no npm package in the plan" >&2
-            exit 1
-          fi
-          while IFS= read -r pkg; do
-            npm publish --provenance --access public "./npm/${pkg}"
-          done <<<"$pkgs"
+          version=$(jq -r '.releases[] | select(.app_name == "agent-walker") | .app_version' <<<"$PLAN")
+          python3 scripts/npm_packages.py "$version" artifacts packages > packages.txt
+      - name: Publish
+        timeout-minutes: 40
+        run: |
+          served() {
+            curl -sf --max-time 20 -H 'Accept: application/vnd.npm.install-v1+json' \
+              -H 'Cache-Control: no-cache' "https://registry.npmjs.org/${1/\//%2F}" \
+              | jq -e --arg v "$2" '.versions | has($v)' >/dev/null
+          }
+          # A version already served came from an earlier attempt of this
+          # release, and publishing it again would fail the rerun. One that
+          # npm accepted but is still scanning looks unpublished and fails
+          # the rerun too; rerunning once it is served gets past it.
+          publish() {
+            local name version
+            name=$(jq -r .name "$1/package.json")
+            version=$(jq -r .version "$1/package.json")
+            if served "$name" "$version"; then
+              echo "$name@$version is already on npm; skipping"
+            else
+              npm publish --provenance --access public "$1"
+            fi
+          }
+
+          mapfile -t dirs < packages.txt
+          platforms=("${dirs[@]:0:${#dirs[@]}-1}")
+          for dir in "${platforms[@]}"; do
+            publish "$dir"
+          done
+          # npm scans a publish for minutes before serving it. agent-walker
+          # pins the platform packages, so if it is served first an install
+          # resolves without its binary.
+          deadline=$((SECONDS + 1800))
+          for dir in "${platforms[@]}"; do
+            name=$(jq -r .name "$dir/package.json")
+            version=$(jq -r .version "$dir/package.json")
+            until served "$name" "$version"; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "$name@$version is not served after 30 minutes; agent-walker not published" >&2
+                exit 1
+              fi
+              sleep 20
+            done
+          done
+          publish "${dirs[-1]}"
