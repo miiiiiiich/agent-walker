@@ -139,7 +139,7 @@ jobs:
           # dist-workspace.toml) so curated archives like
           # agent-walker-notes.zip survive recovery
           TRIPLES='aarch64-apple-darwin|aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc'
-          DIST_NAMES="^(agent-walker-($TRIPLES)\\.(tar\\.xz|zip)(\\.sha256)?|agent-walker-npm-package\\.tar\\.gz|dist-manifest\\.json|sha256\\.sum|source\\.tar\\.gz(\\.sha256)?)$"
+          DIST_NAMES="^(agent-walker-($TRIPLES)\\.(tar\\.xz|zip)(\\.sha256)?|dist-manifest\\.json|sha256\\.sum|source\\.tar\\.gz(\\.sha256)?)$"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq ".assets[] | select(.createdAt < \"$CUTOFF\" and (.name | test(\"$DIST_NAMES\"))) | .name" | while IFS= read -r asset; do
             echo "deleting stale asset: $asset"

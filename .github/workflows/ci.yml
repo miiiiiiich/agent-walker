@@ -76,7 +76,8 @@ jobs:
           # changed
           if [ -n "${BASE//0/}" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null &&
             git diff --quiet "$BASE" HEAD -- scripts .github/workflows/ci.yml \
-              .github/workflows/draft-release.yml .github/workflows/tweet-release.yml; then
+              .github/workflows/draft-release.yml .github/workflows/tweet-release.yml \
+              .github/workflows/publish-npm.yml; then
             echo "no changes to the release scripts since $BASE; skipping"
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
