@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.21.2] - 2026-10-29
+
+### Changed
+
+- The npm package carries the binary instead of downloading it when
+  installed. Each platform's binary is its own package
+  (`@agent-walker/darwin-arm64` and so on) that npm picks for your machine, so
+  nothing runs at install and the binary is covered by npm's integrity check
+  and provenance.
+
 ## [0.21.1] - 2026-10-27
 
 ### Changed
@@ -430,6 +440,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.21.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.19.1...v0.20.0
