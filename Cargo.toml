@@ -31,7 +31,7 @@ ratatui = "0.30.1"
 rayon = "1.11.0"
 # `hooks` for the progress handler and `limits` for the value cap that bound
 # reads of an untrusted agent store (collector/store.rs).
-rusqlite = { version = "0.40.1", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "hooks", "limits"] }
 # Pure-Rust zstd decoder over the `zstd` crate: no libzstd C build per
 # cargo-dist target. Checksums are not verified (`hash` off); a corrupt frame
 # surfaces as unparsable lines.
