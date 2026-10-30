@@ -42,7 +42,7 @@ ureq = "3.4.2"
 time = { version = "0.3.44", features = ["formatting", "local-offset", "macros", "parsing", "serde", "serde-well-known"] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-resvg = "0.48"
+resvg = "0.49"
 arboard = "3.6.1"
 
 [target.'cfg(unix)'.dependencies]
