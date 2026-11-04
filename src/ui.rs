@@ -12,4 +12,5 @@ mod state;
 mod theme;
 mod utils;
 
+pub(crate) use badge::art_rows;
 pub use runtime::{render_report_tab, run};

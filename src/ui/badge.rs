@@ -360,7 +360,7 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
     }
 }
 
-fn art_rows(animal: &str) -> Vec<&'static str> {
+pub(crate) fn art_rows(animal: &str) -> Vec<&'static str> {
     braille_for(animal)
         .lines()
         .filter(|l| !l.chars().all(|c| c == '⠀' || c == ' '))

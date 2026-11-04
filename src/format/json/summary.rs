@@ -3,18 +3,21 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use time::{Date, OffsetDateTime, UtcOffset};
 
+use crate::codename::Codename;
 use crate::format::short_model_name;
 use crate::model::{CostTally, Summary};
 
 use super::histories::{CreditsDto, LimitsDto, ModesDto};
 use super::panels::{ContextDto, ParallelDto, TurnLengthDto, WorkingTimeDto};
 use super::{TokensDto, ymd};
+use crate::share::ops_color;
+use crate::ui::art_rows;
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct SummaryDto {
     codename: CodenameDto,
-    tokens: TokensDto,
+    tokens: TotalTokensDto,
     cost: CostDto,
     sessions: usize,
     active_days: usize,
@@ -49,12 +52,11 @@ impl SummaryDto {
             .map(|day| (day.date, day.sessions))
             .collect::<BTreeMap<_, _>>();
         Self {
-            codename: CodenameDto {
-                rank: codename.rank.letters().unwrap_or("unranked").to_owned(),
-                ops: codename.ops,
-                animal: codename.animal,
+            codename: CodenameDto::new(&codename),
+            tokens: TotalTokensDto {
+                total: summary.total_usage.token_volume(),
+                tokens: TokensDto::from(&summary.total_usage),
             },
-            tokens: TokensDto::from(&summary.total_usage),
             cost: CostDto::new(summary),
             sessions: summary.sessions,
             active_days: summary.active_days,
@@ -173,10 +175,39 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct CodenameDto {
+pub(in crate::format::json) struct CodenameDto {
     rank: String,
     ops: &'static str,
     animal: &'static str,
+    ops_color: &'static str,
+    rank_color: Option<String>,
+    braille: Vec<&'static str>,
+}
+
+impl CodenameDto {
+    pub(in crate::format::json) fn new(codename: &Codename) -> Self {
+        Self {
+            rank: codename.rank.letters().unwrap_or("unranked").to_owned(),
+            ops: codename.ops,
+            animal: codename.animal,
+            ops_color: ops_color(codename.ops),
+            rank_color: codename
+                .rank
+                .display_rgb()
+                .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")),
+            braille: art_rows(codename.animal),
+        }
+    }
+}
+
+/// The sum lives here and not on every usage event, which would add a field to
+/// tens of thousands of rows that can each be summed from what they already hold.
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct TotalTokensDto {
+    total: u64,
+    #[serde(flatten)]
+    tokens: TokensDto,
 }
 
 #[derive(Serialize)]

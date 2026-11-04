@@ -181,6 +181,7 @@ impl ContextDto {
 pub(in crate::format::json) struct ParallelDto {
     avg_concurrency: f64,
     peak_concurrency: usize,
+    four_plus_share: Option<f64>,
     time_by_level: Vec<LevelDto>,
 }
 
@@ -196,6 +197,7 @@ impl ParallelDto {
         Self {
             avg_concurrency: parallel.avg_concurrency,
             peak_concurrency: parallel.peak_concurrency,
+            four_plus_share: parallel.four_plus_share(),
             time_by_level: ["1", "2", "3", "4-6", "7-9", "10+"]
                 .into_iter()
                 .zip(parallel.time_by_level)

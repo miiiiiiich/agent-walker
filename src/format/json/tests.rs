@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use time::macros::{date, datetime, offset};
 
 use super::*;
+use crate::codename::{Codename, Rank};
 use crate::model::CostTally;
 use crate::model::{
     CreditSample, DurationEvent, EffortEvent, InterruptEvent, LimitDay, LimitsHistory, ModeEvent,
@@ -451,4 +452,90 @@ fn export_escapes_hostile_names_without_changing_values() {
         serde_json::from_slice::<Value>(&bytes).unwrap(),
         serde_json::to_value(&dto).unwrap()
     );
+}
+
+fn codename_json(ops: &'static str, rank: Rank) -> Value {
+    let codename = Codename {
+        ops,
+        animal: "Lion",
+        rank,
+    };
+    serde_json::to_value(super::summary::CodenameDto::new(&codename)).unwrap()
+}
+
+#[test]
+fn the_codename_carries_the_art_of_its_animal() {
+    let value = codename_json("Sol", Rank::SS);
+    let rows: Vec<&str> = value["braille"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row.as_str().unwrap())
+        .collect();
+    assert_eq!(rows, crate::ui::art_rows("Lion"));
+    assert_ne!(rows, crate::ui::art_rows("Ant"));
+    assert!(
+        rows.iter()
+            .all(|row| row.chars().any(|ch| ch != '⠀' && ch != ' '))
+    );
+}
+
+#[test]
+fn each_ops_has_the_color_the_surfaces_draw() {
+    for (ops, color) in [
+        ("Aurora", "#63d6d2"),
+        ("Sol", "#efc768"),
+        ("Luna", "#84a7ff"),
+        ("Eclipse", "#ba94ff"),
+    ] {
+        assert_eq!(codename_json(ops, Rank::SS)["ops_color"], color, "{ops}");
+    }
+}
+
+#[test]
+fn the_rank_color_is_the_shade_the_surfaces_draw() {
+    assert_eq!(codename_json("Sol", Rank::SS)["rank_color"], "#a678f0");
+    assert_eq!(codename_json("Sol", Rank::E)["rank_color"], "#7a8088");
+}
+
+#[test]
+fn an_unranked_codename_has_art_and_no_rank_color() {
+    let summary = crate::share::fixtures::sample_summary();
+    let dto =
+        serde_json::to_value(super::summary::SummaryDto::new(&summary, offset!(+09:00))).unwrap();
+    assert_eq!(dto["codename"]["rank"], "unranked");
+    assert_eq!(dto["codename"]["rank_color"], Value::Null);
+    assert!(!dto["codename"]["braille"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_token_total_adds_up_the_four_kinds() {
+    let mut bytes = Vec::new();
+    write_json(&mut bytes, &report(), &[collection()], offset!(+09:00)).unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let tokens = &value["total"]["tokens"];
+    let sum = [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .map(|key| tokens[key].as_u64().unwrap())
+    .sum::<u64>();
+    assert_eq!(tokens["total"], sum);
+}
+
+#[test]
+fn four_plus_share_counts_the_top_three_levels() {
+    let mut orchestration = crate::model::Orchestration {
+        time_by_level: [1, 1, 0, 1, 0, 1],
+        ..Default::default()
+    };
+    assert_eq!(orchestration.four_plus_share(), Some(0.5));
+    let value = serde_json::to_value(super::panels::ParallelDto::new(&orchestration)).unwrap();
+    assert_eq!(value["four_plus_share"], 0.5);
+
+    orchestration.time_by_level = [0; 6];
+    assert_eq!(orchestration.four_plus_share(), None);
 }
