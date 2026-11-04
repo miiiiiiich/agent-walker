@@ -190,7 +190,7 @@ fn join_section_columns(
     out
 }
 
-fn join_columns(
+pub(crate) fn join_columns(
     left: &[Line<'static>],
     right: &[Line<'static>],
     right_start: usize,

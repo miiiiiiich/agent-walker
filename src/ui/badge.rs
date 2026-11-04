@@ -367,7 +367,7 @@ pub(crate) fn art_rows(animal: &str) -> Vec<&'static str> {
         .collect()
 }
 
-pub(super) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
+pub(crate) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
     let color = ops_color(codename.ops);
     let icon = art_rows(codename.animal);
 

@@ -454,6 +454,26 @@ fn export_escapes_hostile_names_without_changing_values() {
     );
 }
 
+#[test]
+fn the_summary_leaves_out_the_providers_and_carries_the_card() {
+    let mut bytes = Vec::new();
+    write_json_summary(&mut bytes, &report(), offset!(+09:00), "<svg/>").unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["schema_version"], 3);
+    assert!(value.get("providers").is_none());
+    assert!(value["total"]["sessions"].is_number());
+    assert!(value["window"]["days"].is_number());
+    assert_eq!(value["card_svg"], "<svg/>");
+}
+
+#[test]
+fn the_full_export_has_no_card() {
+    let mut bytes = Vec::new();
+    write_json(&mut bytes, &report(), &[collection()], offset!(+09:00)).unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(value.get("card_svg").is_none());
+}
+
 fn codename_json(ops: &'static str, rank: Rank) -> Value {
     let codename = Codename {
         ops,

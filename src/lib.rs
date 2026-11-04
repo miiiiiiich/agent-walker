@@ -27,6 +27,7 @@ mod model;
 mod owned_file;
 mod paths;
 mod share;
+mod summary_view;
 mod timestamp;
 mod ui;
 

@@ -28,7 +28,18 @@ pub(crate) fn write_json(
     write_dto(writer, &ReportDto::new(report, collections, offset)?)
 }
 
-fn write_dto(writer: &mut impl Write, dto: &ReportDto) -> Result<()> {
+pub(crate) fn write_json_summary(
+    writer: &mut impl Write,
+    report: &AppSummary,
+    offset: UtcOffset,
+    card_svg: &str,
+) -> Result<()> {
+    let mut dto = ReportDto::with_providers(report, None, offset);
+    dto.card_svg = Some(card_svg);
+    write_dto(writer, &dto)
+}
+
+fn write_dto(writer: &mut impl Write, dto: &ReportDto<'_>) -> Result<()> {
     let written = escape::to_writer_pretty(&mut *writer, dto)
         .map_err(io::Error::from)
         .and_then(|()| writer.write_all(b"\n"))
@@ -41,15 +52,18 @@ fn write_dto(writer: &mut impl Write, dto: &ReportDto) -> Result<()> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct ReportDto {
+struct ReportDto<'a> {
     schema_version: u32,
     #[serde(with = "time::serde::rfc3339")]
     generated_at: OffsetDateTime,
     window: WindowDto,
     time_basis: TimeBasisDto,
     total: SummaryDto,
-    providers: Vec<ProviderDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    providers: Option<Vec<ProviderDto>>,
     scan: ScanDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card_svg: Option<&'a str>,
 }
 
 fn window_of(report: &AppSummary) -> WindowDto {
@@ -60,7 +74,7 @@ fn window_of(report: &AppSummary) -> WindowDto {
     }
 }
 
-impl ReportDto {
+impl ReportDto<'_> {
     fn new(report: &AppSummary, collections: &[Collection], offset: UtcOffset) -> Result<Self> {
         let window = window_of(report);
         let event_window = EventWindow {
@@ -89,10 +103,14 @@ impl ReportDto {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self::with_providers(report, providers, offset))
+        Ok(Self::with_providers(report, Some(providers), offset))
     }
 
-    fn with_providers(report: &AppSummary, providers: Vec<ProviderDto>, offset: UtcOffset) -> Self {
+    fn with_providers(
+        report: &AppSummary,
+        providers: Option<Vec<ProviderDto>>,
+        offset: UtcOffset,
+    ) -> Self {
         let stats = &report.combined.scan_stats;
         Self {
             schema_version: 3,
@@ -111,6 +129,7 @@ impl ReportDto {
                 unreadable_files: stats.unreadable_files,
                 load_ms: report.load_duration_ms,
             },
+            card_svg: None,
         }
     }
 }
