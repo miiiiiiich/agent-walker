@@ -25,8 +25,11 @@ pub(crate) fn write_json(
     collections: &[Collection],
     offset: UtcOffset,
 ) -> Result<()> {
-    let dto = ReportDto::new(report, collections, offset)?;
-    let written = escape::to_writer_pretty(&mut *writer, &dto)
+    write_dto(writer, &ReportDto::new(report, collections, offset)?)
+}
+
+fn write_dto(writer: &mut impl Write, dto: &ReportDto) -> Result<()> {
+    let written = escape::to_writer_pretty(&mut *writer, dto)
         .map_err(io::Error::from)
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush());
@@ -49,13 +52,17 @@ struct ReportDto {
     scan: ScanDto,
 }
 
+fn window_of(report: &AppSummary) -> WindowDto {
+    WindowDto {
+        days: report.period_days,
+        start: report.combined.period_start,
+        end: report.combined.period_end,
+    }
+}
+
 impl ReportDto {
     fn new(report: &AppSummary, collections: &[Collection], offset: UtcOffset) -> Result<Self> {
-        let window = WindowDto {
-            days: report.period_days,
-            start: report.combined.period_start,
-            end: report.combined.period_end,
-        };
+        let window = window_of(report);
         let event_window = EventWindow {
             start: window.start,
             end: window.end,
@@ -82,11 +89,15 @@ impl ReportDto {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        Ok(Self::with_providers(report, providers, offset))
+    }
+
+    fn with_providers(report: &AppSummary, providers: Vec<ProviderDto>, offset: UtcOffset) -> Self {
         let stats = &report.combined.scan_stats;
-        Ok(Self {
+        Self {
             schema_version: 3,
             generated_at: report.generated_at,
-            window,
+            window: window_of(report),
             time_basis: TimeBasisDto {
                 kind: "fixed_offset",
                 offset_seconds: offset.whole_seconds(),
@@ -100,7 +111,7 @@ impl ReportDto {
                 unreadable_files: stats.unreadable_files,
                 load_ms: report.load_duration_ms,
             },
-        })
+        }
     }
 }
 
