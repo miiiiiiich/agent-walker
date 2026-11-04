@@ -381,6 +381,27 @@ pub struct Orchestration {
     pub time_by_level: [u64; 6],
 }
 
+impl Orchestration {
+    /// How much of the time agents ran at all had four or more going at once;
+    /// absent when none ran.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "A share of two durations only needs approximate precision."
+    )]
+    pub fn four_plus_share(&self) -> Option<f64> {
+        let levels = self.time_by_level;
+        // Seconds come from untrusted logs; stay on the saturating discipline
+        // the rest of the aggregation uses, even though wall-clock can't realistically overflow.
+        let total = levels.iter().copied().fold(0u64, u64::saturating_add);
+        (total > 0).then(|| {
+            let four_plus = levels[3]
+                .saturating_add(levels[4])
+                .saturating_add(levels[5]);
+            four_plus as f64 / total as f64
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextSummary {
     pub calls: usize,
