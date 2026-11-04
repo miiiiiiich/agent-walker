@@ -16,11 +16,11 @@ use crate::ui::art_rows;
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct SummaryDto {
-    codename: CodenameDto,
-    tokens: TotalTokensDto,
-    cost: CostDto,
-    sessions: usize,
-    active_days: usize,
+    pub(in crate::format::json) codename: CodenameDto,
+    pub(in crate::format::json) tokens: TotalTokensDto,
+    pub(in crate::format::json) cost: CostDto,
+    pub(in crate::format::json) sessions: usize,
+    pub(in crate::format::json) active_days: usize,
     streak: StreakDto,
     daily: Vec<DailyDto>,
     hourly_profile: Vec<HourDto>,
@@ -29,10 +29,10 @@ pub(in crate::format::json) struct SummaryDto {
     tools: Vec<ToolDto>,
     subagents: Vec<SubagentDto>,
     skills: Vec<SkillDto>,
-    turn_length: TurnLengthDto,
-    working_time: Option<WorkingTimeDto>,
-    context: Option<ContextDto>,
-    parallel: ParallelDto,
+    pub(in crate::format::json) turn_length: TurnLengthDto,
+    pub(in crate::format::json) working_time: Option<WorkingTimeDto>,
+    pub(in crate::format::json) context: Option<ContextDto>,
+    pub(in crate::format::json) parallel: ParallelDto,
     modes: Option<ModesDto>,
     limits: Option<LimitsDto>,
     credits: Option<CreditsDto>,
@@ -204,16 +204,16 @@ impl CodenameDto {
 /// tens of thousands of rows that can each be summed from what they already hold.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct TotalTokensDto {
-    total: u64,
+pub(in crate::format::json) struct TotalTokensDto {
+    pub(in crate::format::json) total: u64,
     #[serde(flatten)]
     tokens: TokensDto,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct CostDto {
-    estimated_usd: Option<f64>,
+pub(in crate::format::json) struct CostDto {
+    pub(in crate::format::json) estimated_usd: Option<f64>,
     unpriced_tokens: u64,
 }
 

@@ -454,24 +454,89 @@ fn export_escapes_hostile_names_without_changing_values() {
     );
 }
 
-#[test]
-fn the_summary_leaves_out_the_providers_and_carries_the_card() {
+fn summary_json() -> Value {
     let mut bytes = Vec::new();
     write_json_summary(&mut bytes, &report(), offset!(+09:00), "<svg/>").unwrap();
-    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+fn leaf_paths(value: &Value, prefix: &str, paths: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                leaf_paths(child, &format!("{prefix}{key}."), paths);
+            }
+        }
+        _ => paths.push(prefix.trim_end_matches('.').to_owned()),
+    }
+}
+
+#[test]
+fn the_summary_holds_only_what_it_shows() {
+    let value = summary_json();
+    let mut paths = Vec::new();
+    leaf_paths(&value, "", &mut paths);
+    assert_eq!(
+        paths,
+        [
+            "card_svg",
+            "schema_version",
+            "total.active_days",
+            "total.codename.animal",
+            "total.codename.braille",
+            "total.codename.ops",
+            "total.codename.ops_color",
+            "total.codename.rank",
+            "total.codename.rank_color",
+            "total.context.cached_share",
+            "total.cost.estimated_usd",
+            "total.parallel.avg_concurrency",
+            "total.parallel.four_plus_share",
+            "total.parallel.peak_concurrency",
+            "total.sessions",
+            "total.tokens.total",
+            "total.turn_length.p50_ms",
+            "total.turn_length.p90_ms",
+            "total.turn_length.turns",
+            "total.working_time.active_ms",
+            "total.working_time.tokens_per_minute",
+            "window.days",
+            "window.end",
+            "window.start",
+        ]
+    );
     assert_eq!(value["schema_version"], 3);
-    assert!(value.get("providers").is_none());
-    assert!(value["total"]["sessions"].is_number());
-    assert!(value["window"]["days"].is_number());
     assert_eq!(value["card_svg"], "<svg/>");
 }
 
 #[test]
-fn the_full_export_has_no_card() {
+fn the_summary_has_the_rate_the_card_prints() {
+    let card = crate::share::ShareCard::from_summary(&report().combined);
+    let rate = summary_json()["total"]["working_time"]["tokens_per_minute"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        card.tokens_per_min,
+        Some(crate::format::format_tokens(rate))
+    );
+}
+
+#[test]
+fn the_summary_repeats_the_export_under_the_same_names() {
     let mut bytes = Vec::new();
     write_json(&mut bytes, &report(), &[collection()], offset!(+09:00)).unwrap();
-    let value: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(value.get("card_svg").is_none());
+    let export: Value = serde_json::from_slice(&bytes).unwrap();
+    let summary = summary_json();
+    let mut paths = Vec::new();
+    leaf_paths(&summary, "", &mut paths);
+    for path in paths.iter().filter(|path| *path != "card_svg") {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        assert_eq!(
+            summary.pointer(&pointer),
+            export.pointer(&pointer),
+            "{path}"
+        );
+    }
 }
 
 fn codename_json(ops: &'static str, rank: Rank) -> Value {

@@ -21,7 +21,7 @@ const DEFAULT_WIDTH: u16 = 80;
 
 #[derive(Debug, clap::Args)]
 pub struct SummaryArgs {
-    /// Output as JSON: the totals of `--json`, plus the card's SVG (experimental).
+    /// Output as JSON: the codename, the numbers and the card's SVG (experimental).
     #[arg(long)]
     pub json: bool,
 }

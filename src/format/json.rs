@@ -6,6 +6,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{AppSummary, Collection, Provider, TokenUsage};
 
+mod brief;
 mod escape;
 mod events;
 mod histories;
@@ -14,10 +15,13 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
+use brief::BriefDto;
 use events::EventsDto;
 use summary::SummaryDto;
 
 time::serde::format_description!(ymd, Date, "[year]-[month]-[day]");
+
+const SCHEMA_VERSION: u32 = 3;
 
 pub(crate) fn write_json(
     writer: &mut impl Write,
@@ -34,12 +38,10 @@ pub(crate) fn write_json_summary(
     offset: UtcOffset,
     card_svg: &str,
 ) -> Result<()> {
-    let mut dto = ReportDto::with_providers(report, None, offset);
-    dto.card_svg = Some(card_svg);
-    write_dto(writer, &dto)
+    write_dto(writer, &BriefDto::new(report, offset, card_svg))
 }
 
-fn write_dto(writer: &mut impl Write, dto: &ReportDto<'_>) -> Result<()> {
+fn write_dto(writer: &mut impl Write, dto: &impl Serialize) -> Result<()> {
     let written = escape::to_writer_pretty(&mut *writer, dto)
         .map_err(io::Error::from)
         .and_then(|()| writer.write_all(b"\n"))
@@ -52,31 +54,20 @@ fn write_dto(writer: &mut impl Write, dto: &ReportDto<'_>) -> Result<()> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct ReportDto<'a> {
+struct ReportDto {
     schema_version: u32,
     #[serde(with = "time::serde::rfc3339")]
     generated_at: OffsetDateTime,
     window: WindowDto,
     time_basis: TimeBasisDto,
     total: SummaryDto,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    providers: Option<Vec<ProviderDto>>,
+    providers: Vec<ProviderDto>,
     scan: ScanDto,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    card_svg: Option<&'a str>,
 }
 
-fn window_of(report: &AppSummary) -> WindowDto {
-    WindowDto {
-        days: report.period_days,
-        start: report.combined.period_start,
-        end: report.combined.period_end,
-    }
-}
-
-impl ReportDto<'_> {
+impl ReportDto {
     fn new(report: &AppSummary, collections: &[Collection], offset: UtcOffset) -> Result<Self> {
-        let window = window_of(report);
+        let window = WindowDto::new(report);
         let event_window = EventWindow {
             start: window.start,
             end: window.end,
@@ -103,19 +94,11 @@ impl ReportDto<'_> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self::with_providers(report, Some(providers), offset))
-    }
-
-    fn with_providers(
-        report: &AppSummary,
-        providers: Option<Vec<ProviderDto>>,
-        offset: UtcOffset,
-    ) -> Self {
         let stats = &report.combined.scan_stats;
-        Self {
-            schema_version: 3,
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
             generated_at: report.generated_at,
-            window: window_of(report),
+            window,
             time_basis: TimeBasisDto {
                 kind: "fixed_offset",
                 offset_seconds: offset.whole_seconds(),
@@ -129,8 +112,7 @@ impl ReportDto<'_> {
                 unreadable_files: stats.unreadable_files,
                 load_ms: report.load_duration_ms,
             },
-            card_svg: None,
-        }
+        })
     }
 }
 
@@ -142,6 +124,16 @@ struct WindowDto {
     start: Date,
     #[serde(with = "ymd")]
     end: Date,
+}
+
+impl WindowDto {
+    fn new(report: &AppSummary) -> Self {
+        Self {
+            days: report.period_days,
+            start: report.combined.period_start,
+            end: report.combined.period_end,
+        }
+    }
 }
 
 #[derive(Serialize)]

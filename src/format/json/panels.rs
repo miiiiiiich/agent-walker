@@ -10,9 +10,9 @@ use super::ymd;
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct TurnLengthDto {
-    turns: usize,
-    p50_ms: Option<u64>,
-    p90_ms: Option<u64>,
+    pub(in crate::format::json) turns: usize,
+    pub(in crate::format::json) p50_ms: Option<u64>,
+    pub(in crate::format::json) p90_ms: Option<u64>,
     p95_ms: Option<u64>,
     max_ms: Option<u64>,
     interrupted: usize,
@@ -53,10 +53,11 @@ impl TurnLengthDto {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct WorkingTimeDto {
-    active_ms: u64,
+    pub(in crate::format::json) active_ms: u64,
     human_wait_ms: u64,
     turns: usize,
     context_tokens_per_minute: Option<u64>,
+    pub(in crate::format::json) tokens_per_minute: Option<u64>,
     model_share: Option<f64>,
     measured_ms: u64,
     peak_day: Option<ActiveDayDto>,
@@ -91,6 +92,7 @@ impl WorkingTimeDto {
             human_wait_ms: time.human_wait_ms,
             turns: time.turns,
             context_tokens_per_minute: time.context_per_minute(),
+            tokens_per_minute: time.tokens_per_minute(),
             model_share: time.model_share(),
             measured_ms: time.measured_ms,
             peak_day: time
@@ -118,7 +120,7 @@ pub(in crate::format::json) struct ContextDto {
     calls: usize,
     context_tokens: u64,
     cached_tokens: u64,
-    cached_share: f64,
+    pub(in crate::format::json) cached_share: f64,
     effective_tokens: u64,
     bands: Vec<BandDto>,
     expired: Option<ReasonDto>,
@@ -179,9 +181,9 @@ impl ContextDto {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct ParallelDto {
-    avg_concurrency: f64,
-    peak_concurrency: usize,
-    four_plus_share: Option<f64>,
+    pub(in crate::format::json) avg_concurrency: f64,
+    pub(in crate::format::json) peak_concurrency: usize,
+    pub(in crate::format::json) four_plus_share: Option<f64>,
     time_by_level: Vec<LevelDto>,
 }
 
