@@ -104,6 +104,15 @@ jobs:
           "$BIN" --json > "$OUT/demo.json"
           node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$OUT/demo.json"
 
+      - name: Print the summary (demo data)
+        env:
+          AGENT_WALKER_DEMO: "1"
+        run: |
+          "$BIN" summary > "$OUT/summary.txt"
+          grep -q Tokens "$OUT/summary.txt"
+          "$BIN" summary --json > "$OUT/summary.json"
+          node -e 'const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (d.total.projects !== undefined || !d.total.codename.braille.length || !d.card_svg.startsWith("<svg ")) process.exit(1)' "$OUT/summary.json"
+
       - name: Render the share card (demo data)
         env:
           AGENT_WALKER_DEMO: "1"

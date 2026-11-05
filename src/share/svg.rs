@@ -116,7 +116,7 @@ pub fn svg(card: &ShareCard) -> String {
 }
 
 /// Mirror the TUI tint mapping so the card and dashboard agree.
-fn ops_color(ops: &str) -> &'static str {
+pub(crate) fn ops_color(ops: &str) -> &'static str {
     match ops {
         "Aurora" => "#63d6d2",
         "Sol" => "#efc768",

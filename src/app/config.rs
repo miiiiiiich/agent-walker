@@ -5,23 +5,30 @@ use std::env;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use time::UtcOffset;
+
+use crate::summary_view::SummaryArgs;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "agent-walker",
     bin_name = "agent-walker",
     about = "Inspect local AI coding-agent usage",
-    version
+    version,
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true
 )]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "Each bool is an independent CLI flag, not a state machine."
 )]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Ignore the per-file parse cache and rescan everything.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_cache: bool,
 
     /// Render the shareable stats card to a PNG path and print the caption.
@@ -53,8 +60,14 @@ pub struct Args {
     )]
     pub render: Option<u16>,
 
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub verbose: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Print the last 30 days' codename and numbers, and exit.
+    Summary(SummaryArgs),
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +142,52 @@ mod tests {
                 "{gone}"
             );
         }
+    }
+
+    #[test]
+    fn summary_is_a_subcommand_with_its_own_json_flag() {
+        let parsed = Args::try_parse_from(["agent-walker", "summary"]).unwrap();
+        let Some(Command::Summary(summary)) = parsed.command else {
+            panic!("summary did not parse as a subcommand");
+        };
+        assert!(!summary.json);
+
+        let parsed = Args::try_parse_from(["agent-walker", "summary", "--json"]).unwrap();
+        let Some(Command::Summary(summary)) = parsed.command else {
+            panic!("summary --json did not parse as a subcommand");
+        };
+        assert!(summary.json);
+        assert!(!parsed.json);
+
+        assert!(
+            Args::try_parse_from(["agent-walker"])
+                .unwrap()
+                .command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn summary_stays_clear_of_the_export_flags() {
+        for argv in [
+            vec!["agent-walker", "--json", "summary"],
+            vec!["agent-walker", "--share=out.png", "summary"],
+            vec!["agent-walker", "--render=80", "summary"],
+            vec!["agent-walker", "summary", "--days", "7"],
+            vec!["agent-walker", "--json=summary"],
+            vec!["agent-walker", "help"],
+        ] {
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn cache_and_verbose_flags_reach_the_subcommand_after_its_name() {
+        let args = Args::try_parse_from(["agent-walker", "summary", "--no-cache", "-v"]).unwrap();
+        assert!(args.no_cache);
+        assert!(args.verbose);
+        // Clap's conflict covers global flags too, so they go after the subcommand.
+        assert!(Args::try_parse_from(["agent-walker", "--no-cache", "summary"]).is_err());
     }
 
     #[test]

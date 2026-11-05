@@ -62,19 +62,12 @@ impl ShareCard {
         for entry in &summary.model_daily {
             tally.add(&entry.estimated);
         }
-        let parallel = {
-            let levels = summary.orchestration.time_by_level;
-            // Seconds come from untrusted logs; stay on the saturating discipline
-            // the rest of the aggregation uses, even though wall-clock can't realistically overflow.
-            let total = levels.iter().copied().fold(0u64, u64::saturating_add);
-            (total > 0).then(|| {
-                let four_plus = levels[3]
-                    .saturating_add(levels[4])
-                    .saturating_add(levels[5]);
-                let four_plus_pct = (four_plus as f64 / total as f64 * 100.0).round() as u64;
-                (four_plus_pct, summary.orchestration.peak_concurrency)
-            })
-        };
+        let parallel = summary.orchestration.four_plus_share().map(|share| {
+            (
+                (share * 100.0).round() as u64,
+                summary.orchestration.peak_concurrency,
+            )
+        });
 
         // Rows merge by printed label: dated and undated ids of one model
         // would otherwise draw the same name twice next to a count of one.

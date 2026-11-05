@@ -6,6 +6,7 @@ use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::model::{AppSummary, Collection, Provider, TokenUsage};
 
+mod brief;
 mod escape;
 mod events;
 mod histories;
@@ -14,10 +15,13 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
+use brief::BriefDto;
 use events::EventsDto;
 use summary::SummaryDto;
 
 time::serde::format_description!(ymd, Date, "[year]-[month]-[day]");
+
+const SCHEMA_VERSION: u32 = 3;
 
 pub(crate) fn write_json(
     writer: &mut impl Write,
@@ -25,8 +29,20 @@ pub(crate) fn write_json(
     collections: &[Collection],
     offset: UtcOffset,
 ) -> Result<()> {
-    let dto = ReportDto::new(report, collections, offset)?;
-    let written = escape::to_writer_pretty(&mut *writer, &dto)
+    write_dto(writer, &ReportDto::new(report, collections, offset)?)
+}
+
+pub(crate) fn write_json_summary(
+    writer: &mut impl Write,
+    report: &AppSummary,
+    offset: UtcOffset,
+    card_svg: &str,
+) -> Result<()> {
+    write_dto(writer, &BriefDto::new(report, offset, card_svg))
+}
+
+fn write_dto(writer: &mut impl Write, dto: &impl Serialize) -> Result<()> {
+    let written = escape::to_writer_pretty(&mut *writer, dto)
         .map_err(io::Error::from)
         .and_then(|()| writer.write_all(b"\n"))
         .and_then(|()| writer.flush());
@@ -51,11 +67,7 @@ struct ReportDto {
 
 impl ReportDto {
     fn new(report: &AppSummary, collections: &[Collection], offset: UtcOffset) -> Result<Self> {
-        let window = WindowDto {
-            days: report.period_days,
-            start: report.combined.period_start,
-            end: report.combined.period_end,
-        };
+        let window = WindowDto::new(report);
         let event_window = EventWindow {
             start: window.start,
             end: window.end,
@@ -84,7 +96,7 @@ impl ReportDto {
             .collect::<Result<Vec<_>>>()?;
         let stats = &report.combined.scan_stats;
         Ok(Self {
-            schema_version: 3,
+            schema_version: SCHEMA_VERSION,
             generated_at: report.generated_at,
             window,
             time_basis: TimeBasisDto {
@@ -112,6 +124,16 @@ struct WindowDto {
     start: Date,
     #[serde(with = "ymd")]
     end: Date,
+}
+
+impl WindowDto {
+    fn new(report: &AppSummary) -> Self {
+        Self {
+            days: report.period_days,
+            start: report.combined.period_start,
+            end: report.combined.period_end,
+        }
+    }
 }
 
 #[derive(Serialize)]

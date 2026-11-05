@@ -12,7 +12,7 @@ use crate::ui;
 
 mod config;
 
-pub use config::{ANALYSIS_WINDOW_DAYS, Args, Config};
+pub use config::{ANALYSIS_WINDOW_DAYS, Args, Command, Config};
 use config::{
     default_agy_dir, default_claude_dir, default_codex_dir, default_opencode_dir, demo_enabled,
 };
@@ -42,6 +42,11 @@ pub fn run(args: &Args) -> Result<()> {
         println!("{}", card.caption());
         eprintln!("\nwrote {}", path.display());
         return Ok(());
+    }
+
+    if let Some(Command::Summary(summary)) = &args.command {
+        let report = load_report(&config)?;
+        return crate::summary_view::run(summary, &report, config.local_offset);
     }
 
     if args.json {

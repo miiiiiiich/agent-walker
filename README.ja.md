@@ -73,6 +73,7 @@ agent-walker が読むのは、エージェントがこのマシンに書いた�
 
 | 引数 | 動作 |
 |---|---|
+| `summary` | コードネームと数字を出力して終了。`--json` を付けると JSON で出力（試験的） |
 | `--share <path>` | share 画像を PNG に書き出して終了 |
 | `--json` | 集計と日時付きイベントを JSON に出力（試験的） |
 | `--days <N>`（`--json` のみ） | 集計日数（既定 30）。TUI は 30 日固定 |
@@ -87,6 +88,8 @@ agent-walker が読むのは、エージェントがこのマシンに書いた�
 ```sh
 agent-walker --json | jq '{schema_version, window, total}'
 ```
+
+`agent-walker summary --json` は `summary` に出る内容と共有カードの SVG だけを出力します。
 
 ## 注意
 

@@ -106,7 +106,7 @@ pub fn format_date(date: Date) -> String {
 mod json;
 mod model_label;
 
-pub(crate) use json::write_json;
+pub(crate) use json::{write_json, write_json_summary};
 pub use model_label::short_model_name;
 
 #[cfg(test)]

@@ -360,12 +360,16 @@ pub(super) fn braille_for(animal: &str) -> &'static str {
     }
 }
 
-pub(super) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
-    let color = ops_color(codename.ops);
-    let icon: Vec<&str> = braille_for(codename.animal)
+pub(crate) fn art_rows(animal: &str) -> Vec<&'static str> {
+    braille_for(animal)
         .lines()
         .filter(|l| !l.chars().all(|c| c == '⠀' || c == ' '))
-        .collect();
+        .collect()
+}
+
+pub(crate) fn codename_badge_lines(codename: &crate::codename::Codename) -> Vec<Line<'static>> {
+    let color = ops_color(codename.ops);
+    let icon = art_rows(codename.animal);
 
     let mut lines = vec![
         Line::default(),
