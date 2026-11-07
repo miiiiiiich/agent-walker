@@ -1,0 +1,12 @@
+{
+  "name": "agent-walker",
+  "owner": {
+    "name": "miiiiiiich"
+  },
+  "plugins": [
+    {
+      "name": "agent-walker",
+      "source": "./claude-mod"
+    }
+  ]
+}

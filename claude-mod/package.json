@@ -1,0 +1,19 @@
+{
+  "name": "agent-walker-mod",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.6",
+  "scripts": {
+    "check": "biome check . && tsc -p .",
+    "fix": "biome check --write .",
+    "test": "claude plugin validate . && claude plugin test ."
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.318",
+    "@biomejs/biome": "2.6.4",
+    "typescript": "7.0.2"
+  },
+  "trustedDependencies": [
+    "@anthropic-ai/claude-code"
+  ]
+}

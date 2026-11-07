@@ -1,0 +1,79 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "root": ".."
+  },
+  "files": {
+    "includes": ["**", "!**/*.md", "!**/.claude-plugin/types"]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "arrowParentheses": "asNeeded"
+    }
+  },
+  "linter": {
+    "domains": {
+      "types": "all",
+      "test": "all"
+    },
+    "rules": {
+      "complexity": "error",
+      "correctness": "error",
+      "performance": "error",
+      "security": "error",
+      "style": "error",
+      "suspicious": "error",
+      "nursery": {
+        "noFloatingPromises": "error",
+        "noMisusedPromises": "error",
+        "noUnsafePlusOperands": "error",
+        "noUnsafeReturn": "error",
+        "noUnsafeTypeAssertion": "error",
+        "useAwaitThenable": "error",
+        "useExplicitReturnType": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveLinesPerFunction": "off"
+          },
+          "style": {
+            "noDoneCallback": "off",
+            "noExcessiveLinesPerFile": "off",
+            "noMagicNumbers": "off",
+            "noTernary": "off",
+            "useNamingConvention": "off",
+            "useConsistentTestIt": {
+              "level": "error",
+              "options": {
+                "function": "test"
+              }
+            }
+          },
+          "security": {
+            "noSecrets": "off"
+          },
+          "nursery": {
+            "noUnsafeTypeAssertion": "off",
+            "useExplicitReturnType": "off"
+          }
+        }
+      }
+    }
+  ]
+}
