@@ -92,6 +92,14 @@ agent-walker --json | jq '{schema_version, window, total}'
 
 `agent-walker summary --json` writes only what `summary` shows, plus the share card's SVG.
 
+## Inside Claude Code
+
+```
+/plugin install agent-walker --marketplace miiiiiiich/agent-walker
+```
+
+`/agent-walker` opens a pane; Tab switches to this session.
+
 ## Note
 
 Costs are API-equivalent estimates, priced with [LiteLLM](https://github.com/BerriAI/litellm)'s table.
