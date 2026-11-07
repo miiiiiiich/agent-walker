@@ -166,9 +166,16 @@ fn bounds(
         .duration_events
         .iter()
         .filter_map(|event| event.timestamp);
+    // Legacy OpenCode dates a tool call after the session's last message, with
+    // no touch of its own: left out, the span would end before what it counts.
+    let tools = session
+        .tool_events
+        .iter()
+        .filter_map(|event| event.timestamp);
     let stamps: Vec<OffsetDateTime> = touches
         .chain(usage)
         .chain(turns)
+        .chain(tools)
         .filter(|&at| {
             local_date(at, local_offset)
                 .is_some_and(|date| date >= period_start && date <= period_end)
@@ -287,6 +294,33 @@ mod tests {
         let report = report("mine").unwrap();
         assert_eq!(report.summary.provider, Provider::Claude);
         assert!(report.summary.context.is_some());
+    }
+
+    #[test]
+    fn a_tool_call_after_the_last_message_still_falls_in_the_span() {
+        let mut logs = logs();
+        logs.tool_events.push(ToolEvent {
+            timestamp: Some(datetime!(2026-11-06 11:30 +09:00)),
+            session_id: Some("mine".to_owned()),
+            tool_name: "bash".to_owned(),
+            subagent_type: None,
+            source_kind: SourceKind::Main,
+        });
+        let report = session_report(&[logs], "mine", NOW, 30, offset!(+09:00)).unwrap();
+        assert_eq!(report.last_at, datetime!(2026-11-06 11:30 +09:00));
+    }
+
+    #[test]
+    fn a_session_with_only_tool_calls_in_the_window_is_still_a_session() {
+        let mut logs = Collection::new(Provider::OpenCode, PathBuf::new());
+        logs.tool_events.push(ToolEvent {
+            timestamp: Some(datetime!(2026-11-06 11:30 +09:00)),
+            session_id: Some("mine".to_owned()),
+            tool_name: "bash".to_owned(),
+            subagent_type: None,
+            source_kind: SourceKind::Main,
+        });
+        assert!(session_report(&[logs], "mine", NOW, 30, offset!(+09:00)).is_some());
     }
 
     #[test]
