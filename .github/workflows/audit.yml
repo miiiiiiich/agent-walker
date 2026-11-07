@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       # exact version: install-action verifies it against the checksum in
       # its own (SHA-pinned) manifest
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check

@@ -90,7 +90,7 @@ fn open_with_return_cap(path: &Path, deadline: Instant, max_returned: u64) -> Op
             _ => return None,
         }
     }
-    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     // Rides out the agent's brief write locks instead of failing at once.
     let _ = conn.busy_timeout(Duration::from_millis(500));
     conn.pragma_update(None, "trusted_schema", false).ok()?;
