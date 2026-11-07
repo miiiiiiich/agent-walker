@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-08
+
+### Added
+
+- `agent-walker summary` prints your codename and numbers, then exits.
+  `--json` gives the same as data, with the share card's SVG.
+- `agent-walker session <id>` shows how one session went: turns, tools,
+  subagents and cache. It reads every agent's logs from the last 30 days, and
+  takes `--json` too.
+- A Claude Code mod shows both in a pane with `/agent-walker`. Install it with
+  `/plugin install agent-walker --marketplace miiiiiiich/agent-walker`.
+
+### Changed
+
+- `--json` adds the token total, the share of time at four or more agents,
+  tokens per working minute, and the codename's colors and art. Nothing is
+  removed, so `schema_version` stays 3.
+
 ## [0.21.2] - 2026-10-29
 
 ### Changed
@@ -440,6 +458,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.22.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.2...v0.22.0
 [0.21.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.20.0...v0.21.0
