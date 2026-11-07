@@ -10,7 +10,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-code": "2.1.318",
-    "@biomejs/biome": "2.6.4",
+    "@biomejs/biome": "2.6.5",
     "typescript": "7.0.2"
   },
   "trustedDependencies": [
