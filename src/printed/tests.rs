@@ -34,6 +34,13 @@ fn body_text_keeps_the_terminals_own_color() {
 }
 
 #[test]
+fn control_and_invisible_characters_never_reach_the_terminal() {
+    let line = Line::raw("a\u{1b}[31m\u{9b}\u{202e}\u{200b}\u{e0041}b");
+    let printed = String::from_utf8(text::lines(&[line], true).unwrap()).unwrap();
+    assert!(printed.contains("a[31mb"), "{printed:?}");
+}
+
+#[test]
 fn a_reader_that_closed_early_is_not_an_error() {
     struct Failing(ErrorKind);
     impl Write for Failing {

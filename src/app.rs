@@ -49,6 +49,17 @@ pub fn run(args: &Args) -> Result<()> {
         return crate::summary_view::run(summary, &report, config.local_offset);
     }
 
+    if let Some(Command::Session(session)) = &args.command {
+        let (report, collections) = load_report_with_collections(&config, ANALYSIS_WINDOW_DAYS)?;
+        return crate::session_view::run(
+            session,
+            &collections,
+            report.generated_at,
+            ANALYSIS_WINDOW_DAYS,
+            config.local_offset,
+        );
+    }
+
     if args.json {
         let (mut report, collections) = load_report_with_collections(&config, args.days)?;
         finish_providers(&mut report);

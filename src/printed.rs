@@ -6,6 +6,7 @@ use std::io::{self, ErrorKind, IsTerminal, Write};
 use anyhow::{Context, Result};
 use ratatui::text::Line;
 
+mod clean;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -13,6 +14,8 @@ mod text;
 /// Narrower terminals draw at this width: below it a row cannot hold an ordinary value.
 const MIN_WIDTH: u16 = 24;
 const DEFAULT_WIDTH: u16 = 80;
+
+pub(crate) use clean::clean;
 
 pub(crate) struct Output {
     pub(crate) width: u16,

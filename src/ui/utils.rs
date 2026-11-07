@@ -72,7 +72,7 @@ pub(super) fn window_label(summary: &Summary) -> String {
     format!("{}d", summary.period_days)
 }
 
-pub(super) fn section_title(title: &'static str, annotation: &str) -> Line<'static> {
+pub(crate) fn section_title(title: &'static str, annotation: &str) -> Line<'static> {
     let mut spans = vec![
         Span::styled("▍ ", Style::default().fg(theme::GOLD)),
         Span::styled(
@@ -117,7 +117,7 @@ pub(super) fn format_credits(credits: f64) -> String {
     }
 }
 
-pub(super) fn month_abbrev(month: time::Month) -> &'static str {
+pub(crate) fn month_abbrev(month: time::Month) -> &'static str {
     match month {
         time::Month::January => "Jan",
         time::Month::February => "Feb",

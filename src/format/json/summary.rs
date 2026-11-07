@@ -39,7 +39,30 @@ pub(in crate::format::json) struct SummaryDto {
     signal: SignalDto,
 }
 
+/// The names the session document lists, with the one number it shows for each.
+pub(in crate::format::json) struct SessionNames {
+    pub(in crate::format::json) tools: Vec<(String, usize)>,
+    pub(in crate::format::json) subagents: Vec<(String, usize)>,
+    pub(in crate::format::json) skills: Vec<String>,
+}
+
 impl SummaryDto {
+    pub(in crate::format::json) fn names(&self) -> SessionNames {
+        SessionNames {
+            tools: self
+                .tools
+                .iter()
+                .map(|tool| (tool.name.clone(), tool.calls))
+                .collect(),
+            subagents: self
+                .subagents
+                .iter()
+                .map(|agent| (agent.name.clone(), agent.calls))
+                .collect(),
+            skills: self.skills.iter().map(|skill| skill.name.clone()).collect(),
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "Flat mapping of the output contract's named fields."
@@ -165,7 +188,7 @@ impl SummaryDto {
     clippy::cast_precision_loss,
     reason = "Ratios are approximate; integer counters stay exact."
 )]
-fn ratio(numerator: u64, denominator: u64) -> f64 {
+pub(in crate::format::json) fn ratio(numerator: u64, denominator: u64) -> f64 {
     if denominator == 0 {
         0.0
     } else {
@@ -214,7 +237,7 @@ pub(in crate::format::json) struct TotalTokensDto {
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct CostDto {
     pub(in crate::format::json) estimated_usd: Option<f64>,
-    unpriced_tokens: u64,
+    pub(in crate::format::json) unpriced_tokens: u64,
 }
 
 impl CostDto {

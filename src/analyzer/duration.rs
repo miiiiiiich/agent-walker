@@ -43,6 +43,9 @@ pub(super) fn longest_session_span(
         .max_by_key(|span| (span.ended_at - span.started_at, span.started_at))
 }
 
+/// A turn this long ran with nobody at the keyboard: the card's "20m+ runs".
+pub(crate) const LONG_TURN_MS: u64 = 20 * 60 * 1_000;
+
 fn turns_in_period(
     collection: &Collection,
     period_start: Date,
@@ -60,6 +63,18 @@ fn turns_in_period(
         })
         // The human's answer time inside a turn is not the agent running.
         .filter(|event| event.active_ms() > 0)
+}
+
+pub(super) fn turn_lengths_in_order(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> Vec<u64> {
+    let mut turns: Vec<&DurationEvent> =
+        turns_in_period(collection, period_start, period_end, local_offset).collect();
+    turns.sort_by_key(|event| (event.timestamp.is_none(), event.timestamp));
+    turns.into_iter().map(DurationEvent::active_ms).collect()
 }
 
 pub(super) fn completion_duration_summary(

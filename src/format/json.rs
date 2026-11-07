@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use time::{Date, OffsetDateTime, UtcOffset};
 
+use crate::analyzer::SessionReport;
 use crate::model::{AppSummary, Collection, Provider, TokenUsage};
 
 mod brief;
@@ -11,12 +12,15 @@ mod escape;
 mod events;
 mod histories;
 mod panels;
+mod session;
 mod summary;
 #[cfg(test)]
 mod tests;
 
 use brief::BriefDto;
+pub(crate) use escape::must_escape;
 use events::EventsDto;
+use session::SessionDocDto;
 use summary::SummaryDto;
 
 time::serde::format_description!(ymd, Date, "[year]-[month]-[day]");
@@ -39,6 +43,14 @@ pub(crate) fn write_json_summary(
     card_svg: &str,
 ) -> Result<()> {
     write_dto(writer, &BriefDto::new(report, offset, card_svg))
+}
+
+pub(crate) fn write_json_session(
+    writer: &mut impl Write,
+    report: &SessionReport,
+    offset: UtcOffset,
+) -> Result<()> {
+    write_dto(writer, &SessionDocDto::new(report, offset))
 }
 
 fn write_dto(writer: &mut impl Write, dto: &impl Serialize) -> Result<()> {

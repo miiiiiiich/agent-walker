@@ -4,9 +4,9 @@ use crate::model::Provider;
 
 pub(super) const ACCENT: Color = Color::Rgb(226, 178, 92);
 pub(super) const HOT: Color = Color::Rgb(219, 105, 84);
-pub(super) const GOLD: Color = Color::Rgb(239, 199, 104);
+pub(crate) const GOLD: Color = Color::Rgb(239, 199, 104);
 pub(super) const GREEN: Color = Color::Rgb(104, 211, 145);
-pub(super) const BLUE: Color = Color::Rgb(132, 167, 255);
+pub(crate) const BLUE: Color = Color::Rgb(132, 167, 255);
 pub(super) const PURPLE: Color = Color::Rgb(186, 148, 255);
 pub(super) const TEAL: Color = Color::Rgb(99, 214, 210);
 pub(crate) const MUTED: Color = Color::Rgb(140, 145, 150);

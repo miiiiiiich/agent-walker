@@ -624,3 +624,73 @@ fn four_plus_share_counts_the_top_three_levels() {
     orchestration.time_by_level = [0; 6];
     assert_eq!(orchestration.four_plus_share(), None);
 }
+
+fn session_json() -> Value {
+    let mut summary = crate::share::fixtures::sample_summary();
+    summary.tools = vec![crate::model::ToolStat {
+        name: "Bash".to_owned(),
+        calls: 3,
+    }];
+    summary.agents = vec![crate::model::AgentStat {
+        name: "code-evaluator".to_owned(),
+        usage: TokenUsage {
+            input_tokens: 40,
+            ..TokenUsage::default()
+        },
+        calls: 2,
+    }];
+    let report = crate::analyzer::SessionReport {
+        id: "s1".to_owned(),
+        first_at: datetime!(2026-11-03 08:43 UTC),
+        last_at: datetime!(2026-11-05 15:10 UTC),
+        summary,
+        turn_lengths_ms: vec![60_000, 1_500_000],
+        models: vec![crate::analyzer::SessionModel {
+            label: "Opus 5.5".to_owned(),
+            tokens: 100,
+        }],
+    };
+    let mut bytes = Vec::new();
+    write_json_session(&mut bytes, &report, offset!(+09:00)).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn the_session_holds_only_what_it_shows() {
+    let value = session_json();
+    let mut top: Vec<&String> = value["total"].as_object().unwrap().keys().collect();
+    top.sort();
+    assert_eq!(
+        top,
+        [
+            "context",
+            "cost",
+            "models",
+            "skills",
+            "subagents",
+            "tools",
+            "turn_length",
+            "working_time"
+        ]
+    );
+    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["session"]["id"], "s1");
+    assert_eq!(value["session"]["first_at"], "2026-11-03T17:43:00+09:00");
+    assert_eq!(
+        value["total"]["turn_length"]["lengths_ms"],
+        json!([60_000, 1_500_000])
+    );
+    assert_eq!(value["total"]["turn_length"]["long_from_ms"], 1_200_000);
+    assert_eq!(
+        value["total"]["tools"],
+        json!([{ "name": "Bash", "calls": 3 }])
+    );
+    assert_eq!(value["total"]["models"][0]["label"], "Opus 5.5");
+    assert!(value["total"]["models"][0].get("tokens").is_none());
+    assert_eq!(
+        value["total"]["subagents"],
+        json!([{ "name": "code-evaluator", "calls": 2 }])
+    );
+    assert!(value["total"]["cost"]["unpriced_tokens"].is_u64());
+    assert!(value["total"]["working_time"]["measured_ms"].is_u64());
+}
