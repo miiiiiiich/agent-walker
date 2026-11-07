@@ -92,6 +92,14 @@ agent-walker --json | jq '{schema_version, window, total}'
 
 `agent-walker summary --json` は `summary` に出る内容と共有カードの SVG だけを出力します。
 
+## Claude Code の中で見る
+
+```
+/plugin install agent-walker --marketplace miiiiiiich/agent-walker
+```
+
+`/agent-walker` でペインが開き、Tab でこのセッションに切り替わります。
+
 ## 注意
 
 コストは API 換算の見積もりです。料金は [LiteLLM](https://github.com/BerriAI/litellm) の価格表を使っています。

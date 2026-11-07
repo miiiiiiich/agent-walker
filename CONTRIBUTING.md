@@ -23,6 +23,8 @@ All of these must pass; CI enforces them (tool versions are pinned in
   release.yml's exceptions are in `.github/actionlint.yaml` and `.github/zizmor.yml`
 - when `scripts/` or a workflow that runs the scripts changes:
   `cd scripts && uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run pyright`
+- when `claude-mod/` changes, or the JSON of `summary` or `session` does:
+  `cd claude-mod && bun install && bun run check && bun run test`
 
 The Smoke workflow runs the release binary on Windows and macOS; each run's
 `smoke-windows-latest` / `smoke-macos-latest` artifacts hold what it rendered

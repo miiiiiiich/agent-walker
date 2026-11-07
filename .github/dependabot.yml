@@ -31,3 +31,10 @@ updates:
     ignore:
       # appears only in release.yml: a backstop to exclude-paths
       - dependency-name: actions/attest
+  - package-ecosystem: bun
+    directory: /claude-mod
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
