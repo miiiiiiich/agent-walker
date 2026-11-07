@@ -1,6 +1,6 @@
 {
   "name": "agent-walker",
-  "version": "0.21.2",
+  "version": "0.22.0",
   "description": "Shows agent-walker in a pane: the last 30 days, and how this session went.",
   "author": {
     "name": "miiiiiiich"
