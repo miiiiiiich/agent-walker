@@ -14,7 +14,7 @@ pub(super) fn lines(lines: &[Line<'_>], color: bool) -> Result<Vec<u8>> {
     for line in lines {
         for span in &line.spans {
             write_span(&mut out, &span.content, line.style.patch(span.style), color)
-                .context("format the summary")?;
+                .context("format the text")?;
         }
         out.push(b'\n');
     }
