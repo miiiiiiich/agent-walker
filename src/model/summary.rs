@@ -143,6 +143,17 @@ pub struct DurationSummary {
     pub buckets: Vec<DurationBucket>,
 }
 
+impl DurationSummary {
+    /// The buckets from 20 minutes up: the first three are shorter.
+    #[must_use]
+    pub fn long_turns(&self) -> usize {
+        self.buckets
+            .iter()
+            .skip(3)
+            .fold(0, |sum, bucket| sum.saturating_add(bucket.count))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DurationBucket {
     pub label: String,

@@ -21,7 +21,7 @@ pub(in crate::format::json) fn to_writer_pretty<W: Write, T: ?Sized + Serialize>
 // export is also fed to LLMs, where tag characters (U+E0000 block) carry text
 // a human reviewer cannot see, and U+2028/U+2029 break JavaScript consumers.
 // Escaping rather than stripping keeps every parsed value identical.
-fn must_escape(ch: char) -> bool {
+pub(crate) fn must_escape(ch: char) -> bool {
     matches!(
         ch,
         '\u{7f}'..='\u{9f}'

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::model::{Collection, DurationBucket, DurationSummary, SessionSpan};
+use crate::model::{Collection, DurationBucket, DurationEvent, DurationSummary, SessionSpan};
 use crate::timestamp::local_date;
 
 pub(super) fn longest_session_span(
@@ -43,24 +43,48 @@ pub(super) fn longest_session_span(
         .max_by_key(|span| (span.ended_at - span.started_at, span.started_at))
 }
 
-pub(super) fn completion_duration_summary(
+/// A turn this long ran with nobody at the keyboard: the card's "20m+ runs".
+pub(crate) const LONG_TURN_MS: u64 = 20 * 60 * 1_000;
+
+fn turns_in_period(
     collection: &Collection,
     period_start: Date,
     period_end: Date,
     local_offset: UtcOffset,
-) -> Option<DurationSummary> {
-    let mut values = collection
+) -> impl Iterator<Item = &DurationEvent> {
+    collection
         .duration_events
         .iter()
-        .filter(|event| {
+        .filter(move |event| {
             event.timestamp.is_none_or(|timestamp| {
                 local_date(timestamp, local_offset)
                     .is_some_and(|date| date >= period_start && date <= period_end)
             })
         })
         // The human's answer time inside a turn is not the agent running.
-        .map(crate::model::DurationEvent::active_ms)
-        .filter(|duration_ms| *duration_ms > 0)
+        .filter(|event| event.active_ms() > 0)
+}
+
+pub(super) fn turn_lengths_in_order(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> Vec<u64> {
+    let mut turns: Vec<&DurationEvent> =
+        turns_in_period(collection, period_start, period_end, local_offset).collect();
+    turns.sort_by_key(|event| (event.timestamp.is_none(), event.timestamp));
+    turns.into_iter().map(DurationEvent::active_ms).collect()
+}
+
+pub(super) fn completion_duration_summary(
+    collection: &Collection,
+    period_start: Date,
+    period_end: Date,
+    local_offset: UtcOffset,
+) -> Option<DurationSummary> {
+    let mut values = turns_in_period(collection, period_start, period_end, local_offset)
+        .map(DurationEvent::active_ms)
         .collect::<Vec<_>>();
     if values.is_empty() {
         return None;
@@ -107,7 +131,7 @@ fn duration_buckets(sorted_values: &[u64]) -> Vec<DurationBucket> {
     const SECOND: u64 = 1_000;
     const MINUTE: u64 = 60 * SECOND;
     // Six rows aligned with PARALLEL AGENTS; the first three are <20m —
-    // completion.rs and card.rs take `.skip(3)` as the unattended tail.
+    // `DurationSummary::long_turns` takes the rest as the unattended tail.
     const BUCKETS: [(&str, u64, u64); 6] = [
         ("<2m", 0, 2 * MINUTE),
         ("2-10m", 2 * MINUTE, 10 * MINUTE),

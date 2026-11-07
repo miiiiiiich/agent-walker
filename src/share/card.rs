@@ -118,7 +118,7 @@ impl ShareCard {
 
         let completion = summary.completion_duration.as_ref().map(|duration| {
             let counts: Vec<usize> = duration.buckets.iter().map(|b| b.count).collect();
-            let unattended: usize = counts.iter().skip(3).sum();
+            let unattended = duration.long_turns();
             (
                 counts,
                 unattended,

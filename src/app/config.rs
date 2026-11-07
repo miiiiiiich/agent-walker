@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use time::UtcOffset;
 
+use crate::session_view::SessionArgs;
 use crate::summary_view::SummaryArgs;
 
 #[derive(Debug, Parser)]
@@ -68,6 +69,8 @@ pub struct Args {
 pub enum Command {
     /// Print the last 30 days' codename and numbers, and exit.
     Summary(SummaryArgs),
+    /// Print how one session went, and exit.
+    Session(SessionArgs),
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +168,19 @@ mod tests {
                 .command
                 .is_none()
         );
+    }
+
+    #[test]
+    fn session_takes_an_id_and_its_own_json_flag() {
+        let parsed = Args::try_parse_from(["agent-walker", "session", "abc", "--json"]).unwrap();
+        let Some(Command::Session(session)) = parsed.command else {
+            panic!("session did not parse as a subcommand");
+        };
+        assert_eq!(session.id, "abc");
+        assert!(session.json);
+
+        assert!(Args::try_parse_from(["agent-walker", "session"]).is_err());
+        assert!(Args::try_parse_from(["agent-walker", "--json", "session", "abc"]).is_err());
     }
 
     #[test]

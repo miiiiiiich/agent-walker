@@ -74,6 +74,7 @@ agent-walker reads only the logs your agents write on this machine, and sends th
 | Flag | What it does |
 |---|---|
 | `summary` | print the codename and numbers, and exit; add `--json` for JSON (experimental) |
+| `session <id>` | print how one session went, and exit; add `--json` for JSON (experimental) |
 | `--share <path>` | write the share image to a PNG and exit |
 | `--json` | export the summary and dated events as JSON (experimental) |
 | `--days <N>` (with `--json` only) | window in days (default 30); TUI stays at 30 |

@@ -4,6 +4,7 @@ mod concurrency;
 mod context;
 mod duration;
 mod projects;
+mod session;
 mod streak;
 
 mod credits;
@@ -21,6 +22,10 @@ use crate::timestamp::{local_date, to_local};
 
 use self::aggregates::Aggregates;
 pub(crate) use self::concurrency::session_day_bounds;
+pub(crate) use self::duration::LONG_TURN_MS;
+#[cfg(test)]
+pub(crate) use self::session::SessionModel;
+pub(crate) use self::session::{SessionReport, session_report};
 
 /// Normalize timestamps to the local offset so day/hour buckets follow the user's clock.
 #[allow(

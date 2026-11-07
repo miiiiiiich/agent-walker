@@ -15,4 +15,5 @@ mod utils;
 pub(crate) use badge::{art_rows, codename_badge_lines};
 pub(crate) use page::join_columns;
 pub use runtime::{render_report_tab, run};
-pub(crate) use theme::{DIM, MUTED, TEXT};
+pub(crate) use theme::{BLUE, DIM, GOLD, MUTED, TEXT};
+pub(crate) use utils::{month_abbrev, section_title};

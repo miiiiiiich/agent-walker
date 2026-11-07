@@ -54,14 +54,14 @@ impl TurnLengthDto {
 #[serde(rename_all = "snake_case")]
 pub(in crate::format::json) struct WorkingTimeDto {
     pub(in crate::format::json) active_ms: u64,
-    human_wait_ms: u64,
+    pub(in crate::format::json) human_wait_ms: u64,
     turns: usize,
     context_tokens_per_minute: Option<u64>,
     pub(in crate::format::json) tokens_per_minute: Option<u64>,
-    model_share: Option<f64>,
-    measured_ms: u64,
+    pub(in crate::format::json) model_share: Option<f64>,
+    pub(in crate::format::json) measured_ms: u64,
     peak_day: Option<ActiveDayDto>,
-    pace: Option<PaceDto>,
+    pub(in crate::format::json) pace: Option<PaceDto>,
     daily: Vec<ActiveDayDto>,
 }
 
@@ -79,7 +79,7 @@ struct ActiveDayDto {
     clippy::struct_field_names,
     reason = "The wire contract includes units on every duration."
 )]
-struct PaceDto {
+pub(in crate::format::json) struct PaceDto {
     p50_ms: u64,
     p90_ms: u64,
     mean_ms: u64,
@@ -123,8 +123,8 @@ pub(in crate::format::json) struct ContextDto {
     pub(in crate::format::json) cached_share: f64,
     effective_tokens: u64,
     bands: Vec<BandDto>,
-    expired: Option<ReasonDto>,
-    cold_start: Option<ReasonDto>,
+    pub(in crate::format::json) expired: Option<ReasonDto>,
+    pub(in crate::format::json) cold_start: Option<ReasonDto>,
     uncached: ReasonDto,
     other_effective_tokens: u64,
 }
@@ -139,8 +139,8 @@ struct BandDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-struct ReasonDto {
-    calls: usize,
+pub(in crate::format::json) struct ReasonDto {
+    pub(in crate::format::json) calls: usize,
     effective_tokens: u64,
 }
 

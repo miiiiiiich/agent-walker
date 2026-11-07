@@ -26,7 +26,7 @@ All of these must pass; CI enforces them (tool versions are pinned in
 
 The Smoke workflow runs the release binary on Windows and macOS; each run's
 `smoke-windows-latest` / `smoke-macos-latest` artifacts hold what it rendered
-(tabs, summary, JSON, share card), so Windows output can be checked without Windows.
+(tabs, summary, session, JSON, share card), so Windows output can be checked without Windows.
 
 The crate uses `clippy::pedantic` — narrow `#[allow]`s with a `reason` are fine
 where the lint hurts readability.

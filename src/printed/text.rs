@@ -7,14 +7,20 @@ use crossterm::style::{Attribute, Color as TermColor, Print, SetAttribute, SetFo
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 
+use super::clean::clean;
 use crate::ui::TEXT;
 
 pub(super) fn lines(lines: &[Line<'_>], color: bool) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     for line in lines {
         for span in &line.spans {
-            write_span(&mut out, &span.content, line.style.patch(span.style), color)
-                .context("format the summary")?;
+            write_span(
+                &mut out,
+                &clean(&span.content),
+                line.style.patch(span.style),
+                color,
+            )
+            .context("format the text")?;
         }
         out.push(b'\n');
     }
