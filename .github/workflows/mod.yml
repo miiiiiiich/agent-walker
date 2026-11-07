@@ -1,0 +1,36 @@
+name: Mod
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: claude-mod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.6
+      - run: bun install --frozen-lockfile
+      - run: bunx biome check .
+      # The mod runs the CLI release its manifest names, and a release bumps both.
+      - name: Same version as the crate
+        run: |
+          mod="$(jq -r .version .claude-plugin/plugin.json)"
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' ../Cargo.toml | head -n 1)"
+          if [ "$mod" != "$crate" ]; then
+            echo "plugin.json has $mod, Cargo.toml has $crate"
+            exit 1
+          fi
+      # Claude Code is pinned in bun.lock, its install step trusted in package.json.
+      - run: bun run test
