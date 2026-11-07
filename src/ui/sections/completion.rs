@@ -80,12 +80,7 @@ fn completion_annotation(
             String::new(),
         );
     };
-    let autonomous: usize = duration
-        .buckets
-        .iter()
-        .skip(3)
-        .map(|bucket| bucket.count)
-        .sum();
+    let autonomous = duration.long_turns();
     let base = format!(
         "{} turns · {} ran ≥20m",
         format_count(duration.count),
