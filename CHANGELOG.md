@@ -10,18 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `agent-walker summary` prints your codename and numbers, then exits.
-  `--json` gives the same as data, with the share card's SVG.
-- `agent-walker session <id>` shows how one session went: turns, tools,
-  subagents and cache. It reads every agent's logs from the last 30 days, and
-  takes `--json` too.
-- A Claude Code mod shows both in a pane with `/agent-walker`. Install it with
+- `summary` prints your codename and numbers. `--json` gives the same as
+  data, with the share card's SVG.
+- `session <id>` shows how one session went: turns, tools, subagents, cache.
+  It reads every agent's logs from the last 30 days, and takes `--json` too.
+- A Claude Code mod shows both in a pane. Install it with
   `/plugin install agent-walker --marketplace miiiiiiich/agent-walker`.
 
 ### Changed
 
-- `--json` adds the token total, the share of time at four or more agents,
-  tokens per working minute, and the codename's colors and art. Nothing is
+- `--json` adds the token total, the 4+ agent share and the codename's art.
+  Also tokens per working minute and the codename's colors; nothing is
   removed, so `schema_version` stays 3.
 
 ## [0.21.2] - 2026-10-29
