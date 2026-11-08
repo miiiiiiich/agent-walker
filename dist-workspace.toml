@@ -28,6 +28,14 @@ github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token 
 # Plan jobs to run in CI
 plan-jobs = ["./draft-release"]
 
+# dist's default runner for this target is macos-14, which GitHub no longer
+# runs ("The configuration 'macos-14-arm64-us-default' is not supported"): the
+# build is cancelled before it starts and the release never publishes.
+# macos-latest is what CI's own macOS jobs run on, so the release is built on
+# the machine the tests ran on, and a retired image cannot stop it again.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"
+
 # Commit pins for the actions in the generated release.yml (dist's template
 # names only major tags). Change them here, then `dist generate`; never in
 # release.yml. Dependabot does not see this file, so on a
