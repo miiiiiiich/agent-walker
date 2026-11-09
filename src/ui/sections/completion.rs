@@ -152,6 +152,6 @@ mod tests {
 
         let mut silent = summary_with_interrupts(0);
         silent.completion_duration = None;
-        assert!(duration_lines(&silent, 100).is_empty());
+        assert_eq!(duration_lines(&silent, 100), Vec::<Line>::new());
     }
 }

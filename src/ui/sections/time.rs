@@ -227,6 +227,6 @@ mod tests {
 
         let mut silent = summary;
         silent.active_time = None;
-        assert!(time_lines(&silent, 60).is_empty());
+        assert_eq!(time_lines(&silent, 60), Vec::<Line>::new());
     }
 }

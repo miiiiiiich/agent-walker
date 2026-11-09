@@ -228,7 +228,7 @@ fn a_turn_is_gold_from_twenty_minutes_up() {
 fn a_long_turn_survives_being_squeezed() {
     let squeezed = lines::fit_columns(&[1, 2, 3_960_000, 4, 5, 6], 3);
     assert_eq!(squeezed, [2, 3_960_000, 6]);
-    assert!(lines::fit_columns(&[], 3).is_empty());
+    assert_eq!(lines::fit_columns(&[], 3), Vec::<u64>::new());
 }
 
 #[test]
