@@ -233,7 +233,7 @@ mod tests {
     fn absent_and_sessionless_shapes() {
         let mut summary = crate::share::fixtures::sample_summary();
         summary.context = None;
-        assert!(context_lines(&summary, 100).is_empty());
+        assert_eq!(context_lines(&summary, 100), Vec::<Line>::new());
 
         let mut summary = crate::share::fixtures::sample_summary();
         if let Some(context) = summary.context.as_mut() {

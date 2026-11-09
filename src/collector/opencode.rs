@@ -312,14 +312,14 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         write_db_at(&dir.path().join("opencode.db"));
         let paths = resolve_db_paths(dir.path(), Some(OsString::from(":memory:")));
-        assert!(paths.is_empty());
+        assert_eq!(paths, Vec::<PathBuf>::new());
     }
 
     #[test]
     fn resolve_db_paths_missing_override_is_absent() {
         let dir = TempDir::new().expect("tempdir");
         let paths = resolve_db_paths(dir.path(), Some(OsString::from("/no/such/file.db")));
-        assert!(paths.is_empty());
+        assert_eq!(paths, Vec::<PathBuf>::new());
     }
 
     #[test]

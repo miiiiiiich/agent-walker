@@ -590,7 +590,10 @@ fn an_unranked_codename_has_art_and_no_rank_color() {
         serde_json::to_value(super::summary::SummaryDto::new(&summary, offset!(+09:00))).unwrap();
     assert_eq!(dto["codename"]["rank"], "unranked");
     assert_eq!(dto["codename"]["rank_color"], Value::Null);
-    assert!(!dto["codename"]["braille"].as_array().unwrap().is_empty());
+    assert_ne!(
+        dto["codename"]["braille"].as_array().unwrap(),
+        &Vec::<Value>::new()
+    );
 }
 
 #[test]

@@ -768,7 +768,7 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert!(turn_shapes(&collection).is_empty());
+        assert_eq!(turn_shapes(&collection), Vec::<(u64, &str)>::new());
     }
 
     /// A manual compaction is the model's work without an assistant row: it

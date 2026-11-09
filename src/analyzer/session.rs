@@ -356,7 +356,10 @@ mod tests {
         let mut logs = logs();
         logs.provider = Provider::Codex;
         let report = session_report(&[logs], "mine", NOW, 30, offset!(+09:00)).unwrap();
-        assert!(report.summary.active_time.unwrap().pace_gaps_ms.is_empty());
+        assert_eq!(
+            report.summary.active_time.unwrap().pace_gaps_ms,
+            Vec::<u64>::new()
+        );
     }
 
     #[test]
