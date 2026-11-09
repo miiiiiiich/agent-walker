@@ -432,7 +432,26 @@ for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
     expect(source).toContain('#84a7ff')
     await ui.unmount()
   })
+
+  test(`${surface} lays the session out for the app, its details whole at any width`, async ($, on) => {
+    const { clock } = setup(on)
+    const ui = await openSession($, clock, 40, surface)
+    const [cost] = (await ui.findAll({ type: 'Text' })).filter(text => text.text === '$106')
+    expect(cost?.props.size).toBe('title')
+    expect(await hasText(ui, 'TURN LENGTH')).toBe(true)
+    expect(await hasText(ui, 'expired 10 · cold start 1')).toBe(true)
+    expect(await hasText(ui, 'p50 2m · p90 13m · max 1h 5m')).toBe(true)
+    await ui.unmount()
+  })
 }
+
+test('the terminal keeps the session in cells, not in app type sizes', async ($, on) => {
+  const { clock } = setup(on)
+  const ui = await openSession($, clock, 100)
+  const [cost] = (await ui.findAll({ type: 'Text' })).filter(text => text.text === '$106')
+  expect(cost?.props.size).toBeUndefined()
+  await ui.unmount()
+})
 
 test('a session document with no id is refused rather than misdrawn', async ($, on) => {
   const { clock } = setup(on, {
