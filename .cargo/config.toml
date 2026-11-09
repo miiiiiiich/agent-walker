@@ -1,0 +1,4 @@
+[registry]
+# The same wait as renovate.json, for the lock updates and indirect
+# dependencies it does not reach. Cargo before 1.100 ignores this key.
+global-min-publish-age = "14 days"
