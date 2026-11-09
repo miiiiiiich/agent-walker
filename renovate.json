@@ -1,0 +1,96 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "helpers:pinGitHubActionDigestsToSemver",
+    ":prHourlyLimitNone"
+  ],
+  "prConcurrentLimit": 5,
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "platformAutomerge": false,
+  "separateMultipleMajor": true,
+  "labels": [
+    "dependencies"
+  ],
+  "postUpdateOptions": [
+    "pnpmDedupe"
+  ],
+  "vulnerabilityAlerts": {
+    "addLabels": [
+      "security"
+    ]
+  },
+  "lockFileMaintenance": {
+    "automerge": true
+  },
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/test/**",
+    "**/tests/**",
+    "**/__fixtures__/**",
+    ".github/workflows/release.yml"
+  ],
+  "packageRules": [
+    {
+      "description": "Wait 14 days after publication before taking an update",
+      "matchPackageNames": [
+        "*"
+      ],
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Do not wait on update types that have no publication date",
+      "matchUpdateTypes": [
+        "pin",
+        "pinDigest",
+        "replacement",
+        "bump",
+        "lockfileUpdate",
+        "rollback"
+      ],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "Automerge minor and patch updates from 1.0 onward",
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "matchCurrentVersion": "!/^v?0\\./",
+      "automerge": true
+    },
+    {
+      "description": "Automerge Docker image digest updates (rebuilds of the same tag), but not Actions digests",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Do not automerge Python minor updates (such as 3.13 to 3.14), which include breaking changes",
+      "matchPackageNames": [
+        "/(^|\\/)python$/"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Label major updates",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "addLabels": [
+        "major"
+      ]
+    }
+  ]
+}

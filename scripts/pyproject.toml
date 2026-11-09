@@ -7,6 +7,14 @@ dependencies = ["requests-oauthlib>=2.0.0"]
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.390"]
 
+[tool.uv]
+# The same wait as renovate.json.
+exclude-newer = "14 days"
+# Without this the lock falls back to oauthlib 4.0.0 (GHSA-3jp2-3mrg-2vxc): the
+# fix, 4.0.1, is younger than the window. The date also holds back later
+# releases, so drop it once 4.0.1 is past the window.
+exclude-newer-package = { oauthlib = "2026-11-01T00:00:00Z" }
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
