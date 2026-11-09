@@ -1,11 +1,12 @@
 import type { ElementTable, RenderChildren, RenderElement } from 'claude-code'
 
 import type { Codename, SessionStats, Summary, TabResult } from '../types'
+import { drawAppSession } from './app-session'
 import type { Row } from './format'
 import { activityRows, totalRows } from './format'
 import type { DetailedRow } from './session-format'
 import { cells, contextRow, fitDetails, sessionHeading, sessionRows } from './session-format'
-import { AXIS, graphAnnotation, graphOf, graphSvg, turnColor } from './session-graph'
+import { AXIS, GRAPH_TITLE, graphAnnotation, graphOf, turnColor } from './session-graph'
 
 const LOADING = 'Loading…'
 const BLANK = ' '
@@ -16,7 +17,6 @@ const COLUMN_GAP = 4
 const SESSION_TABLE_WIDTH = 52
 const SESSION_GRAPH_WIDTH = 38
 const SESSION_GAP = 2
-const GRAPH_TITLE = 'TURN LENGTH'
 
 type Table = Pick<ElementTable, 'Box' | 'Text'>
 type DrawSvg = (source: string) => RenderElement
@@ -166,20 +166,14 @@ const drawSession = (
   columns: number,
   drawSvg: DrawSvg | undefined,
 ): RenderElement => {
+  if (drawSvg !== undefined) {
+    return drawAppSession(table, session, drawSvg)
+  }
   const { Box } = table
   const context = contextRow(session)
   const contextRows: DetailedRow[] = []
   if (context !== undefined) {
     contextRows.push(context)
-  }
-  if (drawSvg !== undefined) {
-    return (
-      <Box flexDirection="column" gap={1}>
-        {drawSessionTable(table, session, columns, contextRows)}
-        {session.lengthsMs.length > 0 && drawGraphTitle(table, session)}
-        {session.lengthsMs.length > 0 && drawSvg(graphSvg(session))}
-      </Box>
-    )
   }
   if (columns >= SESSION_TABLE_WIDTH + SESSION_GAP + SESSION_GRAPH_WIDTH) {
     return (

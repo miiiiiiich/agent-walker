@@ -12,6 +12,7 @@ const SVG_HEIGHT = 120
 const SVG_MAX_COLUMNS = 160
 const SHORT_TURN_COLOR = '#84a7ff'
 const LONG_TURN_COLOR = '#efc768'
+const GRAPH_TITLE = 'TURN LENGTH'
 
 interface GraphRun {
   text: string
@@ -108,4 +109,4 @@ const graphAnnotation = (session: SessionStats): string =>
   `${formatCount(session.turns)} turns${SEPARATOR}${formatCount(session.longTurns)} ran ≥20m`
 
 export type { Graph }
-export { AXIS, graphAnnotation, graphOf, graphSvg, turnColor }
+export { AXIS, GRAPH_TITLE, graphAnnotation, graphOf, graphSvg, turnColor }
