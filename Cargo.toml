@@ -52,7 +52,7 @@ libc = "0.2.186"
 
 [dev-dependencies]
 # OpenCode collector tests build throwaway SQLite fixtures in a temp dir.
-tempfile = "3.24.0"
+tempfile = "=3.27.0"
 
 # The profile that 'dist' will build with
 [profile.dist]
