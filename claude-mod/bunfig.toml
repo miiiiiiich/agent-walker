@@ -1,0 +1,3 @@
+[install]
+# 14 days in seconds, the same wait as renovate.json.
+minimumReleaseAge = 1209600

@@ -2,6 +2,13 @@ version = 1
 revision = 5
 requires-python = ">=3.12"
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P14D"
+
+[options.exclude-newer-package]
+oauthlib = "2026-11-01T00:00:00Z"
+
 [[package]]
 name = "certifi"
 version = "2026.10.19"
