@@ -64,6 +64,14 @@
       "automerge": true
     },
     {
+      "description": "Pinning keeps the current version, so automerge it",
+      "matchUpdateTypes": [
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
       "description": "Automerge Docker image digest updates (rebuilds of the same tag), but not Actions digests",
       "matchDatasources": [
         "docker"
