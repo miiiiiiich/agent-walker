@@ -58,7 +58,7 @@ jobs:
       # the toolchain step from ci.yml, so a toolchain bump changes both alike
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: 1.99.1 # zizmor: ignore[superfluous-actions]
+          toolchain: 1.100.0 # zizmor: ignore[superfluous-actions]
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release --locked
 
