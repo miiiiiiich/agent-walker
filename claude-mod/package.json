@@ -9,7 +9,7 @@
     "test": "claude plugin validate . && claude plugin test ."
   },
   "devDependencies": {
-    "@anthropic-ai/claude-code": "2.1.318",
+    "@anthropic-ai/claude-code": "2.1.319",
     "@biomejs/biome": "2.6.5",
     "typescript": "7.0.2"
   },
