@@ -294,6 +294,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 

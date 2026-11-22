@@ -332,6 +332,7 @@ mod tests {
                     ..TokenUsage::default()
                 },
                 granularity: crate::model::UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
             }],
             tool_events: vec![crate::model::ToolEvent {
                 timestamp: Some(edge),
@@ -426,6 +427,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
                 },
                 UsageEvent {
                     timestamp: Some(datetime!(2026-06-08 10:00 UTC)),
@@ -443,6 +445,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
                 },
             ],
             tool_events: vec![crate::model::ToolEvent {
@@ -510,6 +513,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         };
         let events = vec![
             event(datetime!(2026-06-30 10:00 UTC), 1_000_000_000), // every window
@@ -558,6 +562,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 
@@ -627,6 +632,7 @@ mod v09_tests {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 

@@ -150,6 +150,7 @@ fn push_usage(
             .and_then(project_from_cwd),
         usage,
         granularity: crate::model::UsageGranularity::Call,
+        billing: crate::model::Billing::default(),
     });
 }
 

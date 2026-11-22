@@ -105,6 +105,7 @@ pub(super) fn parse_messages(
                 // price from LiteLLM for consistency (see docs/opencode).
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
             });
         }
 

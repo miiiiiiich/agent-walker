@@ -96,6 +96,7 @@ impl Receipts {
                 project: project.map(ToOwned::to_owned),
                 usage: usage_event,
                 granularity: UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
             },
         });
     }

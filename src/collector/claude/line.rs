@@ -91,6 +91,7 @@ pub(in crate::collector::claude) fn parse_line(
                 project: project.map(ToOwned::to_owned),
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
             },
         });
     }
@@ -122,6 +123,7 @@ pub(in crate::collector::claude) fn parse_line(
                     project: project.map(ToOwned::to_owned),
                     usage,
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
                 },
             });
         }

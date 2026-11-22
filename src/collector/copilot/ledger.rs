@@ -347,6 +347,7 @@ pub(super) fn read_call_ledger(
                 project: row.cwd.as_deref().and_then(project_from_cwd),
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
             },
         });
     }

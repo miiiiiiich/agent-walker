@@ -384,6 +384,7 @@ fn collect_shutdown_usage(
                 project: project.map(ToOwned::to_owned),
                 usage,
                 granularity: crate::model::UsageGranularity::Aggregate,
+                billing: crate::model::Billing::default(),
             },
         });
     }

@@ -16,6 +16,29 @@ pub struct UsageEvent {
     pub project: Option<String>,
     pub usage: TokenUsage,
     pub granularity: UsageGranularity,
+    #[serde(default)]
+    pub billing: Billing,
+}
+
+/// The options a call was billed with that change its rates. A log that
+/// records none leaves the standard ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Billing {
+    pub tier: ServiceTier,
+    /// Claude's `inference_geo: "us"`.
+    pub us_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServiceTier {
+    #[default]
+    Standard,
+    /// Claude's fast mode, `speed: "fast"`.
+    Fast,
+    /// Codex's Fast, `service_tier: "priority"`.
+    Priority,
+    /// Codex's `service_tier: "ultrafast"`.
+    Ultrafast,
 }
 
 /// Whether a usage row is one model request or a sum of several. Rules that

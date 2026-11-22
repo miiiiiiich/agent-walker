@@ -31,6 +31,7 @@ impl UsageContext<'_> {
             project: self.project.map(ToOwned::to_owned),
             usage,
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 }

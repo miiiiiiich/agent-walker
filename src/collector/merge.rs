@@ -345,6 +345,7 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
                 },
             };
         let small_early = event(early, 10, None, Some("proj"));

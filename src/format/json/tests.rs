@@ -148,6 +148,7 @@ fn every_event_stream_uses_local_dates_and_drops_undated_rows() {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         });
         collection.duration_events.push(DurationEvent {
             timestamp,

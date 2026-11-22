@@ -341,6 +341,7 @@ fn collect_turn_usage(
                 project: None,
                 usage,
                 granularity: crate::model::UsageGranularity::Aggregate,
+                billing: crate::model::Billing::default(),
             },
         });
     }
