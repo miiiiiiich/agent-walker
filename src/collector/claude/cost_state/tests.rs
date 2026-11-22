@@ -492,6 +492,166 @@ fn a_forks_copy_of_a_call_after_the_parents_total_stays_counted_once() {
     assert_eq!((reads("pa"), reads("fk")), (30, 20));
 }
 
+fn reads_of(collection: &Collection, session: &str) -> u64 {
+    added(collection)
+        .iter()
+        .filter(|event| event.session_id.as_deref() == Some(session))
+        .map(|event| event.usage.cache_read_input_tokens)
+        .sum()
+}
+
+/// `pa` makes m0 and m1; `fk` forks it a day later, copying only m1, and
+/// makes m9 of its own.
+fn parent_and_fork(dir: &Path) {
+    write(
+        dir,
+        "parent.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m0", "claude-opus-5", 0, 400),
+            assistant("2026-06-05T09:10:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+            cost_state("pa", 7, &[("claude-opus-5", 0, 2, 0, 530, 0, 0)]),
+        ],
+    );
+    write(
+        dir,
+        "fork.jsonl",
+        &[
+            assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
+            cost_state("fk", 7, &[("claude-opus-5", 0, 3, 0, 530 + 50 + 20, 0, 0)]),
+        ],
+    );
+}
+
+/// A sibling forked earlier holds the parent's total plus its own calls: it
+/// is not the later fork's parent, though its total is larger, whether or
+/// not the forks copied all of the parent's calls.
+#[test]
+fn a_sibling_fork_is_not_taken_for_the_parent() {
+    let temp = TempDir::new().expect("tempdir");
+    let partial = temp.path().join("partial");
+    parent_and_fork(&partial);
+    write(
+        &partial,
+        "sibling.jsonl",
+        &[
+            assistant("2026-06-07T09:00:00Z", "sb", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-07T09:05:00Z", "sb", "b9", "claude-opus-5", 0, 80),
+            cost_state("sb", 7, &[("claude-opus-5", 0, 3, 0, 530 + 80 + 15, 0, 0)]),
+        ],
+    );
+    let whole = temp.path().join("whole");
+    write(
+        &whole,
+        "parent.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+            cost_state("pa", 3, &[("claude-opus-5", 0, 1, 0, 150, 0, 0)]),
+        ],
+    );
+    for (session, day, own, total) in [("f1", 6, 20, 180), ("f2", 7, 40, 195)] {
+        write(
+            &whole,
+            &format!("{session}.jsonl"),
+            &[
+                assistant(
+                    &format!("2026-06-0{day}T09:00:00Z"),
+                    session,
+                    "m1",
+                    "claude-opus-5",
+                    0,
+                    100,
+                ),
+                assistant(
+                    &format!("2026-06-0{day}T09:05:00Z"),
+                    session,
+                    "o1",
+                    "claude-opus-5",
+                    0,
+                    own,
+                ),
+                cost_state(session, 3, &[("claude-opus-5", 0, 2, 0, total, 0, 0)]),
+            ],
+        );
+    }
+
+    let partial = collect(&partial, None, false, UtcOffset::UTC);
+    let whole = collect(&whole, None, false, UtcOffset::UTC);
+
+    let reads = |collection: &Collection, sessions: [&str; 3]| {
+        sessions.map(|session| reads_of(collection, session))
+    };
+    assert_eq!(reads(&partial, ["pa", "fk", "sb"]), [30, 20, 15]);
+    assert_eq!(reads(&whole, ["pa", "f1", "f2"]), [50, 10, 5]);
+}
+
+/// A fork of a fork is compared with the fork it was made from, the nearest
+/// of the two sessions it shares calls with.
+#[test]
+fn a_fork_of_a_fork_is_compared_with_the_nearer_fork() {
+    let temp = TempDir::new().expect("tempdir");
+    parent_and_fork(temp.path());
+    write(
+        temp.path(),
+        "grandchild.jsonl",
+        &[
+            assistant("2026-06-07T09:00:00Z", "gc", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-07T09:01:00Z", "gc", "m9", "claude-opus-5", 0, 50),
+            assistant("2026-06-07T09:05:00Z", "gc", "g9", "claude-opus-5", 0, 30),
+            cost_state("gc", 7, &[("claude-opus-5", 0, 4, 0, 600 + 30 + 5, 0, 0)]),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    assert_eq!(reads_of(&collection, "gc"), 5);
+}
+
+/// Two sessions the fork could have come from, equal in every respect but
+/// how their totals split by model: the choice must not follow map order.
+#[test]
+fn tied_parents_are_chosen_the_same_way_every_time() {
+    let temp = TempDir::new().expect("tempdir");
+    write(
+        temp.path(),
+        "a.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+            cost_state("pa", 7, &[("claude-opus-5", 0, 1, 0, 149, 0, 0)]),
+        ],
+    );
+    write(
+        temp.path(),
+        "b.jsonl",
+        &[
+            assistant("2026-06-05T10:00:00Z", "pb", "m1", "claude-opus-5", 0, 100),
+            cost_state(
+                "pb",
+                7,
+                &[
+                    ("claude-opus-5", 0, 1, 0, 99, 0, 0),
+                    ("claude-haiku-5-5", 50, 0, 0, 0, 0, 0),
+                ],
+            ),
+        ],
+    );
+    write(
+        temp.path(),
+        "fork.jsonl",
+        &[
+            assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
+            cost_state("fk", 7, &[("claude-opus-5", 0, 2, 0, 149 + 50 + 20, 0, 0)]),
+        ],
+    );
+
+    let runs: Vec<u64> = (0..32)
+        .map(|_| reads_of(&collect(temp.path(), None, false, UtcOffset::UTC), "fk"))
+        .collect();
+
+    assert_eq!(runs, vec![20; 32]);
+}
+
 /// A streamed reply whose larger copy does not name its model is still that
 /// model's call, as the collection merge reads it, in either copy order.
 #[test]

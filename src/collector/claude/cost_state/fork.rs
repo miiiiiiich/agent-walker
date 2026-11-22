@@ -1,6 +1,7 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::model::TokenUsage;
+use crate::model::{SourceKind, TokenUsage};
 
 use super::CostStateRow;
 use super::transcript::Call;
@@ -65,7 +66,19 @@ pub(super) fn discount_forks<'a>(
                     })?;
                     Some((other, base))
                 })
-                .max_by_key(|(_, base)| base.volume());
+                // A sibling forked earlier holds the parent's total plus its
+                // own calls; taken for the parent as the largest total, its
+                // spending came off this fork. The fewest calls made after
+                // the ones shared with this fork wins, then the largest total
+                // (the nearest of a chain of forks), then the lowest id, so
+                // that map order never decides.
+                .min_by_key(|&(other, base)| {
+                    (
+                        made_after_shared(&transcripts[other], base, fork_keys),
+                        Reverse(base.volume()),
+                        other,
+                    )
+                });
             if let Some((parent, base)) = parent {
                 discounts.push(Discount {
                     fork,
@@ -97,6 +110,31 @@ pub(super) fn discount_forks<'a>(
             calls.retain(|call| call.key.is_none_or(|key| !discount.copied.contains(key)));
         }
     }
+}
+
+/// The calls `other` made after the last one it shares with the fork, up to
+/// its total: a sibling's own calls follow the copies they share, while the
+/// calls of a parent the fork did not copy come before them. Subagent calls
+/// are never copied, so they say nothing.
+fn made_after_shared(calls: &[Call], base: &CostStateRow, fork_keys: &HashSet<&str>) -> usize {
+    let copyable = || {
+        calls
+            .iter()
+            .filter(|call| call.source_kind != SourceKind::Subagent)
+    };
+    let shared = |call: &&Call| call.key.is_some_and(|key| fork_keys.contains(key));
+    let Some(last_shared) = copyable()
+        .filter(shared)
+        .filter_map(|call| call.timestamp)
+        .max()
+    else {
+        return 0;
+    };
+    copyable()
+        .filter(|call| !shared(call))
+        .filter_map(|call| call.timestamp)
+        .filter(|&at| at > last_shared && base.covers(at))
+        .count()
 }
 
 fn subtract(usage: &mut TokenUsage, carried: &TokenUsage) {

@@ -100,8 +100,14 @@ their own. The log does not say which calls these are.
   session's last total written before the fork's first call of its own is
   taken off the fork's totals, and the copied calls that total covers are left
   out of the fork's side, so the other session's uncounted part is not added
-  twice. Sessions that only share a `startTime`, with no call in common, keep
-  separate totals and are compared as they are.
+  twice. When several sessions qualify, an earlier fork of the same session
+  can be among them: it holds that session's total plus its own calls, made
+  after the calls it shares with the later fork. So the session taken is the
+  one with the fewest main-transcript calls, covered by its total, made after
+  the last call it shares with the fork; then the one with the largest total
+  (the nearest in a chain of forks); then the lowest session id. Sessions that
+  only share a `startTime`, with no call in common, keep separate totals and
+  are compared as they are.
 - **Where it lands.** The added usage is spread over the local hours the
   session made calls in, in proportion to its transcript tokens in each hour,
   and each part is dated at the session's last call in that hour. It adds no
