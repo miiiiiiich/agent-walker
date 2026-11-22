@@ -112,8 +112,6 @@ fn event_files(
     files
 }
 
-/// One session's whole journal, its rotated segments included, is parsed as
-/// one stream: one cumulative baseline, one set of turn starts.
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let session_id = path
         .parent()

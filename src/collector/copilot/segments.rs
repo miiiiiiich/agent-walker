@@ -11,10 +11,9 @@ use crate::collector::read::{Lines, open_regular};
 /// links could otherwise make.
 const MAX_SEGMENTS: usize = 10_000;
 
-/// A session's journal, oldest file first and ending with `head`. A rotation
-/// archives the head as `events.<n>.jsonl` and starts a new one whose first
-/// record, `session.journal_link`, names that predecessor; read file by file,
-/// each new head's first shutdown counted the whole cumulative again. A
+/// A session's journal, oldest file first and ending with `head`, followed
+/// back through each file's `session.journal_link`. Read file by file, each
+/// new head's first shutdown would count the whole cumulative again. A
 /// predecessor that is missing or unreadable ends the chain there (an
 /// unreadable one as a parse error), so the journal degrades to the files
 /// after it. `None` when the head itself can't be opened.

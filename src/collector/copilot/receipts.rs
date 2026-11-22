@@ -24,9 +24,8 @@ struct Pending {
 }
 
 impl Receipts {
-    /// One receipt per model call: the durable copy of the live usage event,
-    /// which the CLI no longer writes to the log. Keyed by its accounting
-    /// identity, so a fork's copy collapses into the parent's original.
+    /// Keyed by the accounting identity, so a fork's copy collapses into the
+    /// parent's original.
     pub(super) fn collect(
         &mut self,
         value: &Value,
@@ -101,11 +100,10 @@ impl Receipts {
         });
     }
 
-    /// What the receipts read since the previous snapshot already counted,
-    /// per model, of the cumulative this `session.shutdown` carries. Its
-    /// `usageAccountingWatermarks` name the highest receipt per source it
-    /// subsumes; a receipt past the mark stays for the next snapshot. A
-    /// snapshot without marks predates receipts and subsumes all of them.
+    /// What the receipts read since the previous exit already counted, per
+    /// model, of this exit's cumulative. A receipt past its source's mark is
+    /// left for the next exit; an exit without marks predates receipts and
+    /// covers all of them.
     pub(super) fn covered_by(&mut self, snapshot: &Value) -> HashMap<String, RawCounters> {
         let marks = snapshot
             .pointer("/data/usageAccountingWatermarks")

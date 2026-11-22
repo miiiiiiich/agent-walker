@@ -14,8 +14,6 @@ use crate::timestamp::{parse_rfc3339, plausible};
 
 use super::{MAX_SANE_TOKENS, RawCounters};
 
-/// Rows the CLI caught up from a session's log carry an `event_id` with this
-/// prefix; the rest it recorded live.
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
