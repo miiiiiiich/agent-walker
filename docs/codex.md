@@ -40,9 +40,12 @@ path longer than 4,096, is treated as missing.
   back to `token_count` events (`last_token_usage`). A `token_count` whose
   usage equals an earlier record in the same file is that record's echo
   (sometimes deferred, sometimes byte-identical twice) and is not counted
-  again. A `token_count` with only `total_tokens` set is Codex refilling the
-  context window after a compaction, not a call, and is skipped. A record
-  whose `thread_id` is not the rollout's own thread is a copy and is skipped.
+  again. A `token_count` re-sent with the same last and cumulative usage
+  reports no new call: `token_count`s are keyed by session, last and
+  cumulative usage, so the re-sent row counts once. A `token_count` with only
+  `total_tokens` set is Codex refilling the context window after a
+  compaction, not a call, and is skipped. A record whose `thread_id` is not
+  the rollout's own thread is a copy and is skipped.
 - **Subagents** from the rollout's own (first) `session_meta.source`:
   `{"subagent": {"thread_spawn": …}}` is attributed to its `agent_role`
   (`default` when unset; nicknames are random per spawn), `{"subagent":
@@ -73,6 +76,13 @@ path longer than 4,096, is treated as missing.
   `UserMessage` item. A subagent's prompts come from the agent that runs it,
   not a person, and are not counted.
 - **Model / project** from `session_meta` and `turn_context`.
+- **Limits** from `token_count` `rate_limits.primary`: LIMITS plots each
+  day's highest `used_percent`. Codex used to send its 5-hour window as
+  `primary` and the weekly window as `secondary`; it now sends the weekly
+  window (`window_minutes` 10080) as `primary` and `secondary` as null, so
+  the chart shows how far into the weekly limit each day went. Rows also
+  carry a `limit_id`; most say `codex`, a few name another limit, and LIMITS
+  does not tell them apart.
 
 ## How tokens are counted
 
