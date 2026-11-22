@@ -106,6 +106,11 @@ impl CostStateLog {
         true
     }
 
+    /// The earliest `startTime` among the processes whose totals it holds.
+    pub(in crate::collector::claude) fn earliest_start(&self) -> Option<i64> {
+        self.rows.iter().filter_map(|row| row.start_time).min()
+    }
+
     /// Every other row of the transcript, in order.
     pub(in crate::collector::claude) fn note(
         &mut self,

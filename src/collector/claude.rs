@@ -2,10 +2,10 @@ mod cost_state;
 mod line;
 mod turns;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use time::{Duration, OffsetDateTime, UtcOffset};
@@ -43,19 +43,32 @@ pub fn collect(
     if mtime_floor.is_some() {
         add_session_dirs(&mut files, &mut collection.stats);
     }
-    let per_file = parse_files_cached(
-        use_cache.then_some("claude"),
-        &files,
-        local_offset,
-        |path| {
-            let events = parse_file(path, root, local_offset)?;
-            Some(if is_background_path(path) {
-                usage_only(events)
-            } else {
-                events
-            })
-        },
-    );
+    let parse = |path: &Path| {
+        let events = parse_file(path, root, local_offset)?;
+        Some(if is_background_path(path) {
+            usage_only(events)
+        } else {
+            events
+        })
+    };
+    let mut per_file =
+        parse_files_cached(use_cache.then_some("claude"), &files, local_offset, parse);
+    if let Some(floor) = mtime_floor {
+        let earlier = earlier_files(&per_file, floor);
+        if !earlier.is_empty() {
+            // Its own cache: a call stores only the files it was given, so
+            // sharing the cache above would rewrite it on every run.
+            per_file.extend(parse_files_cached(
+                use_cache.then_some("claude-earlier"),
+                &earlier,
+                local_offset,
+                parse,
+            ));
+            // Ties between copies keep the first one read: in path order,
+            // as a window wide enough to read them all would.
+            per_file.sort_by(|(a, _), (b, _)| a.cmp(b));
+        }
+    }
     // Totals are per session across its files, so they are compared with
     // the transcript after every file is read, before the copies collapse.
     let uncounted = cost_state::uncounted_calls(&per_file, local_offset);
@@ -81,6 +94,52 @@ fn add_session_dirs(files: &mut Vec<PathBuf>, stats: &mut ScanStats) {
     }
     files.sort();
     files.dedup();
+}
+
+/// A fork restores its parent's `startTime`, and the parent's last total
+/// before the fork comes off the fork's. A parent last written before the
+/// mtime floor was not read, so a short window added the parent's uncounted
+/// part to the fork again. A file holding a process's totals was written
+/// after the process started, so a session whose process started before the
+/// floor also reads its project's main transcripts written since that start.
+/// All their rows are older than the floor. Their subagent files are left
+/// out: no call in them is copied into a fork, and they would multiply the
+/// files read for a long-lived session several times over.
+fn earlier_files(per_file: &[(PathBuf, Option<FileEvents>)], floor: SystemTime) -> Vec<PathBuf> {
+    let floor_ms = floor.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    });
+    let mut since: BTreeMap<&Path, i64> = BTreeMap::new();
+    for (path, events) in per_file {
+        let (Some(events), Some(dir)) = (events, path.parent()) else {
+            continue;
+        };
+        if path_source_kind(path) != SourceKind::Main {
+            continue;
+        }
+        if let Some(start) = events
+            .claude_cost_state
+            .earliest_start()
+            .filter(|&start| start < floor_ms)
+        {
+            let earliest = since.entry(dir).or_insert(start);
+            *earliest = (*earliest).min(start);
+        }
+    }
+    let mut stats = ScanStats::default();
+    let mut files = Vec::new();
+    for (dir, start) in since {
+        let start =
+            UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(start).unwrap_or(0));
+        files.extend(
+            list_files(dir, "jsonl", Some(start), &mut stats)
+                .into_iter()
+                .filter(|path| path.parent() == Some(dir)),
+        );
+    }
+    let read: HashSet<&Path> = per_file.iter().map(|(path, _)| path.as_path()).collect();
+    files.retain(|path| !read.contains(path.as_path()));
+    files
 }
 
 fn is_background_path(path: &Path) -> bool {

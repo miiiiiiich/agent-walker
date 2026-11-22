@@ -121,7 +121,10 @@ their own. The log does not say which calls these are.
   section's `other` row and goes to the project of the call it is dated at.
 - So that a long session is compared whole, its subagent files are read even
   when they are older than the files the window would otherwise read; the
-  rows in them are older than any window.
+  rows in them are older than any window. Likewise, when a session's process
+  started before those files, the main transcripts of its project directory
+  written since that start are read too: a fork's parent among them takes its
+  part off the fork the same way on a short window as on a long one.
 
 ## How tokens are counted (important)
 

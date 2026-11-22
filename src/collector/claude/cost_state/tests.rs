@@ -767,6 +767,85 @@ fn a_long_sessions_old_subagent_file_is_compared_too() {
     assert!(added(&collection).is_empty());
 }
 
+fn age(path: &Path, hours: u64) {
+    let at = std::time::SystemTime::now() - std::time::Duration::from_hours(hours);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(at))
+        .expect("mtime should be set");
+}
+
+/// A fork's parent last written before the mtime floor still takes its part
+/// off the fork: a short window must add what a long one adds.
+#[test]
+fn a_parent_older_than_the_floor_still_discounts_its_fork() {
+    let temp = TempDir::new().expect("tempdir");
+    parent_and_fork(temp.path());
+    age(&temp.path().join("parent.jsonl"), 48);
+    let floor = std::time::SystemTime::now() - std::time::Duration::from_hours(24);
+
+    let short = collect(temp.path(), Some(floor), false, UtcOffset::UTC);
+    let long = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    assert_eq!((reads_of(&short, "fk"), reads_of(&long, "fk")), (20, 20));
+}
+
+/// Only files written since the process started can hold its totals, so an
+/// older file of the project is not read for it.
+#[test]
+fn files_written_before_the_process_started_are_not_read_for_it() {
+    let temp = TempDir::new().expect("tempdir");
+    let hours_ago = |hours: i64| {
+        let now = OffsetDateTime::now_utc().unix_timestamp() * 1_000;
+        now - hours * 3_600_000
+    };
+    write(
+        temp.path(),
+        "s1.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "s1", "m1", "claude-opus-5", 0, 100),
+            cost_state(
+                "s1",
+                hours_ago(36),
+                &[("claude-opus-5", 0, 1, 0, 130, 0, 0)],
+            ),
+        ],
+    );
+    write(
+        temp.path(),
+        "older.jsonl",
+        &[assistant(
+            "2026-06-01T09:00:00Z",
+            "s0",
+            "m0",
+            "claude-opus-5",
+            0,
+            100,
+        )],
+    );
+    write(
+        temp.path(),
+        "since.jsonl",
+        &[assistant(
+            "2026-06-03T09:00:00Z",
+            "s2",
+            "m2",
+            "claude-opus-5",
+            0,
+            100,
+        )],
+    );
+    age(&temp.path().join("older.jsonl"), 48);
+    age(&temp.path().join("since.jsonl"), 30);
+    let floor = std::time::SystemTime::now() - std::time::Duration::from_hours(24);
+
+    let collection = collect(temp.path(), Some(floor), false, UtcOffset::UTC);
+
+    assert_eq!(collection.stats.files_seen, 2);
+    assert_eq!(reads_of(&collection, "s1"), 30);
+}
+
 /// Every added row keeps its 5m and 1h writes within its writes, or the whole
 /// write prices at the 5m rate.
 #[test]
