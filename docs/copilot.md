@@ -7,7 +7,15 @@ both written by the agentic GitHub Copilot CLI (`@github/copilot`; not the
 retired `gh copilot` extension):
 
 - `session-state/<uuid>/events.jsonl` — one directory per session, the
-  session's event stream.
+  session's event stream. Newer CLIs rotate a long stream: the old file is
+  archived as `events.<n>.jsonl`, and the new head's first record
+  (`session.journal_link`) names it. agent-walker follows those links back
+  from `events.jsonl`, only to a bare `events.<n>.jsonl` with a lower number
+  in the same directory, and reads the chain oldest first as one stream, so
+  each exit still counts once. The replay checkpoint a new head opens with
+  (records marked `checkpoint`) copies what the archive already holds and is
+  skipped, apart from the session's start. A missing predecessor ends the
+  chain there; an unreadable one also counts as a parse error.
 - `session-store.db` — the CLI's SQLite session store. Its
   `assistant_usage_events` table holds one row per model call (CLI 1.0.69 and
   later). The DB is opened **read-only**, like the OpenCode store.

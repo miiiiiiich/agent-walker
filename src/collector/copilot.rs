@@ -1,4 +1,5 @@
 mod ledger;
+mod segments;
 
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -108,8 +109,9 @@ fn event_files(
     files
 }
 
+/// One session's whole journal, its rotated segments included, is parsed as
+/// one stream: one cumulative baseline, one set of turn starts.
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let session_id = path
         .parent()
         .and_then(Path::file_name)
@@ -117,13 +119,25 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .and_then(ident)
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
+    let journal = segments::journal(path, &mut events)?;
     let mut session = SessionState::default();
 
-    while let Some((_, line)) = lines.next(&mut events) {
-        let Some(value) = parse_line(line, &mut events) else {
-            continue;
+    for file in &journal {
+        let reader = match open_regular(file) {
+            Ok(reader) => reader,
+            Err(_) if file == path => return None,
+            Err(_) => {
+                events.parse_errors += 1;
+                continue;
+            }
         };
-        session.record(&value, session_id.as_ref(), &mut events);
+        let mut lines = Lines::new(BufReader::new(reader));
+        while let Some((_, line)) = lines.next(&mut events) {
+            let Some(value) = parse_line(line, &mut events) else {
+                continue;
+            };
+            session.record(&value, session_id.as_ref(), &mut events);
+        }
     }
 
     events.compress_touches(local_offset);
@@ -142,6 +156,14 @@ struct SessionState {
 
 impl SessionState {
     fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
+        let kind = value.get("type").and_then(Value::as_str);
+        // A rotated journal's head opens with a replay checkpoint: copies of
+        // records its archived segments already hold. Only the session's
+        // start is taken from it, for when the archive is gone.
+        let replayed = value.get("checkpoint").and_then(Value::as_bool) == Some(true);
+        if replayed && kind != Some("session.start") {
+            return;
+        }
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -151,14 +173,14 @@ impl SessionState {
             session_id,
             event_id: value.get("id").and_then(Value::as_str).and_then(ident),
         };
-        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
+        if let (false, Some(timestamp), Some(session_id)) = (replayed, timestamp, session_id) {
             events.session_touches.push(SessionTouch {
                 timestamp,
                 session_id: session_id.clone(),
             });
         }
 
-        match value.get("type").and_then(Value::as_str) {
+        match kind {
             Some("session.start") => {
                 if let Some(cwd) = value
                     .get("data")
