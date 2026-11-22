@@ -86,7 +86,7 @@ pub(super) fn collect_usage(
     let events = generations
         .rows
         .into_iter()
-        .map(|(_, event)| event)
+        .map(|(_, event)| attributed(event, &subagents))
         .filter(|event| {
             !floor.is_some_and(|floor| {
                 event
@@ -96,6 +96,18 @@ pub(super) fn collect_usage(
         })
         .collect();
     Usage { events, subagents }
+}
+
+/// Attributed once every copy is read, by the conversation a row leaves
+/// `parse_gen` under: only one store's copy may name the parent, and when the
+/// other copy won on time its row stayed Main in a session of its own.
+fn attributed(mut event: UsageEvent, subagents: &HashMap<String, Subagent>) -> UsageEvent {
+    if let Some(subagent) = event.session_id.as_ref().and_then(|id| subagents.get(id)) {
+        event.session_id = Some(subagent.session_id.clone());
+        event.source_kind = SourceKind::Subagent;
+        event.attribution_agent.clone_from(&subagent.name);
+    }
+    event
 }
 
 /// How a row's time was found, weakest first.
@@ -215,7 +227,6 @@ fn parse_db(
     }
     let conversation = Conversation {
         id: &conversation_id,
-        subagent: subagent.as_ref().map(|(_, subagent)| subagent),
         project: trajectory.project.as_deref(),
         fallback,
         selected_models: selected_models(&blobs),
@@ -251,7 +262,6 @@ struct Conversation<'a> {
     /// subagent shares its parent's session, and the same row index in both
     /// would collide and drop one row's tokens.
     id: &'a str,
-    subagent: Option<&'a Subagent>,
     project: Option<&'a str>,
     fallback: (TimeSource, i64),
     selected_models: Vec<String>,
@@ -333,21 +343,10 @@ fn parse_gen(
     };
     let event = UsageEvent {
         timestamp,
-        session_id: Some(
-            conversation
-                .subagent
-                .map_or(conversation.id, |subagent| subagent.session_id.as_str())
-                .to_owned(),
-        ),
+        session_id: Some(conversation.id.to_owned()),
         model,
-        source_kind: if conversation.subagent.is_some() {
-            SourceKind::Subagent
-        } else {
-            SourceKind::Main
-        },
-        attribution_agent: conversation
-            .subagent
-            .and_then(|subagent| subagent.name.clone()),
+        source_kind: SourceKind::Main,
+        attribution_agent: None,
         attribution_skill: None,
         project: conversation.project.and_then(project_from_cwd),
         usage,
@@ -470,7 +469,6 @@ pub(super) mod tests {
     fn conversation(fallback_ts_ms: i64) -> Conversation<'static> {
         Conversation {
             id: "s1",
-            subagent: None,
             project: None,
             fallback: (TimeSource::ConversationStart, fallback_ts_ms),
             selected_models: Vec::new(),
@@ -928,6 +926,59 @@ pub(super) mod tests {
             Some("parent")
         );
         assert!(!usage.subagents.contains_key("parent"));
+    }
+
+    /// Only one copy of a subagent conversation may name its parent, and the
+    /// other can win on time or, on a tie, by being read first: the row still
+    /// counts as the subagent's, in the parent's session.
+    #[test]
+    fn a_subagent_row_is_attributed_whichever_copy_wins() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let started_ms = 1_780_000_000_000;
+        let row = served_only_gen_blob("gemini-3.8-flash", "r1", None);
+        for (case, steps) in [
+            ("stronger", vec![step_metadata(started_ms + 60_000, "r1")]),
+            ("tie", Vec::new()),
+        ] {
+            let plain = temp.path().join(case).join("plain");
+            let marked = temp.path().join(case).join("marked");
+            for store in [&plain, &marked] {
+                std::fs::create_dir_all(store.join("conversations"))
+                    .expect("conversations dir should be created");
+            }
+            write_dated_conversation(
+                &plain.join("conversations").join("child.db"),
+                started_ms,
+                std::slice::from_ref(&row),
+                &steps,
+            );
+            write_trajectory_conversation(
+                &marked.join("conversations").join("child.db"),
+                &subagent_trajectory(started_ms, "parent", "parent", "research"),
+                std::slice::from_ref(&row),
+                &[],
+            );
+
+            for stores in [[plain.clone(), marked.clone()], [marked, plain]] {
+                let mut stats = ScanStats::default();
+                let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats).events;
+                let rows: Vec<_> = events
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.session_id.as_deref(),
+                            e.source_kind,
+                            e.attribution_agent.as_deref(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    rows,
+                    [(Some("parent"), SourceKind::Subagent, Some("research"))],
+                    "{case}, store order {stores:?}"
+                );
+            }
+        }
     }
 
     #[test]

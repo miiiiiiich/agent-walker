@@ -27,7 +27,9 @@ further along, contributes each generation once. When the copies date a
 generation differently, the one with the strongest time evidence (the order in
 [Row time](#row-time)) is kept whichever store is read first, and only then is
 the analysis window applied — so a copy dated from its conversation start can't
-crowd out an in-window copy dated from its step.
+crowd out an in-window copy dated from its step. A subagent conversation whose
+parent only one copy names counts as that subagent's work whichever copy is
+kept.
 
 A 0-byte `.db` is a conversation agy has created but not written yet. It is
 skipped without being opened (it's still in rollback-journal mode, where even a

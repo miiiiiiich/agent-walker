@@ -267,6 +267,60 @@ mod tests {
         assert_eq!(agents, [("research", 4270)]);
     }
 
+    /// The CLI copy of a subagent conversation wins on time while only the
+    /// app copy names the parent: its generation still touches the parent
+    /// session, not a session of its own.
+    #[test]
+    fn a_subagent_named_only_in_the_other_store_counts_in_the_parent_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE).join("conversations");
+        let app = temp.path().join(APP_STORE).join("conversations");
+        fs::create_dir_all(&cli).expect("conversations dir should be created");
+        fs::create_dir_all(&app).expect("conversations dir should be created");
+        let started_ms = 1_780_966_800_000; // 2026-06-09 01:00 UTC
+        let child_row = served_only_gen_blob("gemini-3.8-flash", "r2", None);
+        write_dated_conversation(
+            &cli.join("parent.db"),
+            started_ms,
+            &[served_only_gen_blob("gemini-3.8-flash", "r1", None)],
+            &[step_metadata(started_ms + 60_000, "r1")],
+        );
+        write_dated_conversation(
+            &cli.join("child.db"),
+            started_ms,
+            std::slice::from_ref(&child_row),
+            &[step_metadata(started_ms + 120_000, "r2")],
+        );
+        write_trajectory_conversation(
+            &app.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            &[child_row],
+            &[],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let summary = crate::analyzer::summarize(
+            &collection,
+            datetime!(2026-06-09 23:00 UTC),
+            7,
+            UtcOffset::UTC,
+        );
+
+        assert_eq!(summary.sessions, 1);
+        assert!(
+            collection
+                .session_touches
+                .iter()
+                .all(|touch| touch.session_id == "parent")
+        );
+        let agents: Vec<_> = summary
+            .agents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.usage.token_volume()))
+            .collect();
+        assert_eq!(agents, [("research", 4270)]);
+    }
+
     #[test]
     fn history_and_log_rows_past_the_plausible_range_are_undated() {
         let temp = TempDir::new().expect("test tempdir should be created");
