@@ -94,9 +94,9 @@ pub(super) struct PaceState {
     newest_completion: Option<OffsetDateTime>,
 }
 
-/// The human's pace: `task_complete` → the next `user_message`, when under
-/// the 30-minute cutoff (longer is the human being away). Keyed by session
-/// and prompt time so a replayed prompt row doesn't count twice.
+/// The human's pace: `task_complete` → the next prompt, when under the
+/// 30-minute cutoff (longer is the human being away). Keyed by session and
+/// prompt time so a replayed prompt row doesn't count twice.
 pub(super) fn collect_pace_event(
     value: &Value,
     timestamp: Option<OffsetDateTime>,
@@ -116,30 +116,45 @@ pub(super) fn collect_pace_event(
                 state.pending_completion = Some(at);
             }
         }
-        Some("user_message") => {
-            let Some(prompt_at) = timestamp else {
-                return;
-            };
-            // A replayed (older) prompt row neither records a gap nor
-            // consumes the completion the genuine next prompt will pair with.
-            if let Some(end) = state.pending_completion
-                && prompt_at > end
-                && prompt_at - end <= Duration::minutes(30)
-            {
-                state.pending_completion = None;
-                let gap_ms = u64::try_from((prompt_at - end).whole_milliseconds()).unwrap_or(0);
-                events.pace_events.push(KeyedPaceEvent {
-                    key: session_id.map(|session| {
-                        format!("codex-pace:{session}:{}", prompt_at.unix_timestamp_nanos())
-                    }),
-                    event: PaceEvent {
-                        timestamp: Some(prompt_at),
-                        gap_ms,
-                    },
-                });
-            }
+        Some("user_message") => record_prompt(timestamp, session_id, state, events),
+        // Paginated rollouts write no `user_message`; the prompt is a
+        // completed `UserMessage` item.
+        Some("item_completed")
+            if string_path(value, &["payload", "item", "type"]).as_deref()
+                == Some("UserMessage") =>
+        {
+            record_prompt(timestamp, session_id, state, events);
         }
         _ => {}
+    }
+}
+
+fn record_prompt(
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    state: &mut PaceState,
+    events: &mut FileEvents,
+) {
+    let Some(prompt_at) = timestamp else {
+        return;
+    };
+    // A replayed (older) prompt row neither records a gap nor consumes the
+    // completion the genuine next prompt will pair with.
+    if let Some(end) = state.pending_completion
+        && prompt_at > end
+        && prompt_at - end <= Duration::minutes(30)
+    {
+        state.pending_completion = None;
+        let gap_ms = u64::try_from((prompt_at - end).whole_milliseconds()).unwrap_or(0);
+        events.pace_events.push(KeyedPaceEvent {
+            key: session_id.map(|session| {
+                format!("codex-pace:{session}:{}", prompt_at.unix_timestamp_nanos())
+            }),
+            event: PaceEvent {
+                timestamp: Some(prompt_at),
+                gap_ms,
+            },
+        });
     }
 }
 
@@ -300,6 +315,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::codex::collect;
+    use crate::collector::codex::tests::{meta_line, write_lines};
 
     #[test]
     fn model_time_is_the_turn_minus_the_union_of_tool_items() {
@@ -369,6 +385,43 @@ mod tests {
 
         let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
         assert_eq!(gaps, vec![26_000]);
+    }
+
+    /// Paginated rollouts record the prompt only as a `UserMessage` item. A
+    /// subagent's prompts come from its parent agent and are no one's pace.
+    #[test]
+    fn pace_reads_paginated_prompts_of_main_sessions_only() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let rows = |id: &str, source: &str| {
+            [
+                meta_line("2026-06-01T00:00:00Z", id, source, r#","history_mode":"paginated""#),
+                r#"{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","duration_ms":4000}}"#.to_owned(),
+                format!(
+                    r#"{{"timestamp":"2026-06-01T00:00:30Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"{id}","turn_id":"t2","item":{{"type":"UserMessage","id":"u2","content":[]}}}}}}"#
+                ),
+                format!(
+                    r#"{{"timestamp":"2026-06-01T00:00:31Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"{id}","turn_id":"t2","item":{{"type":"AgentMessage","id":"a2"}}}}}}"#
+                ),
+                r#"{"timestamp":"2026-06-01T00:01:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","duration_ms":30000}}"#.to_owned(),
+                r#"{"timestamp":"2026-06-01T00:01:10Z","type":"event_msg","payload":{"type":"user_message","message":"legacy"}}"#.to_owned(),
+            ]
+        };
+        write_lines(
+            &temp.path().join("rollout-main.jsonl"),
+            &rows("m1", r#""cli""#),
+        );
+        write_lines(
+            &temp.path().join("rollout-sub.jsonl"),
+            &rows(
+                "c1",
+                r#"{"subagent":{"thread_spawn":{"parent_thread_id":"m1","depth":1}}}"#,
+            ),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let gaps: Vec<u64> = collection.pace_events.iter().map(|e| e.gap_ms).collect();
+        assert_eq!(gaps, vec![26_000, 10_000]);
     }
 
     /// Replayed rows are older than the state they meet: a replayed prompt

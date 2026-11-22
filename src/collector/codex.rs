@@ -13,7 +13,7 @@ use crate::collector::read::Lines;
 use crate::collector::{
     FileEvents, list_files_matching, merge_into, parse_files_cached, project_from_cwd,
 };
-use crate::model::{Billing, Collection, Provider, SessionTouch};
+use crate::model::{Billing, Collection, Provider, SessionTouch, SourceKind};
 use crate::timestamp::parse_rfc3339;
 
 mod billing;
@@ -216,13 +216,16 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             &mut events,
         );
         collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
-        collect_pace_event(
-            &value,
-            timestamp,
-            current_session_id.as_ref(),
-            &mut pace_state,
-            &mut events,
-        );
+        // A subagent's prompts come from the agent that runs it, not a person.
+        if origin.source_kind() == SourceKind::Main {
+            collect_pace_event(
+                &value,
+                timestamp,
+                current_session_id.as_ref(),
+                &mut pace_state,
+                &mut events,
+            );
+        }
         collect_tool_event(
             &value,
             timestamp,

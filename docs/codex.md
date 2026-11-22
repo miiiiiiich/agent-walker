@@ -59,6 +59,11 @@ path longer than 4,096, is treated as missing.
   same way.
 - **Durations** from `task_complete` events (`duration_ms`) → the TURN LENGTH
   section.
+- **Pace** in main sessions: from a `task_complete` to the next prompt.
+  Legacy rollouts record the prompt as an `event_msg` `user_message`;
+  paginated ones write no `user_message`, so the prompt is the completed
+  `UserMessage` item. A subagent's prompts come from the agent that runs it,
+  not a person, and are not counted.
 - **Sessions / model / project** from `session_meta` and `turn_context`.
 
 ## How tokens are counted
