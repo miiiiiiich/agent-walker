@@ -149,8 +149,9 @@ So the Total view adds up consistently with Claude. Two real differences
   by its file name, `rollout-<time>-<thread id>.jsonl`): one the parent also
   holds, with the same last and cumulative usage, is a copy and is skipped;
   the rest are the child's own calls and count. Without the parent's rollout
-  in the scan the window stands. Tools, turns and limits in those rows stay
-  skipped.
+  in the scan the window stands, and so it does when a rollout of the
+  parent's thread can't be opened or stops decoding before its end (a cut
+  `.zst`). Tools, turns and limits in those rows stay skipped.
 - **Not on disk.** Background (async) compaction requests are charged to
   Codex's internal budget only; no record or `token_count` is written, so
   agent-walker cannot count them.

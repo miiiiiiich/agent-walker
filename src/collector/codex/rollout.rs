@@ -68,7 +68,7 @@ pub(super) fn open_rollout(path: &Path) -> Option<Box<dyn BufRead>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
 
     use tempfile::TempDir;
@@ -255,7 +255,12 @@ mod tests {
 
     /// A zstd frame of raw and run-length blocks: `prefix`, `run` copies of
     /// `byte`, then `suffix`, at four bytes per 128 KiB of run.
-    fn run_length_frame(prefix: &[u8], byte: u8, run: usize, suffix: &[u8]) -> Vec<u8> {
+    pub(in crate::collector::codex) fn run_length_frame(
+        prefix: &[u8],
+        byte: u8,
+        run: usize,
+        suffix: &[u8],
+    ) -> Vec<u8> {
         const BLOCK: usize = 128 << 10;
         fn header(frame: &mut Vec<u8>, size: usize, kind: u32, last: bool) {
             let size = u32::try_from(size).expect("block size fits");

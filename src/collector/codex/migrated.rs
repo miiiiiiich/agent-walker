@@ -5,7 +5,10 @@
 //! are held while the file parses and checked against the parent's rollout
 //! once every file is parsed: a `token_count` the parent also holds is a
 //! copy, the rest are the child's own. Without the parent in the scan the
-//! window stands, as for any fork.
+//! window stands, as for any fork, and so it does when a rollout of the
+//! parent's thread can't be read to its end: an unopened parent compared as
+//! empty and a cut-short one as partial, passing its copies for the child's
+//! own calls.
 //!
 //! Re-keying the child's rows under the parent's id to let the merge collapse
 //! the copies was rejected: a parent with records counts none of its
@@ -21,7 +24,7 @@ use time::OffsetDateTime;
 use crate::collector::FileEvents;
 use crate::collector::KeyedUsageEvent;
 use crate::collector::json::parse_line;
-use crate::collector::read::Lines;
+use crate::collector::read::{Line, MAX_LINE_BYTES, next_line};
 
 use super::fork::in_fork_burst;
 use super::rollout::{open_rollout, thread_id_of};
@@ -120,11 +123,35 @@ fn parse_held(key: &str) -> Option<Held<'_>> {
     })
 }
 
+/// What the parent's rollouts hold, once every one of them is read.
+#[derive(Default)]
+enum Parent {
+    #[default]
+    NotInScan,
+    Read(HashSet<String>),
+    /// A rollout of the thread failed, whatever the others read.
+    Unreadable,
+}
+
+impl Parent {
+    fn add(&mut self, read: Option<HashSet<String>>) {
+        *self = match (std::mem::take(self), read) {
+            (Self::Unreadable, _) | (_, None) => Self::Unreadable,
+            (Self::NotInScan, Some(pairs)) => Self::Read(pairs),
+            (Self::Read(mut known), Some(pairs)) => {
+                known.extend(pairs);
+                Self::Read(known)
+            }
+        };
+    }
+}
+
 /// Decides every held row before the merge: a row the parent's rollout also
 /// holds is a copy and goes; the child's own takes its key back. Rows of a
-/// parent outside the scan go, as the window would have had them.
+/// parent outside the scan, or not read to its end, go, as the window would
+/// have had them.
 pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-    let mut parents: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+    let mut parents: HashMap<String, Parent> = HashMap::new();
     for events in per_file.iter().filter_map(|(_, events)| events.as_ref()) {
         for event in &events.usage_events {
             if let Some(held) = event.key.as_deref().and_then(parse_held) {
@@ -140,13 +167,13 @@ pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEve
         .filter_map(|path| Some((thread_id_of(path)?, path)))
         .filter(|(thread, _)| parents.contains_key(thread))
         .collect();
-    let read: Vec<(String, HashSet<String>)> = parent_files
+    let read: Vec<(String, Option<HashSet<String>>)> = parent_files
         .into_par_iter()
         .map(|(thread, path)| (thread, token_count_pairs(path)))
         .collect();
     for (thread, pairs) in read {
         if let Some(known) = parents.get_mut(&thread) {
-            known.get_or_insert_with(HashSet::new).extend(pairs);
+            known.add(pairs);
         }
     }
     for events in per_file
@@ -157,10 +184,10 @@ pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEve
             let Some(held) = event.key.as_deref().and_then(parse_held) else {
                 return true;
             };
-            let own = parents
-                .get(held.parent)
-                .and_then(Option::as_ref)
-                .is_some_and(|pairs| !pairs.contains(held.pair));
+            let own = matches!(
+                parents.get(held.parent),
+                Some(Parent::Read(pairs)) if !pairs.contains(held.pair)
+            );
             let key = own.then(|| held.key.to_owned());
             if own {
                 event.key = key;
@@ -172,26 +199,30 @@ pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEve
 
 /// Every `token_count` the rollout holds, counted or not: the parent's own
 /// copies of its parent and its echoes of records are what a child copies too.
-fn token_count_pairs(path: &Path) -> HashSet<String> {
+/// `None` when the rollout can't be opened or stops decoding before its end.
+/// Lines are read without `Lines`, which counts a read error like an oversized
+/// line: only the read error leaves the rest of the file unseen.
+fn token_count_pairs(path: &Path) -> Option<HashSet<String>> {
+    let mut reader = open_rollout(path)?;
     let mut pairs = HashSet::new();
-    let Some(reader) = open_rollout(path) else {
-        return pairs;
-    };
-    let mut lines = Lines::new(reader);
+    let mut line = Vec::new();
     let mut scratch = FileEvents::default();
-    while let Some((_, line)) = lines.next(&mut scratch) {
+    while let Some(read) = next_line(&mut *reader, &mut line, MAX_LINE_BYTES).ok()? {
+        let Line::Text = read else {
+            continue;
+        };
         // Most rows are not `token_count`s; skip parsing them.
-        if !std::str::from_utf8(line).is_ok_and(|text| text.contains("\"token_count\"")) {
+        if !std::str::from_utf8(&line).is_ok_and(|text| text.contains("\"token_count\"")) {
             continue;
         }
-        if let Some(pair) = parse_line(line, &mut scratch)
+        if let Some(pair) = parse_line(line.trim_ascii_end(), &mut scratch)
             .as_ref()
             .and_then(token_count_fingerprint)
         {
             pairs.insert(pair);
         }
     }
-    pairs
+    Some(pairs)
 }
 
 #[cfg(test)]
@@ -201,6 +232,7 @@ mod tests {
 
     use super::*;
     use crate::collector::codex::collect;
+    use crate::collector::codex::rollout::tests::run_length_frame;
     use crate::collector::codex::tests::{
         meta_line, record_line, token_count_line, total_volume, usage_json, write_lines,
     };
@@ -311,6 +343,59 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110 + 140 + 220 + 77 + 88);
+    }
+
+    /// A parent that can't be opened, or stops decoding before its end, holds
+    /// copies nobody saw: comparing against what was read would count them as
+    /// the child's own, so the window stands as without the parent.
+    fn with_migrated_child_and_parent(parent: &[u8]) -> crate::model::Collection {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let child = temp.path().join("rollout-2026-06-01T01-00-00-c1.jsonl");
+        write_lines(&child, &migrated_child("2026-06-01T01:00:00Z"));
+        std::fs::write(
+            temp.path().join("rollout-2026-06-01T00-00-00-p1.jsonl.zst"),
+            parent,
+        )
+        .expect("fixture should be written");
+        collect(temp.path(), None, false, UtcOffset::UTC)
+    }
+
+    #[test]
+    fn the_window_stands_when_the_parent_cannot_be_opened() {
+        let collection = with_migrated_child_and_parent(b"not zstd");
+
+        assert_eq!(collection.stats.unreadable_files, 1);
+        assert_eq!(total_volume(&collection), 0);
+    }
+
+    #[test]
+    fn the_window_stands_when_the_parent_stops_decoding_early() {
+        // The frame stops in its last block, before the two `token_count`s
+        // the child copies next. The decoder holds back a window of output,
+        // so a blank run longer than that lets the record and its echo reach
+        // the reader before the cut block fails.
+        let first = usage_json(100, 40, 10);
+        let head = [
+            meta_line("2026-06-01T00:00:00Z", "p1", r#""cli""#, ""),
+            record_line("2026-06-01T00:00:03Z", "p1", "resp_1", &first),
+            token_count_line("2026-06-01T00:00:03.100Z", &first, 110),
+        ];
+        let tail = [
+            token_count_line("2026-06-01T00:00:09Z", &usage_json(120, 0, 20), 250),
+            token_count_line("2026-06-01T00:00:20Z", &usage_json(200, 0, 20), 470),
+        ];
+        let mut frame = run_length_frame(
+            format!("{}\n", head.join("\n")).as_bytes(),
+            b' ',
+            300 << 10,
+            format!("\n{}\n", tail.join("\n")).as_bytes(),
+        );
+        frame.truncate(frame.len() - 40);
+
+        let collection = with_migrated_child_and_parent(&frame);
+
+        assert_eq!(collection.stats.parse_errors, 1);
+        assert_eq!(total_volume(&collection), 110, "only the parent's record");
     }
 
     #[test]
