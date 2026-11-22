@@ -325,7 +325,6 @@ fn collect_shutdown_usage(
     else {
         return;
     };
-    let covered = receipts.covered_by(value);
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
             continue;
@@ -360,7 +359,7 @@ fn collect_shutdown_usage(
         // they don't carry, such as calls from before the CLI wrote them.
         let delta = current
             .minus(base)
-            .minus(covered.get(model).copied().unwrap_or_default());
+            .minus(receipts.take_covered(value, model));
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();

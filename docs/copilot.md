@@ -67,8 +67,9 @@ user.
     previous one, dated at its own exit time, less what the receipts read
     since then already counted. Its `usageAccountingWatermarks` name, per
     source session, the highest receipt it covers; a receipt past the mark
-    is left for the next exit. What remains, such as calls from before the
-    CLI wrote receipts, counts at that exit.
+    is left for the next exit, and so is a receipt whose model the exit
+    carries no usable counters for. What remains, such as calls from before
+    the CLI wrote receipts, counts at that exit.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a

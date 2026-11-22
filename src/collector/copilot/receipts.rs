@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::Value;
 
@@ -101,16 +101,22 @@ impl Receipts {
         });
     }
 
-    /// What the receipts read since the previous exit already counted, per
-    /// model, of this exit's cumulative. A receipt past its source's mark is
-    /// left for the next exit; an exit without marks predates receipts and
-    /// covers all of them.
-    pub(super) fn covered_by(&mut self, snapshot: &Value) -> HashMap<String, RawCounters> {
+    /// What `model`'s receipts read since the previous exit already counted
+    /// of its cumulative at this exit, taken out of the pending ones. A
+    /// receipt past its source's mark is left for the next exit; an exit
+    /// without marks predates receipts and covers all of them. Taken only
+    /// for a model whose counters the exit validated: taking every model's
+    /// up front, an exit without the model's counters consumed its receipts
+    /// without deducting them, and the next cumulative counted them again.
+    pub(super) fn take_covered(&mut self, snapshot: &Value, model: &str) -> RawCounters {
         let marks = snapshot
             .pointer("/data/usageAccountingWatermarks")
             .and_then(Value::as_object);
-        let mut covered: HashMap<String, RawCounters> = HashMap::new();
+        let mut covered = RawCounters::default();
         self.pending.retain(|receipt| {
+            if receipt.model != model {
+                return true;
+            }
             let subsumed = match (marks, &receipt.identity) {
                 (None, _) | (Some(_), None) => true,
                 (Some(marks), Some((source, sequence))) => marks
@@ -119,10 +125,7 @@ impl Receipts {
                     .is_some_and(|mark| mark >= *sequence),
             };
             if subsumed {
-                covered
-                    .entry(receipt.model.clone())
-                    .or_default()
-                    .add(receipt.counters);
+                covered.add(receipt.counters);
             }
             !subsumed
         });
@@ -328,6 +331,38 @@ pub(super) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110 + 440);
+    }
+
+    /// An exit whose snapshot has no usable counters for the receipt's model
+    /// doesn't cover the receipt, so the next valid exit still deducts it.
+    #[test]
+    fn an_exit_without_the_models_counters_leaves_its_receipts_pending() {
+        for metrics in ["{}", r#"{"gpt-5-mini":{"usage":{}}}"#] {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            let empty = format!(
+                r#"{{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{{"usageAccountingWatermarks":{{"s1":1}},"modelMetrics":{metrics}}}}}"#
+            );
+            write(
+                &temp,
+                "s1",
+                &[
+                    receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                    empty,
+                    marked(
+                        &shutdown("e-2", "2026-07-27T12:00:00.000Z", 100, 10),
+                        r#"{"s1":1}"#,
+                    ),
+                ],
+            );
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(
+                granularities(&collection),
+                vec![(UsageGranularity::Call, 110)],
+                "{metrics}"
+            );
+        }
     }
 
     #[test]
