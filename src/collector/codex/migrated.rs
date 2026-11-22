@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use serde_json::Value;
 use time::OffsetDateTime;
 
@@ -134,11 +135,18 @@ pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEve
     if parents.is_empty() {
         return;
     }
-    for path in files {
-        if let Some(pairs) = thread_id_of(path).and_then(|thread| parents.get_mut(&thread)) {
-            pairs
-                .get_or_insert_with(HashSet::new)
-                .extend(token_count_pairs(path));
+    let parent_files: Vec<(String, &PathBuf)> = files
+        .iter()
+        .filter_map(|path| Some((thread_id_of(path)?, path)))
+        .filter(|(thread, _)| parents.contains_key(thread))
+        .collect();
+    let read: Vec<(String, HashSet<String>)> = parent_files
+        .into_par_iter()
+        .map(|(thread, path)| (thread, token_count_pairs(path)))
+        .collect();
+    for (thread, pairs) in read {
+        if let Some(known) = parents.get_mut(&thread) {
+            known.get_or_insert_with(HashSet::new).extend(pairs);
         }
     }
     for events in per_file
@@ -173,7 +181,7 @@ fn token_count_pairs(path: &Path) -> HashSet<String> {
     let mut scratch = FileEvents::default();
     while let Some((_, line)) = lines.next(&mut scratch) {
         // Most rows are not `token_count`s; skip parsing them.
-        if !line.windows(13).any(|window| window == b"\"token_count\"") {
+        if !std::str::from_utf8(line).is_ok_and(|text| text.contains("\"token_count\"")) {
             continue;
         }
         if let Some(pair) = parse_line(line, &mut scratch)
