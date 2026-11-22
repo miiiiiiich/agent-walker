@@ -74,16 +74,19 @@ user.
     carries no usable counters for. What remains, such as calls from before
     the CLI wrote receipts, counts at that exit.
 
-  A receipt and the store row of its call count once. They are paired one
-  to one: a row of the session named as the receipt's `sourceSessionId` (a
-  fork's copy keeps the parent there) or of a session whose log holds the
-  receipt, with the same model and the same five token counts, dated within
-  61 s of it (Copilot's 60 s slack, plus the second the store's default
-  stamp drops). The receipt and the live event behind a row carry the same
-  usage record, and the store copies it field for field. A live row stands
-  for the pair; a row the CLI caught up from the log (`event_id` starting
-  `usage-record:`) is a copy and gives way to the receipt. A receipt or a
-  row left without a partner counts on its own.
+  A receipt and the store rows of its call count once. A receipt is paired
+  with at most one live row of the session named as its `sourceSessionId`
+  (a fork's copy keeps the parent there), and with at most one row the CLI
+  caught up from the log (`event_id` starting `usage-record:`) per session
+  that made the call or holds the receipt in its log. A row is the call's
+  when it has the same model and the same five token counts and is dated
+  within 61 s of the receipt (Copilot's 60 s slack, plus the second the
+  store's default stamp drops). In the CLI's schema the receipt and the
+  live event behind a row are the same usage record, and local rows add up
+  to the exit totals field for field; that a receipt's counts equal its
+  row's is not verified on disk. A live row stands for the call; caught-up
+  rows are copies and give way. A receipt or a row left without a partner
+  counts on its own.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a

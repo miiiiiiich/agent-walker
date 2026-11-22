@@ -118,9 +118,9 @@ impl CallLedger {
         self.fallback = exits.into_keys().collect();
     }
 
-    /// A receipt and the store row of its call count once. A live row stands
-    /// for both. A caught-up row is the store's copy of the receipt and gives
-    /// way to it: kept, it would date the store's coverage from a call only
+    /// A receipt and the store rows of its call count once. A live row stands
+    /// for the call. A caught-up row is the store's copy of the receipt and
+    /// always goes: kept, it would date the store's coverage from a call only
     /// the log holds, and supersede exits that cover calls it lacks.
     pub(super) fn reconcile_receipts(&mut self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
         let caught_up: HashSet<&str> = self
@@ -130,12 +130,9 @@ impl CallLedger {
             .collect();
         let mut receipts: HashSet<String> = HashSet::new();
         let mut rows: HashSet<String> = HashSet::new();
-        for pair in pair_receipts(per_file, &self.events) {
-            if caught_up.contains(pair.row.as_str()) {
-                rows.insert(pair.row);
-            } else {
-                receipts.insert(pair.receipt);
-            }
+        for copies in pair_receipts(per_file, &self.events, &caught_up) {
+            rows.extend(copies.caught_up);
+            receipts.extend(copies.receipt);
         }
         for events in per_file
             .iter_mut()
@@ -1387,6 +1384,54 @@ mod tests {
             &[call("fork", "2026-07-27T10:00:00.000Z", 100, 10)],
         );
         set_event_ids(temp.path(), &[(1, "usage-record:a")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// One call can have a row in the parent and a caught-up row under the
+    /// fork whose log holds the copy; the call still counts once.
+    #[test]
+    fn a_copy_with_a_parent_row_and_a_forks_caught_up_row_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("parent", "2026-07-27T10:00:00.500Z", 100, 10),
+                call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
+            ],
+        );
+        set_event_ids(temp.path(), &[(2, "usage-record:a")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// Two forks hold the same copy, and each caught it up under itself.
+    #[test]
+    fn two_forks_caught_up_rows_of_one_copy_count_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let copy = receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10);
+        write_session(temp.path(), "fork-a", &format!("{copy}\n"));
+        write_session(temp.path(), "fork-b", &format!("{copy}\n"));
+        write_store(
+            temp.path(),
+            &[
+                call("fork-a", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("fork-b", "2026-07-27T10:00:00.000Z", 100, 10),
+            ],
+        );
+        set_event_ids(temp.path(), &[(1, "usage-record:a"), (2, "usage-record:a")]);
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
