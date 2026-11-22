@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -54,21 +55,25 @@ pub fn collect(
         .parent()
         .map(|parent| parent.join("archived_sessions"));
 
-    // Parse one physical file per relative plain path (docs/codex.md) so
-    // Codex durations (emitted without keys) and session touches are not
-    // duplicated during merging.
-    let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
+    // Parse one physical file per plain file name (docs/codex.md) so Codex
+    // durations (emitted without keys) and session touches are not
+    // duplicated during merging. `archived_sessions/` keeps no date
+    // directories, so a relative path never matched the `sessions/` copy of
+    // the same rollout; the name carries its start time and thread id.
+    let mut chosen: HashMap<OsString, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
         if !dir.exists() {
             continue;
         }
         for path in list_files_matching(dir, &is_rollout_file, mtime_floor, &mut collection.stats) {
-            let rel = plain_rollout_path(path.strip_prefix(dir).unwrap_or(&path));
-            match chosen.get_mut(&rel) {
+            let Some(name) = plain_rollout_path(&path).file_name().map(ToOwned::to_owned) else {
+                continue;
+            };
+            match chosen.get_mut(&name) {
                 Some(existing) if supersedes(&path, existing) => *existing = path,
                 Some(_) => {}
                 None => {
-                    chosen.insert(rel, path);
+                    chosen.insert(name, path);
                 }
             }
         }
@@ -360,18 +365,21 @@ mod tests {
     }
 
     /// A session present in *both* dirs (a stale `sessions/` copy left after an
-    /// archive) must not double-count — the keyed events dedupe it to one turn.
+    /// archive) is parsed once. Codex archives into `archived_sessions/`
+    /// without date directories; its duration has no key to dedupe it later.
     #[test]
     fn dedups_session_present_in_sessions_and_archive() {
         let temp = TempDir::new().expect("test tempdir should be created");
         let sessions_day = temp.path().join("sessions/2026/06/01");
-        let archived_day = temp.path().join("archived_sessions/2026/06/01");
+        let archived_day = temp.path().join("archived_sessions");
         fs::create_dir_all(&sessions_day).expect("test dirs should be created");
         fs::create_dir_all(&archived_day).expect("test dirs should be created");
         let lines = concat!(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":4000}}"#,
             "\n"
         );
         fs::write(sessions_day.join("rollout-s1.jsonl"), lines).expect("fixture should be written");
@@ -382,6 +390,7 @@ mod tests {
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
+        assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.session_touches.len(), 2);
     }
 

@@ -228,9 +228,9 @@ mod tests {
                 token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
             ],
         );
-        let archived_day = temp.path().join("archived_sessions/2026/06/01");
-        fs::create_dir_all(&archived_day).expect("test dirs should be created");
-        fs::write(archived_day.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
+        let archived = temp.path().join("archived_sessions");
+        fs::create_dir_all(&archived).expect("test dirs should be created");
+        fs::write(archived.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
             .expect("fixture should be written");
         assert!(fs::metadata(&plain).expect("plain exists").len() < COMPRESSED_ZST.len() as u64);
 

@@ -2,12 +2,14 @@
 
 ## Where the data comes from
 
-`~/.codex/sessions/**/*.jsonl` and `~/.codex/archived_sessions/**/*.jsonl` —
+`~/.codex/sessions/**/*.jsonl` and `~/.codex/archived_sessions/*.jsonl` —
 rollout session logs. Read-only. The Codex desktop app *moves* (not copies) a
-session's JSONL from `sessions/` to `archived_sessions/` when it's archived, so
-both are scanned; a session that briefly exists in both (a stale copy) is
-deduplicated by relative path before parsing. `CODEX_HOME` overrides the root;
-the `archived_sessions` sibling is derived from the sessions directory.
+session's JSONL from `sessions/<year>/<month>/<day>/` to `archived_sessions/`
+(no date directories) when it's archived, so both are scanned; a session that
+briefly exists in both (a stale copy) is deduplicated by file name before
+parsing. The name carries the thread's start time and id. `CODEX_HOME`
+overrides the root; the `archived_sessions` sibling is derived from the
+sessions directory.
 
 **Compressed rollouts.** With `local_thread_store_compression` on, Codex
 compresses rollouts whose mtime is at least 7 days old, in both directories,
