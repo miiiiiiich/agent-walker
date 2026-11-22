@@ -294,19 +294,29 @@ fn is_date_suffix(suffix: &str) -> bool {
     is_date(date.as_bytes()) && revision.is_none_or(is_revision)
 }
 
-/// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD`, with a real month and day, so a
-/// four-digit size (`-4096`) is not taken for one.
+/// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD` that is a day on the calendar, so a
+/// four-digit size (`-4096`) or a day the month lacks (`20260231`) is not
+/// taken for one. A yearless date is checked in a leap year, so `0229` is one.
 fn is_date(text: &[u8]) -> bool {
+    const LEAP_YEAR: [u8; 4] = *b"2000";
     let (year, month, day) = match text {
-        [m1, m2, d1, d2] => ([b'0'; 4], [*m1, *m2], [*d1, *d2]),
+        [m1, m2, d1, d2] => (LEAP_YEAR, [*m1, *m2], [*d1, *d2]),
         [y1, y2, y3, y4, m1, m2, d1, d2] | [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] => {
             ([*y1, *y2, *y3, *y4], [*m1, *m2], [*d1, *d2])
         }
         _ => return false,
     };
-    number(&year).is_some()
-        && number(&month).is_some_and(|month| (1..=12).contains(&month))
-        && number(&day).is_some_and(|day| (1..=31).contains(&day))
+    let (Some(year), Some(month), Some(day)) = (number(&year), number(&month), number(&day)) else {
+        return false;
+    };
+    let (Ok(year), Ok(month), Ok(day)) =
+        (i32::try_from(year), u8::try_from(month), u8::try_from(day))
+    else {
+        return false;
+    };
+    time::Month::try_from(month)
+        .and_then(|month| time::Date::from_calendar_date(year, month, day))
+        .is_ok()
 }
 
 /// A `v<major>:<minor>` revision, its leading `v` already cut.
@@ -641,8 +651,21 @@ pub(crate) mod tests {
             "claude-sonnet-4-5-2026-10-01-preview",
             "claude-sonnet-4-5-20250929-v1",
             "claude-sonnet-4-5-0613-v1:0x",
+            "claude-sonnet-4-5-20260231",
+            "claude-sonnet-4-5-2026-04-31",
+            "claude-sonnet-4-5-20250229",
+            "claude-sonnet-4-5-0230",
         ] {
             assert!(pricing_for(name).is_none(), "{name}");
+        }
+        // A yearless date may be the 29th of February.
+        for name in [
+            "claude-sonnet-4-5-20240229",
+            "claude-sonnet-4-5-0229",
+            "claude-sonnet-4-5-2026-04-30",
+            "claude-sonnet-4-5-20261231",
+        ] {
+            assert!(pricing_for(name).is_some(), "{name}");
         }
     }
 
