@@ -117,28 +117,41 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .and_then(ident)
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
-    let mut project: Option<String> = None;
-    let mut cumulative: HashMap<String, RawCounters> = HashMap::new();
-    let mut shutdown_index = 0usize;
-    let mut last_nano_aiu = 0u64;
-    let mut credit_index = 0usize;
-    let mut turn_starts: HashMap<String, OffsetDateTime> = HashMap::new();
+    let mut session = SessionState::default();
 
     while let Some((_, line)) = lines.next(&mut events) {
         let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
+        session.record(&value, session_id.as_ref(), &mut events);
+    }
 
+    events.compress_touches(local_offset);
+    Some(events)
+}
+
+#[derive(Default)]
+struct SessionState {
+    project: Option<String>,
+    cumulative: HashMap<String, RawCounters>,
+    shutdown_index: usize,
+    last_nano_aiu: u64,
+    credit_index: usize,
+    turn_starts: HashMap<String, OffsetDateTime>,
+}
+
+impl SessionState {
+    fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
         let line = Line {
             timestamp,
-            session_id: session_id.as_ref(),
+            session_id,
             event_id: value.get("id").and_then(Value::as_str).and_then(ident),
         };
-        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
+        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
             events.session_touches.push(SessionTouch {
                 timestamp,
                 session_id: session_id.clone(),
@@ -153,53 +166,50 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     .and_then(|context| context.get("cwd"))
                     .and_then(Value::as_str)
                 {
-                    project = project_from_cwd(cwd);
+                    self.project = project_from_cwd(cwd);
                 }
             }
             Some("tool.execution_start") => {
-                collect_tool_event(&value, &line, &mut events);
+                collect_tool_event(value, &line, events);
             }
             Some("assistant.turn_start") => {
-                if let (Some(turn_id), Some(timestamp)) = (turn_id(&value), timestamp) {
-                    turn_starts.insert(turn_id, timestamp);
+                if let (Some(turn_id), Some(timestamp)) = (turn_id(value), timestamp) {
+                    self.turn_starts.insert(turn_id, timestamp);
                 }
             }
             Some("assistant.turn_end") => {
-                collect_turn_duration(&value, &line, &mut turn_starts, &mut events);
+                collect_turn_duration(value, &line, &mut self.turn_starts, events);
             }
             Some("session.usage_checkpoint") => {
                 collect_credit_delta(
-                    &value,
+                    value,
                     &line,
-                    &mut last_nano_aiu,
-                    &mut credit_index,
-                    &mut events,
+                    &mut self.last_nano_aiu,
+                    &mut self.credit_index,
+                    events,
                 );
             }
             Some("session.shutdown") => {
                 collect_credit_delta(
-                    &value,
+                    value,
                     &line,
-                    &mut last_nano_aiu,
-                    &mut credit_index,
-                    &mut events,
+                    &mut self.last_nano_aiu,
+                    &mut self.credit_index,
+                    events,
                 );
                 collect_shutdown_usage(
-                    &value,
+                    value,
                     &line,
-                    project.as_deref(),
-                    &mut cumulative,
-                    shutdown_index,
-                    &mut events,
+                    self.project.as_deref(),
+                    &mut self.cumulative,
+                    self.shutdown_index,
+                    events,
                 );
-                shutdown_index += 1;
+                self.shutdown_index += 1;
             }
             _ => {}
         }
     }
-
-    events.compress_touches(local_offset);
-    Some(events)
 }
 
 /// Keys built from the event `id` collapse a fork's copy of a shutdown,
