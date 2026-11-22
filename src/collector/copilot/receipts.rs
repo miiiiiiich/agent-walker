@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -18,16 +18,16 @@ pub(super) fn source_of(key: &str) -> Option<&str> {
 }
 
 /// `session.usage_record` receipts read so far in one session's stream, and
-/// those no snapshot has covered yet.
+/// those no snapshot has covered yet, by model: an exit takes each model's
+/// in turn, and one list of every model was scanned once per model.
 #[derive(Default)]
 pub(super) struct Receipts {
-    pending: Vec<Pending>,
+    pending: HashMap<String, Vec<Pending>>,
     seen: HashSet<String>,
     index: usize,
 }
 
 struct Pending {
-    model: String,
     counters: RawCounters,
     identity: Option<(String, u64)>,
 }
@@ -78,11 +78,10 @@ impl Receipts {
         if line.timestamp.is_none() {
             return;
         }
-        self.pending.push(Pending {
-            model: model.to_owned(),
-            counters,
-            identity,
-        });
+        self.pending
+            .entry(model.to_owned())
+            .or_default()
+            .push(Pending { counters, identity });
         let usage_event = counters.to_usage();
         if usage_event.token_volume() == 0 {
             return;
@@ -122,10 +121,10 @@ impl Receipts {
             .pointer("/data/usageAccountingWatermarks")
             .and_then(Value::as_object);
         let mut covered = RawCounters::default();
-        self.pending.retain(|receipt| {
-            if receipt.model != model {
-                return true;
-            }
+        let Some(pending) = self.pending.get_mut(model) else {
+            return covered;
+        };
+        pending.retain(|receipt| {
             let subsumed = match (marks, &receipt.identity) {
                 (None, _) | (Some(_), None) => true,
                 (Some(marks), Some((source, sequence))) => marks
