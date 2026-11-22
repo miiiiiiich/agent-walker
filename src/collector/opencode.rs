@@ -17,6 +17,7 @@ use crate::model::{Collection, Provider, TokenUsage};
 use crate::timestamp::{from_unix_millis, to_local};
 
 mod legacy;
+mod parts;
 mod v2;
 
 #[cfg(test)]

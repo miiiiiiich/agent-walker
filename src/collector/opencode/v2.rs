@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
-use time::UtcOffset;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::ident::{ident, ident_string};
 use crate::collector::json::parse_bounded;
@@ -11,6 +11,7 @@ use crate::collector::project_from_cwd;
 use crate::collector::store::Store;
 use crate::model::{Collection, DurationEvent, SessionTouch, SourceKind, ToolEvent, UsageEvent};
 
+use super::parts::{PartTool, split_parts};
 use super::{Generation, ms_to_offset, token_usage};
 
 #[derive(Default)]
@@ -40,6 +41,7 @@ pub(super) fn parse_session_messages(
         return;
     };
     let sessions = session_meta(conn);
+    let parts = split_parts(conn, floor_ms, collection);
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
         conn.charge(row, 6)?;
         Ok((
@@ -100,35 +102,55 @@ pub(super) fn parse_session_messages(
         if !has_usage {
             continue;
         }
-        let usage = token_usage(&value);
-        if usage.token_volume() > 0 && !claude_code_records_usage(&kind, &value) {
-            collection.usage_events.push(UsageEvent {
-                timestamp: Some(timestamp),
-                session_id: Some(session_id.clone()),
-                model: value
-                    .pointer("/model/id")
-                    .and_then(Value::as_str)
-                    .and_then(ident)
-                    .map(ToOwned::to_owned),
-                source_kind: SourceKind::Main,
-                attribution_agent: None,
-                attribution_skill: None,
-                project: meta
-                    .and_then(|meta| meta.directory.as_deref())
-                    .filter(|dir| !dir.is_empty())
-                    .and_then(project_from_cwd),
-                usage,
-                granularity: crate::model::UsageGranularity::Call,
-            });
-        }
+        push_usage(&kind, &value, timestamp, &session_id, meta, collection);
         if kind == "assistant" {
             push_turn(&value, created_ms, &session_id, local_offset, collection);
             if let Entry::Vacant(slot) = tools_from.entry(id) {
+                let split = parts.tools_of(slot.key());
+                push_tools(
+                    &value,
+                    split,
+                    created_ms,
+                    &session_id,
+                    local_offset,
+                    collection,
+                );
                 slot.insert(Generation::V2);
-                push_tools(&value, created_ms, &session_id, local_offset, collection);
             }
         }
     }
+}
+
+fn push_usage(
+    kind: &str,
+    value: &Value,
+    timestamp: OffsetDateTime,
+    session_id: &str,
+    meta: Option<&SessionMeta>,
+    collection: &mut Collection,
+) {
+    let usage = token_usage(value);
+    if usage.token_volume() == 0 || claude_code_records_usage(kind, value) {
+        return;
+    }
+    collection.usage_events.push(UsageEvent {
+        timestamp: Some(timestamp),
+        session_id: Some(session_id.to_owned()),
+        model: value
+            .pointer("/model/id")
+            .and_then(Value::as_str)
+            .and_then(ident)
+            .map(ToOwned::to_owned),
+        source_kind: SourceKind::Main,
+        attribution_agent: None,
+        attribution_skill: None,
+        project: meta
+            .and_then(|meta| meta.directory.as_deref())
+            .filter(|dir| !dir.is_empty())
+            .and_then(project_from_cwd),
+        usage,
+        granularity: crate::model::UsageGranularity::Call,
+    });
 }
 
 /// The Claude Agent provider runs the installed Claude Code, whose own
@@ -164,11 +186,24 @@ fn push_turn(
 
 fn push_tools(
     value: &Value,
+    split: Option<&[PartTool]>,
     created_ms: i64,
     session_id: &str,
     local_offset: UtcOffset,
     collection: &mut Collection,
 ) {
+    if let Some(split) = split {
+        for tool in split {
+            collection.tool_events.push(ToolEvent {
+                timestamp: ms_to_offset(tool.start_ms, local_offset),
+                session_id: Some(session_id.to_owned()),
+                tool_name: tool.name.clone(),
+                subagent_type: None,
+                source_kind: SourceKind::Main,
+            });
+        }
+        return;
+    }
     let tools = value
         .get("content")
         .and_then(Value::as_array)

@@ -93,7 +93,10 @@ legacy `part.state` shape is unchanged.
   → the TURN LENGTH section.
 - **Tools** from `part` rows of `type:"tool"` (the `tool` field: `glob` / `read` /
   `edit` / `bash` / an MCP name), or from an OpenCode 2 assistant message's
-  `content` items of `type:"tool"` (the `name` field).
+  `content` items of `type:"tool"` (the `name` field). Newer OpenCode 2 builds
+  write an assistant message's content as `session_part` rows instead, leaving
+  `content` empty; a message with such rows takes its tools from its rows of
+  `type` `tool` only, never from both, the way OpenCode itself reads it.
 - **Sessions / activity / hourly** from message timestamps (`time.created`).
 
 ## Forks
