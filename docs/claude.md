@@ -28,7 +28,10 @@ set this early. (Codex CLI keeps its sessions indefinitely; no setting needed.)
 ## What's captured
 
 - **Token usage** per assistant message: input, output, cache creation (write),
-  cache read.
+  cache read. A reply that consulted the advisor records the advisor's call as
+  an `advisor_message` entry in `usage.iterations`, apart from the message's
+  own counters; it is counted as a call of its own, under the advisor's model
+  and priced at that model's rates.
 - **Tools**: real tool names (`Bash`, `Read`, `Edit`, `Write`, `Grep`, `Agent`, …).
 - **Subagents**: the `Agent` tool and subagent-attributed usage → the SUBAGENTS
   section.
@@ -87,7 +90,17 @@ logs record aggregates) — see `src/analyzer/context.rs` for the definitions.
 
 Claude writes the same usage line into multiple files when a session is
 forked/resumed. agent-walker dedupes by `message.id` so volume is not
-double-counted.
+double-counted. A streamed reply can also be written as several rows whose
+usage grows; of all the copies of one `message.id`, the one with the most
+tokens is kept, dated at the earliest timestamp any copy carries.
+
+## Known gaps
+
+- **Subagent output before Claude Code 2.1.307 is undercounted.** Until that
+  release a subagent transcript recorded a placeholder output count (a few
+  tokens) and an empty stop reason for a streamed reply. Input and cache
+  counts are real. No row holds the real output count, so it cannot be
+  recovered.
 
 ## Cost
 
