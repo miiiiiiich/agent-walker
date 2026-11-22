@@ -122,8 +122,8 @@ So the Total view adds up consistently with Claude. Two real differences
   `exec_command`. An `exec` that started no shell command (only MCP calls,
   file changes or image views) stays `exec`. A shell function call's own
   `CommandExecution` item, and a command run from the composer
-  (`source: "user_shell"`), add nothing. An item written again with the same
-  id counts once.
+  (`source: "user_shell"`), add nothing. An item or `exec` call written again
+  with the same id counts once.
 - `apply_patch` = file edits.
 - **Fork copies.** A fork or spawned child that copies its parent's records
   writes them within milliseconds of the fork instant: the child's

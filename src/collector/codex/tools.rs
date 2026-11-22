@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::Value;
@@ -18,9 +18,13 @@ use super::string_path;
 /// own tool, so an `exec` that started no shell command stays `exec`.
 #[derive(Default)]
 pub(super) struct ToolState {
-    /// This file's tool event for the latest `exec`, and whether a command
-    /// has named it yet.
-    latest_exec: Option<(usize, bool)>,
+    /// The latest `exec`'s key in `execs`.
+    latest_exec: Option<String>,
+    /// Each `exec`'s first tool event in this file, by its key, and whether a
+    /// command has named it yet. A replayed `exec` call goes back to it: given
+    /// a fresh slot, the next command renamed the replay's copy, which the
+    /// merge drops for the first.
+    execs: HashMap<String, (usize, bool)>,
     /// Ids a `CommandExecution` item adds nothing under: a shell function
     /// call's item reuses its call id, already counted under its command, and
     /// an item read before was settled then. A replay of the command that
@@ -71,9 +75,6 @@ pub(super) fn collect_tool_event(
     if is_shell_call && let Some(call_id) = &call_id {
         state.counted.insert(call_id.clone());
     }
-    if is_code_mode_exec {
-        state.latest_exec = Some((events.tool_events.len(), false));
-    }
     let key = call_id.unwrap_or_else(|| {
         format!(
             "{}:{}:{}",
@@ -82,6 +83,13 @@ pub(super) fn collect_tool_event(
             tool_name.as_str()
         )
     });
+    if is_code_mode_exec {
+        state
+            .execs
+            .entry(key.clone())
+            .or_insert((events.tool_events.len(), false));
+        state.latest_exec = Some(key.clone());
+    }
     events.tool_events.push(KeyedToolEvent {
         key: Some(key),
         event: ToolEvent {
@@ -130,7 +138,11 @@ fn collect_command_item(
     {
         return;
     }
-    let Some((exec_index, named)) = state.latest_exec else {
+    let Some(exec_slot) = state
+        .latest_exec
+        .as_ref()
+        .and_then(|key| state.execs.get_mut(key))
+    else {
         return;
     };
     let Some(tool_name) = item
@@ -140,9 +152,10 @@ fn collect_command_item(
     else {
         return;
     };
-    if !named && let Some(exec) = events.tool_events.get_mut(exec_index) {
+    let (exec_index, named) = exec_slot;
+    if !*named && let Some(exec) = events.tool_events.get_mut(*exec_index) {
         exec.event.tool_name = tool_name;
-        state.latest_exec = Some((exec_index, true));
+        *named = true;
         return;
     }
     let key = item_id.unwrap_or_else(|| {
@@ -417,6 +430,49 @@ mod tests {
             .map(|event| event.tool_name.as_str())
             .collect();
         assert_eq!(names, vec!["rg", "cargo", "exec"]);
+    }
+
+    /// An `exec` call written again goes back to its first tool event: a
+    /// command after the replay is the call's next command, not its first.
+    #[test]
+    fn a_replayed_exec_call_keeps_its_named_tool() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exec = |call: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
+            )
+        };
+        let command = |id: &str, script: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup","command":["/bin/zsh","-lc","{script}"]}}}}}}"#
+            )
+        };
+        let meta = r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned();
+        let replayed = [
+            meta,
+            exec("e1"),
+            command("exec-a", "rg foo src"),
+            exec("e1"),
+            command("exec-a", "rg foo src"),
+        ];
+        for (lines, expected) in [
+            (replayed.to_vec(), vec!["rg"]),
+            (
+                [replayed.as_slice(), &[command("exec-b", "cargo test")]].concat(),
+                vec!["rg", "cargo"],
+            ),
+        ] {
+            write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            let names: Vec<&str> = collection
+                .tool_events
+                .iter()
+                .map(|event| event.tool_name.as_str())
+                .collect();
+            assert_eq!(names, expected);
+        }
     }
 
     /// Arguments are JSON inside a string, invisible to the line's own
