@@ -99,19 +99,37 @@ fn log_per_session(per_file: &[(PathBuf, Option<FileEvents>)]) -> HashMap<&str, 
 /// The rows that close each run of a session's totals. A process that
 /// resumes a session either carries the previous total forward or starts again
 /// from zero; only a restart begins a new run. Splitting at every process
-/// counted a carried-over total once per process.
+/// counted a carried-over total once per process. A carried total never
+/// loses a counter. A restart can outgrow the previous total and still lack
+/// the models it has not used yet; judged by volume alone, it read as carried
+/// and their excess was lost.
 fn runs(rows: &[CostStateRow]) -> Vec<&CostStateRow> {
     let mut runs: Vec<&CostStateRow> = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let restarted = index > 0
             && row.start_time != rows[index - 1].start_time
-            && row.volume() < rows[index - 1].volume();
+            && !carries(&rows[index - 1], row);
         match runs.last_mut() {
             Some(last) if !restarted => *last = row,
             _ => runs.push(row),
         }
     }
     runs
+}
+
+fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
+    earlier.models.iter().all(|(model, before)| {
+        later.models.get(model).is_some_and(|after| {
+            after.input_tokens >= before.input_tokens
+                && after.output_tokens >= before.output_tokens
+                && after.cache_creation_input_tokens >= before.cache_creation_input_tokens
+                && after.cache_read_input_tokens >= before.cache_read_input_tokens
+                && after.cache_creation_ephemeral_5m_input_tokens
+                    >= before.cache_creation_ephemeral_5m_input_tokens
+                && after.cache_creation_ephemeral_1h_input_tokens
+                    >= before.cache_creation_ephemeral_1h_input_tokens
+        })
+    })
 }
 
 /// Each call belongs to the first run whose total was written after it. The

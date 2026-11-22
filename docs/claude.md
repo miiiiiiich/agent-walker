@@ -88,7 +88,9 @@ their own. The log does not say which calls these are.
   total forward continues it, and the last total is compared with all the
   calls. A process whose total starts again from zero begins a new run, and
   each run's last total is compared with the calls made before it was
-  written. When calls follow the last total, their process has recorded no
+  written. A carried total never loses a counter, so a new process whose
+  total is below the previous one for any model and field, or lacks one of
+  its models, has started again, even if its total is larger overall. When calls follow the last total, their process has recorded no
   total yet; the total is compared with the calls before it, and the later
   calls add nothing until their process writes one. If two main files hold
   totals for the same session, only the one written last is used.

@@ -297,6 +297,38 @@ fn a_restarted_total_compares_each_run_with_its_own_calls() {
     assert_eq!(reads(time::macros::date!(2026 - 06 - 06)), 10);
 }
 
+/// A new process whose total is larger but has lost a model's counter has
+/// started again: the earlier run keeps its own excess.
+#[test]
+fn a_restart_that_drops_a_model_is_a_new_run_though_larger() {
+    let temp = TempDir::new().expect("tempdir");
+    write(
+        temp.path(),
+        "s1.jsonl",
+        &[
+            assistant(
+                "2026-06-05T09:00:00Z",
+                "s1",
+                "m1",
+                "claude-haiku-5-5",
+                0,
+                80,
+            ),
+            cost_state("s1", 1, &[("claude-haiku-5-5", 0, 1, 0, 100, 0, 0)]),
+            assistant("2026-06-06T09:00:00Z", "s1", "m2", "claude-opus-5", 0, 150),
+            cost_state("s1", 2, &[("claude-opus-5", 0, 1, 0, 200, 0, 0)]),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    let reads = |model: &str| total(&collection, model).cache_read_input_tokens;
+    assert_eq!(
+        (reads("claude-haiku-5-5"), reads("claude-opus-5")),
+        (20, 50)
+    );
+}
+
 /// Calls after the last total were made by a process that recorded none:
 /// the total is compared with the calls before it only, and they add nothing.
 #[test]
