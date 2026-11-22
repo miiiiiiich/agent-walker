@@ -281,12 +281,50 @@ fn lookup(snapshot: &Snapshot, name: &str) -> Option<ModelPricing> {
         .map(|(_, pricing)| *pricing)
 }
 
-/// A date (`20250929`, `2026-10-01`, `0613`) names a snapshot of the key's
-/// model. A shorter digit run is the next version: `claude-opus-5-6` priced
-/// silently at `claude-opus-5`'s rates, so it stays unpriced until `LiteLLM`
-/// lists it.
+/// A whole date (`20250929`, `2026-10-01`, `0613`), optionally with a
+/// revision (`20250929-v1:0`), names a snapshot of the key's model. Anything
+/// else is another model: the next version (`claude-opus-5-6`) and a variant
+/// that merely starts with digits (`claude-opus-5-4096ctx`) both priced
+/// silently at `claude-opus-5`'s rates, so they stay unpriced until `LiteLLM`
+/// lists them.
 fn is_date_suffix(suffix: &str) -> bool {
-    suffix.bytes().take_while(u8::is_ascii_digit).count() >= 4
+    let (date, revision) = suffix
+        .split_once("-v")
+        .map_or((suffix, None), |(date, revision)| (date, Some(revision)));
+    is_date(date.as_bytes()) && revision.is_none_or(is_revision)
+}
+
+/// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD`, with a real month and day, so a
+/// four-digit size (`-4096`) is not taken for one.
+fn is_date(text: &[u8]) -> bool {
+    let (year, month, day) = match text {
+        [m1, m2, d1, d2] => ([b'0'; 4], [*m1, *m2], [*d1, *d2]),
+        [y1, y2, y3, y4, m1, m2, d1, d2] | [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] => {
+            ([*y1, *y2, *y3, *y4], [*m1, *m2], [*d1, *d2])
+        }
+        _ => return false,
+    };
+    number(&year).is_some()
+        && number(&month).is_some_and(|month| (1..=12).contains(&month))
+        && number(&day).is_some_and(|day| (1..=31).contains(&day))
+}
+
+/// A `v<major>:<minor>` revision, its leading `v` already cut.
+fn is_revision(revision: &str) -> bool {
+    revision.split_once(':').is_some_and(|(major, minor)| {
+        number(major.as_bytes()).is_some() && number(minor.as_bytes()).is_some()
+    })
+}
+
+fn number(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0_u32, |value, &byte| {
+        byte.is_ascii_digit()
+            .then(|| value.checked_mul(10)?.checked_add(u32::from(byte - b'0')))
+            .flatten()
+    })
 }
 
 /// Only a `Call` can cross a long-context threshold, and a prompt over it
@@ -583,6 +621,26 @@ pub(crate) mod tests {
             "claude-fable-5-3-fast",
             "claude-opus-4-8-1",
             "claude-sonnet-4-5-123",
+        ] {
+            assert!(pricing_for(name).is_none(), "{name}");
+        }
+    }
+
+    /// Four leading digits are not a date: a variant that starts with them,
+    /// or a date with anything after it but a revision, is unpriced.
+    #[test]
+    fn only_a_whole_date_extends_a_key() {
+        install_test_pricing();
+        for name in [
+            "claude-fable-5-4096ctx",
+            "claude-fable-5-4096",
+            "claude-fable-5-1332",
+            "claude-sonnet-4-5-20251399",
+            "claude-sonnet-4-5-2026-13-01",
+            "claude-sonnet-4-5-20250929-fast",
+            "claude-sonnet-4-5-2026-10-01-preview",
+            "claude-sonnet-4-5-20250929-v1",
+            "claude-sonnet-4-5-0613-v1:0x",
         ] {
             assert!(pricing_for(name).is_none(), "{name}");
         }
