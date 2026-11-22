@@ -101,7 +101,12 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     // same whichever representation is on disk this run.
     let logical_path = plain_rollout_path(path);
     let mut events = FileEvents::default();
-    let mut current_session_id = fallback_session_id(&logical_path);
+    // Events carry the session the thread works for; keys carry the latest
+    // `session_meta`'s id, so a fork child's rows after its parent's copied
+    // meta key under the parent and a copy the skip misses still collapses
+    // with the parent's original.
+    let mut session_id = fallback_session_id(&logical_path);
+    let mut key_session_id = session_id.clone();
     let mut pace_state = PaceState::default();
     let mut turn_items = TurnItems::default();
     let mut tool_state = ToolState::default();
@@ -126,19 +131,29 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             if session_meta_count == 1 {
                 own_thread_id = string_path(&value, &["payload", "id"]);
                 origin = Origin::from_session_meta(&value);
+                session_id = origin
+                    .session
+                    .clone()
+                    .or_else(|| own_thread_id.clone())
+                    .or(session_id);
                 if is_copied_fork(&value) {
                     fork_instant = timestamp;
                 }
             } else if session_meta_count == 2 {
                 fork_instant = timestamp;
             }
-            current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
+            key_session_id = string_path(&value, &["payload", "id"]).or(key_session_id);
             current_model = session_model(&value).or(current_model);
-            current_project = value
-                .pointer("/payload/cwd")
-                .and_then(Value::as_str)
-                .filter(|cwd| !cwd.is_empty())
-                .and_then(project_from_cwd);
+            // A session's project is where it was opened. A subagent's work
+            // belongs to its parent's session, so the parent's copied meta
+            // sets it; a user's fork keeps its own.
+            if session_meta_count == 1 || origin.agent.is_some() {
+                current_project = value
+                    .pointer("/payload/cwd")
+                    .and_then(Value::as_str)
+                    .filter(|cwd| !cwd.is_empty())
+                    .and_then(project_from_cwd);
+            }
         }
         // Fork/spawn copies rewrite timestamps to the fork instant and shift
         // line positions (GH-36). Skip the replay burst even without a parent
@@ -160,14 +175,14 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                 collect_effort_event(
                     &value,
                     timestamp,
-                    current_session_id.as_ref(),
+                    key_session_id.as_ref(),
                     line_index,
                     &mut events,
                 );
                 collect_permission_event(
                     &value,
                     timestamp,
-                    current_session_id.as_ref(),
+                    key_session_id.as_ref(),
                     line_index,
                     &mut events,
                 );
@@ -183,7 +198,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             continue;
         }
 
-        if let (Some(timestamp), Some(session_id)) = (timestamp, current_session_id.as_ref()) {
+        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
             events.session_touches.push(SessionTouch {
                 timestamp,
                 session_id: session_id.clone(),
@@ -192,7 +207,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
         let usage_context = UsageContext {
             timestamp,
-            session_id: current_session_id.as_ref(),
+            session_id: session_id.as_ref(),
+            key_session_id: key_session_id.as_ref(),
             model: current_model.as_ref(),
             project: current_project.as_deref(),
             origin: &origin,
@@ -211,17 +227,17 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         collect_duration_event(
             &value,
             timestamp,
-            current_session_id.as_ref(),
+            session_id.as_ref(),
             &mut turn_items,
             &mut events,
         );
-        collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
+        collect_interrupt_event(&value, timestamp, key_session_id.as_ref(), &mut events);
         // A subagent's prompts come from the agent that runs it, not a person.
         if origin.source_kind() == SourceKind::Main {
             collect_pace_event(
                 &value,
                 timestamp,
-                current_session_id.as_ref(),
+                key_session_id.as_ref(),
                 &mut pace_state,
                 &mut events,
             );
@@ -229,7 +245,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         collect_tool_event(
             &value,
             timestamp,
-            current_session_id.as_ref(),
+            session_id.as_ref(),
             &origin,
             &logical_path,
             line_index,

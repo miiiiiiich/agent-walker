@@ -12,7 +12,10 @@ use super::{string_path, u64_field};
 /// Per-line attribution shared by the two usage sources.
 pub(super) struct UsageContext<'a> {
     pub(super) timestamp: Option<OffsetDateTime>,
+    /// The session the event is attributed to.
     pub(super) session_id: Option<&'a String>,
+    /// The id the event's dedupe key is built from (see `parse_file`).
+    pub(super) key_session_id: Option<&'a String>,
     pub(super) model: Option<&'a String>,
     pub(super) project: Option<&'a str>,
     pub(super) origin: &'a Origin,
@@ -69,7 +72,7 @@ pub(super) fn collect_usage_record(
     };
     let key = match string_path(value, &["payload", "response_id"]) {
         Some(response_id) => Some(format!("codex-usage:v3:{response_id}")),
-        None => context.session_id.and_then(|sid| {
+        None => context.key_session_id.and_then(|sid| {
             positional_key("codex-record", sid, context.timestamp, context.line_index)
         }),
     };
@@ -91,7 +94,7 @@ pub(super) fn collect_usage_event(
     if string_path(value, &["payload", "type"]).as_deref() != Some("token_count") {
         return;
     }
-    let session_id = context.session_id;
+    let session_id = context.key_session_id;
     collect_rate_limit_sample(
         value,
         context.timestamp,

@@ -50,6 +50,14 @@ path longer than 4,096, is treated as missing.
   kind, `{"internal": "guardian" | …}` likewise. `cli`, `vscode`, `exec`,
   `mcp` and `{"custom": …}` are main sessions. A spawned fork's second
   `session_meta` is the parent's copy and does not change this.
+- **Sessions.** A subagent's calls, tools, turns and activity belong to the
+  session it works for, as Claude Code files a subagent under its parent
+  session: the root thread its `session_meta.session_id` names. Older CLIs
+  wrote the thread's own id there; their subagents take the parent the
+  `session_meta` names (`thread_spawn.parent_thread_id`, else
+  `parent_thread_id`). Its usage takes that session's project, from the
+  parent's `session_meta` a fork copies in. Any other thread is its own
+  session, a user's fork included, and keeps the project it was opened in.
 - **Tools** from `response_item` payloads (`exec_command`, `apply_patch`,
   `write_stdin`, …). Shell executions (`exec_command` and friends) are
   decomposed to the real command basename (`grep`, `cargo`, …) so the tool list
@@ -64,7 +72,7 @@ path longer than 4,096, is treated as missing.
   paginated ones write no `user_message`, so the prompt is the completed
   `UserMessage` item. A subagent's prompts come from the agent that runs it,
   not a person, and are not counted.
-- **Sessions / model / project** from `session_meta` and `turn_context`.
+- **Model / project** from `session_meta` and `turn_context`.
 
 ## How tokens are counted
 
