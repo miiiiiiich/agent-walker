@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{SourceKind, TokenUsage};
 
 use super::CostStateRow;
+use super::spread::carries;
 use super::transcript::Call;
 
 struct Discount<'a> {
     fork: &'a str,
-    start: i64,
+    /// The fork's rows that hold the restored total.
+    rows: Vec<usize>,
     carried: BTreeMap<String, TokenUsage>,
     copied: HashSet<&'a str>,
 }
@@ -20,6 +22,8 @@ struct Discount<'a> {
 /// the fork's first call of its own, and the copied calls that total covers
 /// leave its side of the comparison; a copy of a later call stays, or it
 /// would read as uncounted in the fork while the other session counts it.
+/// A later process that carries the fork's total on holds the other's part
+/// too: left whole, its total counted that part again.
 /// Sessions that only share a `startTime`, with no call in common, are left
 /// as they are.
 pub(super) fn discount_forks<'a>(
@@ -82,7 +86,7 @@ pub(super) fn discount_forks<'a>(
             if let Some((parent, base)) = parent {
                 discounts.push(Discount {
                     fork,
-                    start,
+                    rows: holding(&logs[fork], start),
                     carried: base.models.clone(),
                     copied: transcripts[parent]
                         .iter()
@@ -95,11 +99,8 @@ pub(super) fn discount_forks<'a>(
     }
     for discount in discounts {
         if let Some(rows) = logs.get_mut(discount.fork) {
-            for row in rows
-                .iter_mut()
-                .filter(|row| row.start_time == Some(discount.start))
-            {
-                for (model, usage) in &mut row.models {
+            for &index in &discount.rows {
+                for (model, usage) in &mut rows[index].models {
                     if let Some(carried) = discount.carried.get(model) {
                         subtract(usage, carried);
                     }
@@ -110,6 +111,22 @@ pub(super) fn discount_forks<'a>(
             calls.retain(|call| call.key.is_none_or(|key| !discount.copied.contains(key)));
         }
     }
+}
+
+/// The rows of the restored `startTime`, and those of each later process
+/// that carried them on, up to the first that started again.
+fn holding(rows: &[CostStateRow], start: i64) -> Vec<usize> {
+    let mut held: Vec<usize> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let carried_on = index > 0 && held.last() == Some(&(index - 1)) && {
+            let previous = &rows[index - 1];
+            previous.start_time == row.start_time || carries(previous, row)
+        };
+        if row.start_time == Some(start) || carried_on {
+            held.push(index);
+        }
+    }
+    held
 }
 
 /// The calls `other` made after the last one it shares with the fork, up to

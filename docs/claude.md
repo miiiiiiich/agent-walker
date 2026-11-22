@@ -101,7 +101,9 @@ their own. The log does not say which calls these are.
   session's last total written before the fork's first call of its own is
   taken off the fork's totals, and the copied calls that total covers are left
   out of the fork's side, so the other session's uncounted part is not added
-  twice. When several sessions qualify, an earlier fork of the same session
+  twice. A later process that carries the fork's total on holds that part
+  too, and loses it the same way; one that starts again from zero does not.
+  When several sessions qualify, an earlier fork of the same session
   can be among them: it holds that session's total plus its own calls, made
   after the calls it shares with the later fork. So the session taken is the
   one with the fewest main-transcript calls, covered by its total, made after

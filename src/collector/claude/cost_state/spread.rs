@@ -117,7 +117,7 @@ fn runs(rows: &[CostStateRow]) -> Vec<&CostStateRow> {
     runs
 }
 
-fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
+pub(super) fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
     earlier.models.iter().all(|(model, before)| {
         later.models.get(model).is_some_and(|after| {
             after.input_tokens >= before.input_tokens

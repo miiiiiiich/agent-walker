@@ -607,6 +607,45 @@ fn a_fork_of_a_fork_is_compared_with_the_nearer_fork() {
     assert_eq!(reads_of(&collection, "gc"), 5);
 }
 
+/// A later process that carries the fork's total on still holds the
+/// parent's part: it comes off that process's totals too. A process that
+/// starts again from zero holds none of it.
+#[test]
+fn a_later_process_carrying_a_forks_total_loses_the_parents_part_too() {
+    let temp = TempDir::new().expect("tempdir");
+    let later = |dir: &Path, output: u64, reads: u64| {
+        parent_and_fork(dir);
+        let fork = dir.join("fork.jsonl");
+        let mut lines = fs::read_to_string(&fork).expect("fork fixture");
+        lines.push('\n');
+        lines.push_str(&assistant(
+            "2026-06-07T09:00:00Z",
+            "fk",
+            "m8",
+            "claude-opus-5",
+            0,
+            30,
+        ));
+        lines.push('\n');
+        lines.push_str(&cost_state(
+            "fk",
+            9,
+            &[("claude-opus-5", 0, output, 0, reads, 0, 0)],
+        ));
+        fs::write(fork, lines).expect("fork fixture");
+    };
+    later(&temp.path().join("carried"), 3 + 1, 600 + 30 + 10);
+    later(&temp.path().join("restarted"), 1, 30 + 10);
+
+    let carried = collect(&temp.path().join("carried"), None, false, UtcOffset::UTC);
+    let restarted = collect(&temp.path().join("restarted"), None, false, UtcOffset::UTC);
+
+    assert_eq!(
+        (reads_of(&carried, "fk"), reads_of(&restarted, "fk")),
+        (30, 30)
+    );
+}
+
 /// Two sessions the fork could have come from, equal in every respect but
 /// how their totals split by model: the choice must not follow map order.
 #[test]
