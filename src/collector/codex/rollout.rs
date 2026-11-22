@@ -29,6 +29,18 @@ pub(super) fn plain_rollout_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The thread a rollout belongs to, from its name as Codex writes it:
+/// `rollout-<YYYY-MM-DDThh-mm-ss>-<thread id>[_<rollout id>].jsonl`. Codex
+/// itself finds a thread's rollouts by this name.
+pub(super) fn thread_id_of(path: &Path) -> Option<String> {
+    let plain = plain_rollout_path(path);
+    let name = plain.file_name()?.to_str()?;
+    let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let ids = core.get(20..).filter(|_| core.get(19..20) == Some("-"))?;
+    let thread = ids.split_once('_').map_or(ids, |(thread, _)| thread);
+    (!thread.is_empty()).then(|| thread.to_owned())
+}
+
 /// Plain beats compressed, as in Codex. The frame header's content size is
 /// not compared: it is whatever the file claims, and a forged one would drop
 /// the plain file's usage.

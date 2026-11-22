@@ -18,6 +18,7 @@ use crate::timestamp::parse_rfc3339;
 
 mod billing;
 mod fork;
+mod migrated;
 mod rollout;
 mod tools;
 mod turns;
@@ -25,6 +26,7 @@ mod usage;
 
 use billing::applied_tier;
 use fork::{Origin, in_fork_burst, is_copied_fork, starts_own_history};
+use migrated::{HeldRows, settle};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
 use tools::{ToolState, collect_tool_event};
 use turns::{
@@ -84,9 +86,11 @@ pub fn collect(
     let mut files: Vec<PathBuf> = chosen.into_values().collect();
     files.sort();
 
-    let per_file = parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
-        parse_file(path, local_offset)
-    });
+    let mut per_file =
+        parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
+            parse_file(path, local_offset)
+        });
+    settle(&files, &mut per_file);
     merge_into(&mut collection, per_file);
     collection
 }
@@ -119,6 +123,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut origin = Origin::default();
     let mut recorded_usage: HashSet<String> = HashSet::new();
     let mut billing = Billing::default();
+    let mut held_rows = HeldRows::default();
 
     while let Some((line_index, line)) = lines.next(&mut events) {
         let Some(value) = parse_line(line, &mut events) else {
@@ -141,6 +146,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     .or(session_id);
                 if is_copied_fork(&value) {
                     fork_instant = timestamp;
+                    held_rows =
+                        HeldRows::for_fork_of(string_path(&value, &["payload", "forked_from_id"]));
                 }
             } else if session_meta_count == 2 {
                 fork_instant = timestamp;
@@ -173,6 +180,9 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             && fork_instant
                 .zip(timestamp)
                 .is_some_and(|(fork, ts)| in_fork_burst(fork, ts));
+        if !own_session_meta {
+            held_rows.note(&value, fork_instant, timestamp);
+        }
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
             if !in_replay_burst {
@@ -198,17 +208,6 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         if let Some(tier) = applied_tier(&value, own_thread_id.as_deref()) {
             billing.tier = tier;
         }
-        if in_replay_burst {
-            continue;
-        }
-
-        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
-            events.session_touches.push(SessionTouch {
-                timestamp,
-                session_id: session_id.clone(),
-            });
-        }
-
         let usage_context = UsageContext {
             timestamp,
             session_id: session_id.as_ref(),
@@ -219,6 +218,22 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             line_index,
             billing,
         };
+        if in_replay_burst {
+            if held_rows.wanted() {
+                let mut counted = FileEvents::default();
+                collect_usage_event(&value, &usage_context, &recorded_usage, &mut counted);
+                held_rows.hold(&value, counted);
+            }
+            continue;
+        }
+
+        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
+            events.session_touches.push(SessionTouch {
+                timestamp,
+                session_id: session_id.clone(),
+            });
+        }
+
         collect_usage_record(
             &value,
             &usage_context,
@@ -258,6 +273,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         );
     }
 
+    held_rows.finish(&mut events);
     events.compress_touches(local_offset);
     Some(events)
 }

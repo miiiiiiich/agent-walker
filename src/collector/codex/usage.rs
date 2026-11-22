@@ -119,12 +119,8 @@ pub(super) fn collect_usage_event(
     // Key by session, last vector, and cumulative vector to collapse replay
     // and unchanged re-emissions (GH-36). Without cumulative usage, positional
     // keys deduplicate whole-file copies only.
-    let key = match (session_id, total_usage(value)) {
-        (Some(sid), Some(cum)) => Some(format!(
-            "codex-usage:v2:{sid}:{last}:{cum}",
-            last = usage_fingerprint(last_usage),
-            cum = usage_fingerprint(cum),
-        )),
+    let key = match (session_id, token_count_fingerprint(value)) {
+        (Some(sid), Some(pair)) => Some(format!("codex-usage:v2:{sid}:{pair}")),
         (Some(sid), None) => positional_key("codex", sid, context.timestamp, context.line_index),
         _ => None,
     };
@@ -180,6 +176,25 @@ fn collect_rate_limit_sample(
             used_percent: used_percent.clamp(0.0, 100.0),
         },
     });
+}
+
+/// A `token_count`'s last and cumulative usage, which every copy of the row
+/// in another rollout repeats.
+pub(super) fn token_count_fingerprint(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let last = payload.get("info")?.get("last_token_usage")?;
+    let cum = total_usage(value)?;
+    Some(format!(
+        "{}:{}",
+        usage_fingerprint(last),
+        usage_fingerprint(cum)
+    ))
 }
 
 fn total_usage(value: &Value) -> Option<&Value> {

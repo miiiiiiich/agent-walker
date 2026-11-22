@@ -130,6 +130,16 @@ So the Total view adds up consistently with Claude. Two real differences
   still marks them. A fork with `history_base` references
   the parent's rollout instead of copying it. Spawned children never copy
   `token_usage_record` rows.
+- **Migrated children.** The same migration rewrote some spawned children
+  from before `token_usage_record` existed with every row stamped at the fork
+  instant, so the window would drop the child's own calls with the copies.
+  For a fork child with no record and no row past the window, each
+  `token_count` in the window is checked against the parent's rollout (found
+  by its file name, `rollout-<time>-<thread id>.jsonl`): one the parent also
+  holds, with the same last and cumulative usage, is a copy and is skipped;
+  the rest are the child's own calls and count. Without the parent's rollout
+  in the scan the window stands. Tools, turns and limits in those rows stay
+  skipped.
 - **Not on disk.** Background (async) compaction requests are charged to
   Codex's internal budget only; no record or `token_count` is written, so
   agent-walker cannot count them.
