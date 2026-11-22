@@ -33,8 +33,6 @@ mod trajectory;
 
 pub(super) struct Usage {
     pub(super) events: Vec<UsageEvent>,
-    /// Subagent conversations by their own id, for the log and history lines
-    /// that name one.
     pub(super) subagents: HashMap<String, Subagent>,
 }
 
@@ -154,7 +152,6 @@ fn newest_mtime_ms(db: &Path) -> Option<i64> {
         .max()
 }
 
-/// Returns the conversation's id with its subagent record when it is one.
 fn parse_db(
     db: &Path,
     db_mtime_ms: Option<i64>,
@@ -551,7 +548,6 @@ pub(super) mod tests {
     #[test]
     fn rows_with_and_without_a_display_name_share_one_label() {
         let mut with_name = served_only_gen_blob("gemini-3.8-flash-tiered", "r1", None);
-        // Rebuild the generation with a display name beside the served id.
         let chat = message_field(&with_name, 1).expect("generation").to_vec();
         let mut named = chat.clone();
         named.extend(lenf(21, b"Gemini 3.8 Flash (Low)"));
@@ -759,7 +755,6 @@ pub(super) mod tests {
         write_trajectory_conversation(path, &lenf(2, &timestamp(started_ms)), gens, steps);
     }
 
-    /// The trajectory blob of a conversation run as a subagent of `parent`.
     pub(in crate::collector::agy) fn subagent_trajectory(
         started_ms: i64,
         parent: &str,

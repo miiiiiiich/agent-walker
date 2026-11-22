@@ -13,7 +13,6 @@ use tools::{auto_approved_tool, confirmed_tool};
 
 mod tools;
 
-/// Lines naming a conversation; the user inputs logged before one belong to it.
 const CONVERSATION_MARKERS: [&str; 4] = [
     "Sending user message to conversation ",
     "Created conversation ",
@@ -112,7 +111,6 @@ pub(in crate::collector::agy) fn parse_log_file(
     Some(events)
 }
 
-/// The text after a glog header (`I1119 09:18:34.822544  2933 server.go:1851] `).
 fn log_message(line: &str) -> Option<&str> {
     let (header, message) = line.split_once("] ")?;
     let (_, source_line) = header.rsplit_once(".go:")?;
