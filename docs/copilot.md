@@ -50,7 +50,7 @@ user.
 
 ## What's captured
 
-- **Token usage**, from three sources with a fixed precedence:
+- **Token usage**, from three sources:
   - **Per-call rows** in `assistant_usage_events` (`input_tokens` /
     `output_tokens` / `cache_read_tokens` / `cache_write_tokens` /
     `reasoning_tokens`, `model`, `created_at`), each dated at its own call.
@@ -60,38 +60,32 @@ user.
     event stream for each model call (`data.usage`: `model`, `inputTokens` /
     `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` /
     `reasoningTokens`), dated at the call and keyed by its accounting
-    identity (`sourceSessionId` + `sequence`). They cover sessions with
-    neither store rows nor a clean exit. A call from a sub-agent (`agentId`
-    set, or `initiator` `sub-agent`) is attributed as subagent work.
+    identity (`sourceSessionId` + `sequence`), so a fork's copy counts once.
+    A call from a sub-agent (`agentId` set, or `initiator` `sub-agent`) is
+    attributed as subagent work.
   - **Shutdown snapshots**: the `session.shutdown` event the CLI appends on
     clean exit carries per-model cumulative totals for the whole session
     (`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` /
     `reasoningTokens`). Each shutdown is counted as the delta since the
-    previous one, dated at its own exit time, less what the receipts read
-    since then already counted. Its `usageAccountingWatermarks` name, per
-    source session, the highest receipt it covers; a receipt past the mark
-    is left for the next exit, and so is a receipt whose model the exit
-    carries no usable counters for. What remains, such as calls from before
-    the CLI wrote receipts, counts at that exit.
+    previous one, dated at its own exit time, less the receipts it covers
+    that count (below). Its `usageAccountingWatermarks` name, per source
+    session, the highest receipt it covers; a receipt past the mark is left
+    for the next exit, and so is a receipt whose model the exit carries no
+    usable counters for.
 
-  A receipt and the store rows of its call count once. A receipt is paired
-  with at most one live row of the session named as its `sourceSessionId`
-  (a fork's copy keeps the parent there), and with at most one row the CLI
-  caught up from the log (`event_id` starting `usage-record:`) per session
-  that made the call or holds the receipt in its log. A row is the call's
-  when it has the same model and the same five token counts and is dated
-  within 61 s of the receipt (Copilot's 60 s slack, plus the second the
-  store's default stamp drops). In the CLI's schema the receipt and the
-  live event behind a row are the same usage record, and local rows add up
-  to the exit totals field for field; that a receipt's counts equal its
-  row's is not verified on disk. A live row stands for the call; caught-up
-  rows are copies and give way. A receipt or a row left without a partner
-  counts on its own, except that when not one of a session's receipts
-  pairs with the live rows around them, the pairing is taken not to hold
-  there and those live rows stand for the receipts within their span (61 s
-  either side), so a field the CLI writes differently can't count every
-  call twice; a session with an unreadable row, or one falling back to its
-  exits, is left as paired.
+  Each session that made calls takes them from one source, never a mix of
+  the two. If the store has a readable row for it, its rows and exits count
+  and its receipts don't; otherwise its receipts count, and its exits only
+  for what the receipts didn't carry. A receipt goes by its
+  `sourceSessionId`, so a fork's copies of a parent's receipts follow the
+  parent. A copied receipt always comes off the fork's exit, since the
+  parent counts that call. This undercounts a session on the store whose
+  calls are partly only in receipts: one the store knows only from rows
+  the CLI caught up from the log (`event_id` starting `usage-record:`)
+  loses each call until the CLI catches it up, and a receipt whose row is
+  unreadable or missing is lost. A row the CLI caught up under a fork for
+  a copied receipt, if it files them so (not verified), would count beside
+  the parent's receipts.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
@@ -102,14 +96,11 @@ user.
   wrong type), that session keeps all its snapshots: superseding them from
   the readable rows alone would lose the unreadable row's usage. A model's
   readable rows up to the latest exit with usable counters for that model
-  are dropped (that cumulative, with the receipts before it, already covers
-  them), even when the exit added nothing for it; an exit without a
-  model's counters covers none of its rows. The rows left and the receipts
-  are paired as above, so a receipt whose row is the unreadable one still
-  counts. A session with no exit keeps all its readable rows. A row that
-  can't be tied to a session at all applies the same fallback to every
-  session. An unreadable row dated after the latest exit, whose call left
-  no receipt, can't be counted anywhere.
+  are dropped (that cumulative already covers them); an exit without a
+  model's counters covers none of its rows. A session with no exit keeps
+  all its readable rows. A row that can't be tied to a session at all
+  applies the same fallback to every session. An unreadable row dated
+  after the latest exit can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 

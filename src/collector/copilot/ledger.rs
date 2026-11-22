@@ -12,7 +12,6 @@ use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
 use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent, UsageGranularity};
 use crate::timestamp::{parse_rfc3339, plausible};
 
-use super::pairing::pair_receipts;
 use super::{MAX_SANE_TOKENS, RawCounters};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
@@ -26,7 +25,6 @@ pub(super) struct CallLedger {
     pub(super) events: FileEvents,
     first_call: HashMap<String, OffsetDateTime>,
     first_live: HashMap<String, OffsetDateTime>,
-    catch_up: Vec<CaughtUp>,
     /// Sessions that fell back to their exits, which then all count.
     fallback: HashSet<String>,
     /// Sessions with at least one row that couldn't be read.
@@ -55,7 +53,6 @@ impl CallLedger {
                 copies.extend(row.key);
             } else {
                 earliest(&mut self.first_call, &row.session, row.time);
-                self.catch_up.push(row);
             }
         }
         drop_keys(&mut self.events, &copies);
@@ -64,14 +61,10 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit with that model's counters stay: the snapshots,
-    /// with the receipts before them, cover everything up to it, and
-    /// dropping the later rows would lose every call since that exit. Only
-    /// exits count, each for the models it validated, even with a zero
-    /// delta: a receipt covers its own call, and an exit cut every model's
-    /// rows at once, including one whose counters it lacked. Runs before the
-    /// receipts are paired, so a receipt the exit's delta left out never
-    /// gives way to a row cut here.
+    /// after the latest exit with that model's counters stay: the snapshots
+    /// cover everything up to it, and dropping the later rows would lose
+    /// every call since that exit. Cut per model: cutting every model's rows
+    /// at one exit took those of a model whose counters it lacked.
     pub(super) fn fall_back_where_incomplete(
         &mut self,
         per_file: &[(PathBuf, Option<FileEvents>)],
@@ -118,47 +111,18 @@ impl CallLedger {
         self.fallback = exits.into_keys().collect();
     }
 
-    /// A receipt and the store rows of its call count once. A live row stands
-    /// for the call. A caught-up row is the store's copy of the receipt and
-    /// always goes: kept, it would date the store's coverage from a call only
-    /// the log holds, and supersede exits that cover calls it lacks.
-    pub(super) fn reconcile_receipts(&mut self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-        let caught_up: HashSet<&str> = self
-            .catch_up
-            .iter()
-            .filter_map(|row| row.key.as_deref())
-            .collect();
-        let mut receipts: HashSet<String> = HashSet::new();
-        let mut rows: HashSet<String> = HashSet::new();
-        let exempt =
-            |session: &str| self.incomplete.contains(session) || self.fallback.contains(session);
-        for copies in pair_receipts(per_file, &self.events, &caught_up, &exempt) {
-            rows.extend(copies.caught_up);
-            receipts.extend(copies.receipt);
-        }
-        for events in per_file
-            .iter_mut()
-            .filter_map(|(_, events)| events.as_mut())
-        {
-            drop_keys(events, &receipts);
-        }
-        if rows.is_empty() {
-            return;
-        }
-        drop_keys(&mut self.events, &rows);
-        self.catch_up
-            .retain(|row| row.key.as_ref().is_none_or(|key| !rows.contains(key)));
-        self.first_call.clone_from(&self.first_live);
-        for row in &self.catch_up {
-            earliest(&mut self.first_call, &row.session, row.time);
-        }
+    /// The sessions with at least one readable row, whose rows are their
+    /// source of calls.
+    pub(super) fn store_sessions(&self) -> HashSet<String> {
+        self.first_call.keys().cloned().collect()
     }
 
     /// From a session's first recorded call on, its rows replace its
     /// snapshots; earlier snapshots still count, and a session that fell
     /// back keeps them all. A fork's copy of a superseded snapshot (same
     /// key) is dropped too, or the parent's calls would count again under
-    /// the fork.
+    /// the fork. Receipts are left alone: `choose_sources` settled them, and
+    /// one that counts can sit in a journal whose session has rows.
     pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
         let mut superseded: HashSet<String> = HashSet::new();
         for events in per_file
@@ -705,10 +669,8 @@ mod tests {
         volumes
     }
 
-    /// A receipt covers only its own call: without an exit there is no
-    /// snapshot to fall back to, so an incomplete session's store-only call
-    /// before the receipt still counts, and the receipt gives way to its
-    /// live row as in a complete session.
+    /// A receipt covers only its own call, and in a session on the store it
+    /// doesn't count at all: the store-only call before it still counts.
     #[test]
     fn a_receipt_is_not_a_snapshot_for_the_fallback() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -737,11 +699,10 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
-    /// The review's case: the receipt's own row is the unreadable one, so
-    /// the receipt is the only record of that call and must stay, while the
-    /// store-only call before it still counts.
+    /// The documented undercount: with a readable row the session's calls
+    /// come from the store, and the receipt whose row is unreadable is lost.
     #[test]
-    fn a_receipt_whose_row_is_unreadable_still_counts() {
+    fn a_receipt_whose_row_is_unreadable_is_lost() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -762,11 +723,10 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![330]);
     }
 
-    /// The store's default stamp drops the fraction, so a call's row can
-    /// read as written before its receipt.
+    /// A row stamped to the second counts once, as a store row.
     #[test]
     fn a_row_stamped_just_before_its_receipt_is_still_its_copy() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -795,10 +755,11 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
-    /// After a fallback session's latest exit, a receipt and the live row
-    /// of its call count once.
+    /// A session on the store ignores its receipts, so its exit counts what
+    /// they carried too: taken off, the 10:00 call would count nowhere once
+    /// the fallback drops its row.
     #[test]
-    fn after_the_fallback_exit_a_receipt_and_its_row_count_once() {
+    fn a_store_sessions_exit_counts_in_full_in_the_fallback() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -827,46 +788,13 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 1_100]);
-    }
-
-    /// An exit whose receipts carried its whole cumulative adds nothing, yet
-    /// still covers the rows up to it; the receipt whose row is unreadable
-    /// is the only record of that call.
-    #[test]
-    fn an_exit_that_adds_nothing_still_drives_the_fallback() {
-        let temp = TempDir::new().expect("test tempdir should be created");
-        write_session(
-            temp.path(),
-            "s1",
-            &format!(
-                "{}\n{}\n{}\n",
-                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
-                receipt("2026-07-27T10:30:00.000Z", "s1", 2, 200, 20),
-                marked(
-                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 300, 30),
-                    r#"{"s1":2}"#
-                ),
-            ),
-        );
-        write_store(
-            temp.path(),
-            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
-        );
-        insert_raw_row(
-            temp.path(),
-            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:30:00.500Z'",
-        );
-
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
-
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220]);
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![220, 1_210]);
     }
 
     /// An exit with no usable counters for a model covers none of that
-    /// model's rows, even when it added nothing for another model.
+    /// model's rows.
     #[test]
-    fn an_exit_that_adds_nothing_cuts_only_its_models_rows() {
+    fn an_exit_cuts_only_the_rows_of_models_it_validated() {
         let temp = TempDir::new().expect("test tempdir should be created");
         let exit = r#"{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{"usageAccountingWatermarks":{"s1":1},"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}},"claude-haiku-4.5":{"usage":{}}}}}"#;
         write_session(
@@ -894,10 +822,9 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
-    /// An exit that added nothing still covers its model's rows up to it,
-    /// including one too far from its receipt to pair.
+    /// An exit covers its model's rows up to it.
     #[test]
-    fn an_exit_that_adds_nothing_covers_its_models_unpaired_rows() {
+    fn an_exit_covers_its_models_rows_up_to_it() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -924,10 +851,9 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110]);
     }
 
-    /// A call between an exit that added nothing and the next receipt, with
-    /// only a row of its own, still counts.
+    /// A call after the exit with only a row of its own still counts.
     #[test]
-    fn an_exit_that_adds_nothing_bounds_the_receipt_span() {
+    fn a_store_only_call_after_an_exit_counts() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -955,37 +881,6 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 330]);
-    }
-
-    /// The exit's delta already left out the receipts before it, so a first
-    /// live row soon after the exit must not drop them.
-    #[test]
-    fn receipts_up_to_the_fallback_exit_stay() {
-        let temp = TempDir::new().expect("test tempdir should be created");
-        write_session(
-            temp.path(),
-            "s1",
-            &format!(
-                "{}\n{}\n",
-                receipt("2026-07-27T10:59:30.000Z", "s1", 1, 100, 10),
-                marked(
-                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 1_100, 110),
-                    r#"{"s1":1}"#
-                ),
-            ),
-        );
-        write_store(
-            temp.path(),
-            &[call("s1", "2026-07-27T11:00:15.000Z", 300, 30)],
-        );
-        insert_raw_row(
-            temp.path(),
-            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:59:30.500Z'",
-        );
-
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
-
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330, 1_100]);
     }
 
     /// Gives rows (by insertion order, from 1) the store's `event_id`.
@@ -1023,8 +918,11 @@ mod tests {
         assert_eq!(session_volumes(&collection, "s1"), vec![110, 330]);
     }
 
+    /// The documented undercount: with a store row, the session's calls
+    /// come from the store, so the 09:50 call the store never recorded is
+    /// lost.
     #[test]
-    fn a_receipt_and_the_live_row_of_its_call_count_once() {
+    fn receipts_dont_count_in_a_session_with_store_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1042,19 +940,19 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(session_volumes(&collection, "s1"), vec![330, 110]);
+        assert_eq!(session_volumes(&collection, "s1"), vec![110]);
         assert_eq!(
-            collection.usage_events[1].project.as_deref(),
+            collection.usage_events[0].project.as_deref(),
             Some("Users/me/code/app")
         );
     }
 
-    /// With no live rows, caught-up rows give way to the receipts they copy,
-    /// and the calls after the catch-up still count. An earlier caught-up
-    /// row, whose receipt is gone, stays and supersedes the exit that also
-    /// carries it.
+    /// The documented undercount: a session the store knows only through
+    /// caught-up rows takes its calls from them, so the 10:02 receipt the CLI
+    /// hasn't caught up yet is lost, and the 09:00 row still supersedes the
+    /// exit after it.
     #[test]
-    fn caught_up_rows_give_way_to_the_receipts_they_copy() {
+    fn a_call_not_yet_caught_up_is_lost() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1092,7 +990,7 @@ mod tests {
 
         let mut volumes = session_volumes(&collection, "s1");
         volumes.sort_unstable();
-        assert_eq!(volumes, vec![110, 220, 330, 550]);
+        assert_eq!(volumes, vec![110, 220, 550]);
     }
 
     /// A fork's copy of a receipt still names the parent as its source, so
@@ -1119,11 +1017,10 @@ mod tests {
         assert_eq!(total_volume(&collection), 110 + 440);
     }
 
-    /// The parent's caught-up rows give way to the fork's copies of their
-    /// receipts; a later row, whose receipt was in the parent's log alone,
-    /// still counts.
+    /// The parent's caught-up rows stand for its calls, including the one
+    /// whose receipt the fork never copied.
     #[test]
-    fn a_parents_caught_up_rows_give_way_to_the_forks_copies() {
+    fn a_forks_copies_give_way_to_the_parents_caught_up_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1155,8 +1052,7 @@ mod tests {
         );
     }
 
-    /// A receipt pairs only with a row of its own model and counters, so
-    /// another model's call a few seconds earlier still counts.
+    /// Another model's row beside a receipt is a call of its own.
     #[test]
     fn a_receipt_never_takes_another_models_row() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -1185,11 +1081,11 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
-    /// A caught-up row is the store's copy of a receipt, so the receipt
-    /// stands for the call and the exit after it still counts the calls
-    /// that have no row at all.
+    /// The documented undercount: a caught-up row is a store row, so the
+    /// session takes its calls from the store, and the exit after it, whose
+    /// calls before the receipts have no row, is superseded.
     #[test]
-    fn a_caught_up_row_gives_way_to_its_receipt() {
+    fn a_caught_up_row_supersedes_the_exit_after_it() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1211,7 +1107,7 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 1_100]);
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110]);
     }
 
     /// A call with only a row between two receipts is not a copy of either.
@@ -1242,10 +1138,9 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 330]);
     }
 
-    /// Even after the session's first live row, a receipt gives way only to
-    /// the row of its own call; one the store never recorded still counts.
+    /// The documented undercount: the 10:30 call is only in a receipt.
     #[test]
-    fn a_receipt_without_a_row_counts_after_the_first_live_row() {
+    fn a_receipt_without_a_row_is_lost_in_a_session_with_store_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1266,19 +1161,14 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 330]);
-        let copied = collection
-            .usage_events
-            .iter()
-            .find(|event| event.usage.token_volume() == 110)
-            .expect("the call with both records counts");
-        assert_eq!(copied.project.as_deref(), Some("Users/me/code/app"));
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
-    /// A fork's copy of a receipt whose parent row is unreadable is that
-    /// call's only record; the parent's readable rows don't cover it.
+    /// The review's case, as the documented undercount: the parent has a
+    /// readable row, so its calls come from the store, and the call whose row
+    /// is unreadable survives only in the fork's copy of its receipt.
     #[test]
-    fn a_forks_copy_of_a_receipt_whose_parent_row_is_unreadable_counts() {
+    fn a_forks_copy_is_lost_when_the_parents_row_is_unreadable() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1297,13 +1187,13 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(total_volume(&collection), 330 + 110 + 440);
+        assert_eq!(total_volume(&collection), 330 + 440);
     }
 
-    /// Two forks copied two of the parent's receipts; the caught-up row of
-    /// the call between them is in neither fork and still counts.
+    /// The review's case: two forks hold copies of two parent receipts, and
+    /// the parent's caught-up row between them, in neither fork, counts.
     #[test]
-    fn forks_copies_cover_only_the_parent_rows_they_copy() {
+    fn forks_copies_never_take_the_parents_rows() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1343,10 +1233,10 @@ mod tests {
         assert_eq!(total_volume(&collection), 110 + 220 + 330);
     }
 
-    /// The store's default stamp drops the fraction, so a copied receipt's
-    /// caught-up row can read as written just before the receipt.
+    /// The review's case: the parent's caught-up row, stamped to the second,
+    /// stands for the call; the fork's copy of its receipt doesn't count.
     #[test]
-    fn a_copy_pairs_with_its_whole_second_caught_up_row() {
+    fn a_copy_of_a_parent_on_the_store_counts_through_its_row() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1368,82 +1258,11 @@ mod tests {
         assert_eq!(total_volume(&collection), 110 + 440);
     }
 
-    /// The fork's own log holds the copy, so a row caught up from that log
-    /// under the fork pairs with it too.
+    /// The review's case, as the documented undercount: model B's row puts
+    /// the session on the store, so model A's receipt, whose row is the
+    /// unreadable one, is lost.
     #[test]
-    fn a_forks_caught_up_row_of_a_copied_receipt_counts_once() {
-        let temp = TempDir::new().expect("test tempdir should be created");
-        write_session(
-            temp.path(),
-            "fork",
-            &format!(
-                "{}\n",
-                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10)
-            ),
-        );
-        write_store(
-            temp.path(),
-            &[call("fork", "2026-07-27T10:00:00.000Z", 100, 10)],
-        );
-        set_event_ids(temp.path(), &[(1, "usage-record:a")]);
-
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
-
-        assert_eq!(total_volume(&collection), 110);
-    }
-
-    /// One call can have a row in the parent and a caught-up row under the
-    /// fork whose log holds the copy; the call still counts once.
-    #[test]
-    fn a_copy_with_a_parent_row_and_a_forks_caught_up_row_counts_once() {
-        let temp = TempDir::new().expect("test tempdir should be created");
-        write_session(
-            temp.path(),
-            "fork",
-            &format!(
-                "{}\n",
-                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10)
-            ),
-        );
-        write_store(
-            temp.path(),
-            &[
-                call("parent", "2026-07-27T10:00:00.500Z", 100, 10),
-                call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
-            ],
-        );
-        set_event_ids(temp.path(), &[(2, "usage-record:a")]);
-
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
-
-        assert_eq!(total_volume(&collection), 110);
-    }
-
-    /// Two forks hold the same copy, and each caught it up under itself.
-    #[test]
-    fn two_forks_caught_up_rows_of_one_copy_count_once() {
-        let temp = TempDir::new().expect("test tempdir should be created");
-        let copy = receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10);
-        write_session(temp.path(), "fork-a", &format!("{copy}\n"));
-        write_session(temp.path(), "fork-b", &format!("{copy}\n"));
-        write_store(
-            temp.path(),
-            &[
-                call("fork-a", "2026-07-27T10:00:00.000Z", 100, 10),
-                call("fork-b", "2026-07-27T10:00:00.000Z", 100, 10),
-            ],
-        );
-        set_event_ids(temp.path(), &[(1, "usage-record:a"), (2, "usage-record:a")]);
-
-        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
-
-        assert_eq!(total_volume(&collection), 110);
-    }
-
-    /// The review's case: model A's receipt, whose row is the unreadable
-    /// one, and model B's row 15 s before it are two calls.
-    #[test]
-    fn a_receipt_whose_row_is_unreadable_keeps_another_models_row_beside_it() {
+    fn a_receipt_whose_row_is_unreadable_is_lost_beside_another_models_row() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1464,7 +1283,7 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![330]);
     }
 
     /// The review's case: an exit with valid zero counters for A and B's
@@ -1488,12 +1307,11 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![50]);
     }
 
-    /// Receipts that never pair with a single live row they sit among mean
-    /// the pairing key doesn't hold for the session; the live rows stand for
-    /// those calls rather than count beside them. A receipt outside the
-    /// rows' span still counts.
+    /// Receipts never count beside a session's store rows, so counts that
+    /// differ by a token can't double a call. The 12:00 call, only in a
+    /// receipt, is the documented undercount.
     #[test]
-    fn receipts_that_never_pair_with_the_rows_around_them_give_way() {
+    fn receipts_that_differ_from_the_rows_dont_double() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -1515,7 +1333,73 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        assert_eq!(sorted_volumes(&collection, "s1"), vec![111, 221, 330]);
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![111, 221]);
+    }
+
+    /// The parent is on the store and the fork isn't: the fork's exit
+    /// carries the parent's call too, and both receipts come off it, the copy
+    /// because the parent's row counts that call.
+    #[test]
+    fn a_forks_exit_drops_copies_of_a_parent_on_the_store() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &format!(
+                "{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10),
+                receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
+                marked(
+                    &shutdown("e-2", "2026-07-27T12:00:00.000Z", 500, 50),
+                    r#"{"parent":1,"fork":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 440);
+    }
+
+    /// The parent isn't on the store and the fork is: both journals hold the
+    /// parent's exit, and both must give it the same amount, or merging the
+    /// two copies keeps the larger and counts the parent's receipt again.
+    #[test]
+    fn a_parents_exit_counts_once_from_either_journal() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let history = format!(
+            "{}\n{}\n",
+            receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10),
+            marked(
+                &shutdown("e-1", "2026-07-27T10:30:00.000Z", 1_100, 110),
+                r#"{"parent":1}"#
+            ),
+        );
+        write_session(temp.path(), "parent", &history);
+        write_session(
+            temp.path(),
+            "fork",
+            &format!(
+                "{history}{}\n{}\n",
+                receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
+                marked(
+                    &shutdown("e-2", "2026-07-27T12:00:00.000Z", 1_500, 150),
+                    r#"{"parent":1,"fork":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("fork", "2026-07-27T11:00:00.500Z", 400, 40)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 1_100 + 440);
     }
 
     #[test]

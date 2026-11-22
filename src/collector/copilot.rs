@@ -1,7 +1,7 @@
 mod ledger;
-mod pairing;
 mod receipts;
 mod segments;
+mod sources;
 
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -27,6 +27,7 @@ use crate::timestamp::parse_rfc3339;
 
 use ledger::read_call_ledger;
 use receipts::Receipts;
+use sources::{OWN_PREFIX, choose_sources};
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -47,19 +48,15 @@ pub fn collect(
     }
 
     let mut per_file = parse_heads(files, use_cache, local_offset);
+    let store = ledger
+        .as_ref()
+        .map(ledger::CallLedger::store_sessions)
+        .unwrap_or_default();
+    choose_sources(&mut per_file, &store);
     if let Some(mut ledger) = ledger {
         ledger.fall_back_where_incomplete(&per_file);
-        ledger.reconcile_receipts(&mut per_file);
         ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
-    }
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events
-            .usage_events
-            .retain(|keyed| keyed.event.usage.token_volume() > 0);
     }
     merge_into(&mut collection, per_file);
     collection
@@ -385,24 +382,14 @@ fn collect_shutdown_usage(
         } else {
             previous
         };
-        // The receipts already counted their calls; what is left is usage
-        // they don't carry, such as calls from before the CLI wrote them.
-        let delta = current
-            .minus(base)
-            .minus(receipts.take_covered(value, model));
+        // A copied receipt's call is counted by the session that made it,
+        // from its receipts or its store rows, so it always comes off.
+        let covered = receipts.take_covered(value, model);
+        let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();
-        // An exit that adds nothing for a model still marks how far that
-        // model's cumulative reaches, which the store fallback cuts its rows
-        // at; the empty event goes before merging.
         if usage.token_volume() == 0 {
-            if line.session_id.is_some() {
-                events.usage_events.push(KeyedUsageEvent {
-                    key: None,
-                    event: exit_usage(line, Some(model), project, usage),
-                });
-            }
             continue;
         }
         let key = match (line.event_id, line.session_id) {
@@ -410,6 +397,18 @@ fn collect_shutdown_usage(
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
             (None, None) => None,
         };
+        // The journal's own receipts come off only if its session has no
+        // store rows, which parsing can't see: what they carried goes along
+        // for `choose_sources`.
+        let own = covered.own.to_usage();
+        if let Some(key) = &key
+            && own.token_volume() > 0
+        {
+            events.usage_events.push(KeyedUsageEvent {
+                key: Some(format!("{OWN_PREFIX}{key}")),
+                event: exit_usage(line, Some(model), None, own),
+            });
+        }
         events.usage_events.push(KeyedUsageEvent {
             key,
             event: exit_usage(line, Some(model), project, usage),

@@ -30,6 +30,16 @@ pub(super) struct Receipts {
 struct Pending {
     counters: RawCounters,
     identity: Option<(String, u64)>,
+    /// Made in this journal's own session, not copied from another's.
+    own: bool,
+}
+
+/// What an exit's receipts carried of its cumulative, split by where they
+/// were made.
+#[derive(Default)]
+pub(super) struct Covered {
+    pub(super) copied: RawCounters,
+    pub(super) own: RawCounters,
 }
 
 impl Receipts {
@@ -78,10 +88,17 @@ impl Receipts {
         if line.timestamp.is_none() {
             return;
         }
+        let own = identity
+            .as_ref()
+            .is_none_or(|(source, _)| Some(source) == line.session_id);
         self.pending
             .entry(model.to_owned())
             .or_default()
-            .push(Pending { counters, identity });
+            .push(Pending {
+                counters,
+                identity,
+                own,
+            });
         let usage_event = counters.to_usage();
         if usage_event.token_volume() == 0 {
             return;
@@ -109,18 +126,18 @@ impl Receipts {
         });
     }
 
-    /// What `model`'s receipts read since the previous exit already counted
-    /// of its cumulative at this exit, taken out of the pending ones. A
+    /// What `model`'s receipts read since the previous exit carried of its
+    /// cumulative at this exit, taken out of the pending ones. A
     /// receipt past its source's mark is left for the next exit; an exit
     /// without marks predates receipts and covers all of them. Taken only
     /// for a model whose counters the exit validated: taking every model's
     /// up front, an exit without the model's counters consumed its receipts
     /// without deducting them, and the next cumulative counted them again.
-    pub(super) fn take_covered(&mut self, snapshot: &Value, model: &str) -> RawCounters {
+    pub(super) fn take_covered(&mut self, snapshot: &Value, model: &str) -> Covered {
         let marks = snapshot
             .pointer("/data/usageAccountingWatermarks")
             .and_then(Value::as_object);
-        let mut covered = RawCounters::default();
+        let mut covered = Covered::default();
         let Some(pending) = self.pending.get_mut(model) else {
             return covered;
         };
@@ -133,7 +150,11 @@ impl Receipts {
                     .is_some_and(|mark| mark >= *sequence),
             };
             if subsumed {
-                covered.add(receipt.counters);
+                if receipt.own {
+                    covered.own.add(receipt.counters);
+                } else {
+                    covered.copied.add(receipt.counters);
+                }
             }
             !subsumed
         });
