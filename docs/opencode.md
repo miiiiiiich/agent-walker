@@ -117,7 +117,9 @@ the installed Claude Code, which writes its own transcript of every primary
 turn. Those turns already count on the Claude tab with the full model id, so
 their OpenCode `assistant` rows add no usage; their activity, durations and
 tools still count here. Compaction and other side calls run without a Claude
-transcript (`--no-session-persistence`), so their rows keep their usage.
+transcript (`--no-session-persistence`), so their rows keep their usage. Once
+Claude Code deletes a transcript (after 30 days by default, see the Claude
+docs' history retention), its turns count on neither tab.
 
 So OpenCode reaches near-parity with Claude / Codex: tokens, cost, model,
 project, tools, sessions, durations, and hourly — all from the local DB.
