@@ -48,12 +48,13 @@ pub fn collect(
     }
 
     let mut per_file = parse_heads(files, use_cache, local_offset);
-    let store = ledger
+    let (live, caught_up) = ledger
         .as_ref()
-        .map(ledger::CallLedger::store_sessions)
+        .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
         .unwrap_or_default();
-    choose_sources(&mut per_file, &store);
+    let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
     if let Some(mut ledger) = ledger {
+        ledger.ignore_caught_up(&from_receipts);
         ledger.fall_back_where_incomplete(&per_file);
         ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));

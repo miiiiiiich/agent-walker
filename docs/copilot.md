@@ -74,18 +74,21 @@ user.
     usable counters for.
 
   Each session that made calls takes them from one source, never a mix of
-  the two. If the store has a readable row for it, its rows and exits count
-  and its receipts don't; otherwise its receipts count, and its exits only
-  for what the receipts didn't carry. A receipt goes by its
-  `sourceSessionId`, so a fork's copies of a parent's receipts follow the
-  parent. A copied receipt always comes off the fork's exit, since the
-  parent counts that call. This undercounts a session on the store whose
-  calls are partly only in receipts: one the store knows only from rows
-  the CLI caught up from the log (`event_id` starting `usage-record:`)
-  loses each call until the CLI catches it up, and a receipt whose row is
-  unreadable or missing is lost. A row the CLI caught up under a fork for
-  a copied receipt, if it files them so (not verified), would count beside
-  the parent's receipts.
+  the two. A session with a readable live row is on the store: its rows and
+  exits count and its receipts don't. Otherwise its receipts count, and its
+  exits only for what the receipts didn't carry; the rows the CLI caught
+  up from its log (`event_id` starting `usage-record:`) copy those receipts
+  and don't count, unless its journal holds no receipts (it is gone), and
+  then they are the only record and count as its store rows. A receipt
+  goes by its `sourceSessionId`, so a fork's copies of a parent's receipts
+  follow the parent, and a copied receipt always comes off the fork's
+  exit, since the parent counts that call. What this still undercounts: in
+  a session with a live row, a call only in a receipt (its row unreadable
+  or missing); in a session on its receipts, a call only in a caught-up row
+  whose receipt is gone and that no later exit covers. A row caught up
+  under a fork that has live rows, for a receipt copied from the parent (if
+  the CLI files it there, which is not verified), would count beside the
+  parent's receipts.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
