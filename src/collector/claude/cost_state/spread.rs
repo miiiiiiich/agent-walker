@@ -151,7 +151,7 @@ fn spread_run(
     let mut slots: BTreeMap<Slot, (u64, &Call)> = BTreeMap::new();
     for call in calls {
         counted
-            .entry(call.model.as_str())
+            .entry(call.model())
             .or_default()
             .add_assign(&call.usage);
         let Some(local) = call

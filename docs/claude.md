@@ -78,7 +78,8 @@ their own. The log does not say which calls these are.
 - **What is added.** Per session, model and field, the part of the total over
   the session's transcript: `max(0, total − transcript)`. The transcript side
   is the session's main and subagent files with advisor calls, each
-  `message.id` once within the session. A field the transcript is ahead on
+  `message.id` once within the session, the copy kept as described under
+  Deduplication below. A field the transcript is ahead on
   (a total that started after some of the session's calls) adds nothing. A
   model keyed with a context suffix, `claude-opus-5[1m]`, is its plain model,
   under which its calls are logged.
@@ -149,7 +150,8 @@ Claude writes the same usage line into multiple files when a session is
 forked/resumed. agent-walker dedupes by `message.id` so volume is not
 double-counted. A streamed reply can also be written as several rows whose
 usage grows; of all the copies of one `message.id`, the one with the most
-tokens is kept, dated at the earliest timestamp any copy carries.
+tokens is kept, dated at the earliest timestamp any copy carries. If it does
+not name its model, it takes the model another copy names.
 
 ## Known gaps
 

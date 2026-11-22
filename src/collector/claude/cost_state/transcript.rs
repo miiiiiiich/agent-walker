@@ -13,10 +13,24 @@ pub(super) struct Call<'a> {
     /// The `message.id` key, shared by every copy of the call.
     pub(super) key: Option<&'a str>,
     pub(super) timestamp: Option<OffsetDateTime>,
-    pub(super) model: String,
+    pub(super) model: Option<String>,
     pub(super) usage: TokenUsage,
     pub(super) project: Option<String>,
     pub(super) source_kind: SourceKind,
+}
+
+impl Call<'_> {
+    pub(super) fn model(&self) -> &str {
+        self.model.as_deref().unwrap_or("unknown")
+    }
+
+    /// The collection merge's rule: a streamed reply's larger copy may not
+    /// name its model yet. Kept as `unknown`, its tokens read as uncounted
+    /// under the model the other copy names.
+    fn fill_from(&mut self, other: Self) {
+        self.model = self.model.take().or(other.model);
+        self.project = self.project.take().or(other.project);
+    }
 }
 
 /// The calls of the sessions that have a cost-state, each `message.id` once
@@ -41,7 +55,10 @@ pub(super) fn transcripts<'a>(
             let call = Call {
                 key: keyed.key.as_deref(),
                 timestamp: event.timestamp,
-                model: transcript_model(event.model.as_deref().unwrap_or("unknown")).to_owned(),
+                model: event
+                    .model
+                    .as_deref()
+                    .map(|model| transcript_model(model).to_owned()),
                 usage: event.usage.clone(),
                 project: event.project.clone(),
                 source_kind: event.source_kind,
@@ -58,11 +75,10 @@ pub(super) fn transcripts<'a>(
                     (a, b) => a.or(b),
                 };
                 if call.usage.token_volume() > kept.usage.token_volume() {
-                    let project = kept.project.take();
-                    *kept = call;
-                    kept.project = kept.project.take().or(project);
-                } else if kept.project.is_none() {
-                    kept.project = call.project;
+                    let replaced = std::mem::replace(kept, call);
+                    kept.fill_from(replaced);
+                } else {
+                    kept.fill_from(call);
                 }
                 kept.timestamp = earliest;
             } else {

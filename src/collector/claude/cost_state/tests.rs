@@ -460,6 +460,41 @@ fn a_forks_copy_of_a_call_after_the_parents_total_stays_counted_once() {
     assert_eq!((reads("pa"), reads("fk")), (30, 20));
 }
 
+/// A streamed reply whose larger copy does not name its model is still that
+/// model's call, as the collection merge reads it, in either copy order.
+#[test]
+fn a_streamed_copy_without_a_model_counts_under_the_other_copys_model() {
+    let temp = TempDir::new().expect("tempdir");
+    let unnamed = |at: &str, session: &str| {
+        format!(
+            r#"{{"timestamp":"{at}","sessionId":"{session}","type":"assistant","message":{{"id":"m1","usage":{{"input_tokens":99,"output_tokens":1}}}}}}"#
+        )
+    };
+    let total = |session: &str| cost_state(session, 1, &[("claude-opus-5", 99, 1, 0, 0, 0, 0)]);
+    write(
+        temp.path(),
+        "s1.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "s1", "m1", "claude-opus-5", 9, 0),
+            unnamed("2026-06-05T09:00:01Z", "s1"),
+            total("s1"),
+        ],
+    );
+    write(
+        temp.path(),
+        "s2.jsonl",
+        &[
+            unnamed("2026-06-05T09:00:00Z", "s2"),
+            assistant("2026-06-05T09:00:01Z", "s2", "m1", "claude-opus-5", 9, 0),
+            total("s2"),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    assert!(added(&collection).is_empty());
+}
+
 /// Totals are cumulative: of two files holding one session's totals, only
 /// the one written last is used.
 #[test]
