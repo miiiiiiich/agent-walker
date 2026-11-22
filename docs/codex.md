@@ -53,7 +53,10 @@ path longer than 4,096, is treated as missing.
 - **Tools** from `response_item` payloads (`exec_command`, `apply_patch`,
   `write_stdin`, …). Shell executions (`exec_command` and friends) are
   decomposed to the real command basename (`grep`, `cargo`, …) so the tool list
-  reflects what actually ran, not one undifferentiated shell bucket.
+  reflects what actually ran, not one undifferentiated shell bucket. Code
+  Mode's `exec` runs a script instead; the shell commands it starts are
+  recorded as `CommandExecution` items, and each counts as a tool named the
+  same way.
 - **Durations** from `task_complete` events (`duration_ms`) → the TURN LENGTH
   section.
 - **Sessions / model / project** from `session_meta` and `turn_context`.
@@ -89,6 +92,14 @@ So the Total view adds up consistently with Claude. Two real differences
   (`grep`/`cat`/`cargo`/…) so the tool list sees the real work instead of one
   undifferentiated shell bucket. A bare `exec_command` remains only when the
   wrapped command can't be parsed (the fallback bucket).
+- **Code Mode `exec`.** One `exec` call can start several shell commands,
+  each a `CommandExecution` item (`command`, else `parsed_cmd`) that names no
+  call. The first command after an `exec` names that call and each later one
+  counts as its own tool, so the tool list counts commands, as it does for
+  `exec_command`. An `exec` that started no shell command (only MCP calls,
+  file changes or image views) stays `exec`. A shell function call's own
+  `CommandExecution` item, and a command run from the composer
+  (`source: "user_shell"`), add nothing.
 - `apply_patch` = file edits.
 - **Fork copies.** A fork or spawned child that copies its parent's records
   writes them within milliseconds of the fork instant: the child's

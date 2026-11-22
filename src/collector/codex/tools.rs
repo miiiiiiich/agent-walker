@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::Value;
@@ -11,6 +12,20 @@ use crate::model::ToolEvent;
 use super::fork::Origin;
 use super::string_path;
 
+/// Code Mode's `exec` runs a script, and each shell command the script
+/// starts is an `item_completed` `CommandExecution` that names no call. The
+/// first command names the latest `exec` and each later one counts as its
+/// own tool, so an `exec` that started no shell command stays `exec`.
+#[derive(Default)]
+pub(super) struct ToolState {
+    /// This file's tool event for the latest `exec`, and whether a command
+    /// has named it yet.
+    latest_exec: Option<(usize, bool)>,
+    /// A shell function call's `CommandExecution` reuses its call id; the
+    /// call already counted under its command.
+    shell_calls: HashSet<String>,
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Per-line parse context; bundling into a struct adds noise for one caller."
@@ -22,10 +37,18 @@ pub(super) fn collect_tool_event(
     origin: &Origin,
     path: &Path,
     line_index: usize,
+    state: &mut ToolState,
     events: &mut FileEvents,
 ) {
-    if value.get("type").and_then(Value::as_str) != Some("response_item") {
-        return;
+    match value.get("type").and_then(Value::as_str) {
+        Some("response_item") => {}
+        Some("event_msg") => {
+            collect_command_item(
+                value, timestamp, session_id, origin, path, line_index, state, events,
+            );
+            return;
+        }
+        _ => return,
     }
     let Some(raw_name) = string_path(value, &["payload", "name"]) else {
         return;
@@ -34,12 +57,94 @@ pub(super) fn collect_tool_event(
     // (`exec_command` etc., usually `bash -lc "..."`); resolving the wrapper to
     // the real command basename lets the tool list show `grep`/`cargo` instead of
     // one undifferentiated "exec" bucket.
-    let tool_name = if is_shell_wrapper(&raw_name) {
+    let is_shell_call = is_shell_wrapper(&raw_name);
+    let is_code_mode_exec = raw_name == "exec"
+        && string_path(value, &["payload", "type"]).as_deref() == Some("custom_tool_call");
+    let tool_name = if is_shell_call {
         exec_command_basename(value).unwrap_or(raw_name)
     } else {
         raw_name
     };
-    let key = string_path(value, &["payload", "call_id"]).unwrap_or_else(|| {
+    let call_id = string_path(value, &["payload", "call_id"]);
+    if is_shell_call && let Some(call_id) = &call_id {
+        state.shell_calls.insert(call_id.clone());
+    }
+    if is_code_mode_exec {
+        state.latest_exec = Some((events.tool_events.len(), false));
+    }
+    let key = call_id.unwrap_or_else(|| {
+        format!(
+            "{}:{}:{}",
+            path.display(),
+            line_index + 1,
+            tool_name.as_str()
+        )
+    });
+    events.tool_events.push(KeyedToolEvent {
+        key: Some(key),
+        event: ToolEvent {
+            timestamp,
+            session_id: session_id.cloned(),
+            tool_name,
+            subagent_type: None,
+            source_kind: origin.source_kind(),
+        },
+    });
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Per-line parse context; bundling into a struct adds noise for one caller."
+)]
+fn collect_command_item(
+    value: &Value,
+    timestamp: Option<OffsetDateTime>,
+    session_id: Option<&String>,
+    origin: &Origin,
+    path: &Path,
+    line_index: usize,
+    state: &mut ToolState,
+    events: &mut FileEvents,
+) {
+    let Some(payload) = value.get("payload") else {
+        return;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return;
+    }
+    let Some(item) = payload.get("item") else {
+        return;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("CommandExecution") {
+        return;
+    }
+    // A command the person ran from the composer is not the model's tool.
+    if item.get("source").and_then(Value::as_str) == Some("user_shell") {
+        return;
+    }
+    let item_id = string_path(item, &["id"]);
+    if item_id
+        .as_ref()
+        .is_some_and(|id| state.shell_calls.contains(id))
+    {
+        return;
+    }
+    let Some((exec_index, named)) = state.latest_exec else {
+        return;
+    };
+    let Some(tool_name) = item
+        .get("command")
+        .and_then(command_name)
+        .or_else(|| item.pointer("/parsed_cmd/0/cmd").and_then(command_name))
+    else {
+        return;
+    };
+    if !named && let Some(exec) = events.tool_events.get_mut(exec_index) {
+        exec.event.tool_name = tool_name;
+        state.latest_exec = Some((exec_index, true));
+        return;
+    }
+    let key = item_id.unwrap_or_else(|| {
         format!(
             "{}:{}:{}",
             path.display(),
@@ -73,7 +178,12 @@ fn exec_command_basename(value: &Value) -> Option<String> {
         .and_then(Value::as_str)?;
     // JSON inside a string, so the line's own structure count never saw it.
     let parsed = parse_bounded(arguments)?;
-    let command = parsed.get("command").or_else(|| parsed.get("cmd"))?;
+    command_name(parsed.get("command").or_else(|| parsed.get("cmd"))?)
+}
+
+/// The basename of the program a command runs, from an argv array or a
+/// command line.
+fn command_name(command: &Value) -> Option<String> {
     let tokens = command_tokens(command)?;
     basename(effective_command(&tokens)?)
 }
@@ -165,6 +275,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::codex::collect;
+    use crate::collector::codex::tests::write_lines;
     use crate::collector::json::tests::over_structured_line;
 
     #[test]
@@ -219,6 +330,52 @@ mod tests {
                 "ls",           // {"cmd":"ls -la"} -> cmd fallback field
             ]
         );
+    }
+
+    /// Code Mode's `exec` names no command; the shell commands it starts are
+    /// `CommandExecution` items. A shell function call's own item, a command
+    /// run from the composer, and one before any `exec` add nothing.
+    #[test]
+    fn code_mode_exec_counts_the_shell_commands_it_started() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exec = |call: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
+            )
+        };
+        let command = |id: &str, source: &str, command: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","started_at_ms":1,"completed_at_ms":2,"item":{{"type":"CommandExecution","id":"{id}","source":"{source}",{command}}}}}}}"#
+            )
+        };
+        let zsh = |script: &str| format!(r#""command":["/bin/zsh","-lc","{script}"]"#);
+        let lines = [
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            command("exec-0", "unified_exec_startup", &zsh("pwd")),
+            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{\"cmd\":\"ls -la\"}"}}"#.to_owned(),
+            command("c1", "unified_exec_startup", &zsh("ls -la")),
+            exec("e1"),
+            command("exec-a", "unified_exec_startup", &zsh("rg foo src")),
+            command("exec-b", "unified_exec_startup", &zsh("cargo test")),
+            exec("e2"),
+            command("exec-u", "user_shell", &zsh("git status")),
+            exec("e3"),
+            command(
+                "exec-c",
+                "unified_exec_startup",
+                r#""command":42,"parsed_cmd":[{"type":"read","cmd":"cat README.md"}]"#,
+            ),
+        ];
+        write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let names: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|event| event.tool_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ls", "rg", "cargo", "exec", "cat"]);
     }
 
     /// Arguments are JSON inside a string, invisible to the line's own

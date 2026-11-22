@@ -26,7 +26,7 @@ mod usage;
 use billing::applied_tier;
 use fork::{Origin, in_fork_burst, is_copied_fork};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
-use tools::collect_tool_event;
+use tools::{ToolState, collect_tool_event};
 use turns::{
     PaceState, TurnItems, collect_duration_event, collect_effort_event, collect_interrupt_event,
     collect_pace_event, collect_permission_event,
@@ -104,6 +104,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut current_session_id = fallback_session_id(&logical_path);
     let mut pace_state = PaceState::default();
     let mut turn_items = TurnItems::default();
+    let mut tool_state = ToolState::default();
     let mut current_model = None;
     let mut current_project = None;
     let mut session_meta_count = 0usize;
@@ -229,6 +230,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             &origin,
             &logical_path,
             line_index,
+            &mut tool_state,
             &mut events,
         );
     }
