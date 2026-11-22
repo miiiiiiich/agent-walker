@@ -27,8 +27,8 @@ pub(super) struct ToolState {
     execs: HashMap<String, (usize, bool)>,
     /// Ids a `CommandExecution` item adds nothing under: a shell function
     /// call's item reuses its call id, already counted under its command, and
-    /// an item that already counted. A replay of the command that named an
-    /// `exec` added a second tool under its own id.
+    /// an item that already named a command. A replay of the command that
+    /// named an `exec` added a second tool under its own id.
     counted: HashSet<String>,
 }
 
@@ -139,13 +139,6 @@ fn collect_command_item(
     {
         return;
     }
-    let Some(exec_slot) = state
-        .latest_exec
-        .as_ref()
-        .and_then(|key| state.execs.get_mut(key))
-    else {
-        return;
-    };
     let Some(tool_name) = item
         .get("command")
         .and_then(command_name)
@@ -153,12 +146,19 @@ fn collect_command_item(
     else {
         return;
     };
-    // Settled only once it counts: an item that named no command, settled,
-    // dropped a later copy that did.
+    // Settled once it names a command, with or without an `exec` to count
+    // under: an item that named none, settled, dropped a later copy that did,
+    // and one from before any `exec`, left open, named the next on a replay.
     if let Some(id) = &item_id {
         state.counted.insert(id.clone());
     }
-    let (exec_index, named) = exec_slot;
+    let Some((exec_index, named)) = state
+        .latest_exec
+        .as_ref()
+        .and_then(|key| state.execs.get_mut(key))
+    else {
+        return;
+    };
     if !*named && let Some(exec) = events.tool_events.get_mut(*exec_index) {
         exec.event.tool_name = tool_name;
         *named = true;
@@ -400,7 +400,7 @@ mod tests {
 
     /// A command item written again counts once: the first command names the
     /// `exec`, so its replay neither adds a tool under its own id nor names
-    /// the next `exec`.
+    /// the next `exec`, and a command from before any `exec` stays outside.
     #[test]
     fn a_replayed_command_counts_once() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -416,12 +416,14 @@ mod tests {
         };
         let lines = [
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            command("exec-0", "pwd"),
             exec("e1"),
             command("exec-a", "rg foo src"),
             command("exec-a", "rg foo src"),
             command("exec-b", "cargo test"),
             command("exec-b", "cargo test"),
             exec("e2"),
+            command("exec-0", "pwd"),
             command("exec-a", "rg foo src"),
         ];
         write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
