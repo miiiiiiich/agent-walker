@@ -27,8 +27,8 @@ pub(super) struct ToolState {
     execs: HashMap<String, (usize, bool)>,
     /// Ids a `CommandExecution` item adds nothing under: a shell function
     /// call's item reuses its call id, already counted under its command, and
-    /// an item read before was settled then. A replay of the command that
-    /// named an `exec` added a second tool under its own id.
+    /// an item that already counted. A replay of the command that named an
+    /// `exec` added a second tool under its own id.
     counted: HashSet<String>,
 }
 
@@ -133,8 +133,9 @@ fn collect_command_item(
         return;
     }
     let item_id = string_path(item, &["id"]);
-    if let Some(id) = &item_id
-        && !state.counted.insert(id.clone())
+    if item_id
+        .as_ref()
+        .is_some_and(|id| state.counted.contains(id))
     {
         return;
     }
@@ -152,6 +153,11 @@ fn collect_command_item(
     else {
         return;
     };
+    // Settled only once it counts: an item that named no command, settled,
+    // dropped a later copy that did.
+    if let Some(id) = &item_id {
+        state.counted.insert(id.clone());
+    }
     let (exec_index, named) = exec_slot;
     if !*named && let Some(exec) = events.tool_events.get_mut(*exec_index) {
         exec.event.tool_name = tool_name;
@@ -394,7 +400,7 @@ mod tests {
 
     /// A command item written again counts once: the first command names the
     /// `exec`, so its replay neither adds a tool under its own id nor names
-    /// the next `exec`, and a command from before any `exec` stays outside.
+    /// the next `exec`.
     #[test]
     fn a_replayed_command_counts_once() {
         let temp = TempDir::new().expect("test tempdir should be created");
@@ -410,14 +416,12 @@ mod tests {
         };
         let lines = [
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
-            command("exec-0", "pwd"),
             exec("e1"),
             command("exec-a", "rg foo src"),
             command("exec-a", "rg foo src"),
             command("exec-b", "cargo test"),
             command("exec-b", "cargo test"),
             exec("e2"),
-            command("exec-0", "pwd"),
             command("exec-a", "rg foo src"),
         ];
         write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
@@ -430,6 +434,35 @@ mod tests {
             .map(|event| event.tool_name.as_str())
             .collect();
         assert_eq!(names, vec!["rg", "cargo", "exec"]);
+    }
+
+    /// An item that names no command adds nothing, so a later copy of it that
+    /// does still counts.
+    #[test]
+    fn a_command_item_without_a_command_does_not_settle_its_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let item = |id: &str, command: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup",{command}}}}}}}"#
+            )
+        };
+        let lines = [
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"e1","name":"exec","input":"run()"}}"#.to_owned(),
+            item("exec-a", r#""command":["/bin/zsh","-lc","ls"]"#),
+            item("exec-c", r#""command":42"#),
+            item("exec-c", r#""command":["/bin/zsh","-lc","rg foo src"]"#),
+        ];
+        write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let names: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|event| event.tool_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ls", "rg"]);
     }
 
     /// An `exec` call written again goes back to its first tool event: a
