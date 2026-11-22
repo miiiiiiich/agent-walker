@@ -63,14 +63,15 @@ impl CallLedger {
 
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
-    /// session keeps its snapshots. Of its readable rows only those after
-    /// its latest exit stay: the snapshots, with the receipts before them,
-    /// cover everything up to it, and dropping the later rows would lose
-    /// every call since that exit. Only exits count, even one whose delta is
-    /// zero: a receipt covers its own call, and taken as a snapshot it
-    /// dropped every store-only call before it. Runs before the receipts
-    /// are paired, so a receipt the exit's delta left out never gives way to
-    /// a row cut here.
+    /// session keeps its snapshots. Of a model's readable rows only those
+    /// after the latest exit with that model's counters stay: the snapshots,
+    /// with the receipts before them, cover everything up to it, and
+    /// dropping the later rows would lose every call since that exit. Only
+    /// exits count, each for the models it validated, even with a zero
+    /// delta: a receipt covers its own call, and an exit cut every model's
+    /// rows at once, including one whose counters it lacked. Runs before the
+    /// receipts are paired, so a receipt the exit's delta left out never
+    /// gives way to a row cut here.
     pub(super) fn fall_back_where_incomplete(
         &mut self,
         per_file: &[(PathBuf, Option<FileEvents>)],
@@ -78,29 +79,41 @@ impl CallLedger {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
-        let mut exits: HashMap<String, OffsetDateTime> = HashMap::new();
+        let mut exits: HashMap<String, HashMap<String, OffsetDateTime>> = HashMap::new();
         for keyed in per_file
             .iter()
             .filter_map(|(_, events)| events.as_ref())
             .flat_map(|events| &events.usage_events)
             .filter(|keyed| keyed.event.granularity == UsageGranularity::Aggregate)
         {
-            if let (Some(sid), Some(time)) =
-                (keyed.event.session_id.as_ref(), keyed.event.timestamp)
-                && (self.unattributed || self.incomplete.contains(sid))
+            let event = &keyed.event;
+            if let (Some(sid), Some(model), Some(time)) = (
+                event.session_id.as_ref(),
+                event.model.as_ref(),
+                event.timestamp,
+            ) && (self.unattributed || self.incomplete.contains(sid))
             {
                 exits
                     .entry(sid.clone())
+                    .or_default()
+                    .entry(model.clone())
                     .and_modify(|exit| *exit = (*exit).max(time))
                     .or_insert(time);
             }
         }
         self.events.usage_events.retain(|keyed| {
-            let (Some(sid), Some(time)) = (keyed.event.session_id.as_ref(), keyed.event.timestamp)
-            else {
+            let event = &keyed.event;
+            let (Some(sid), Some(model), Some(time)) = (
+                event.session_id.as_ref(),
+                event.model.as_ref(),
+                event.timestamp,
+            ) else {
                 return true;
             };
-            exits.get(sid).is_none_or(|exit| time > *exit)
+            exits
+                .get(sid)
+                .and_then(|models| models.get(model))
+                .is_none_or(|exit| time > *exit)
         });
         self.fallback = exits.into_keys().collect();
     }
@@ -849,6 +862,67 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220]);
+    }
+
+    /// An exit with no usable counters for a model covers none of that
+    /// model's rows, even when it added nothing for another model.
+    #[test]
+    fn an_exit_that_adds_nothing_cuts_only_its_models_rows() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exit = r#"{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{"usageAccountingWatermarks":{"s1":1},"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}},"claude-haiku-4.5":{"usage":{}}}}}"#;
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{exit}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 100, 10),
+                Call {
+                    model: "claude-haiku-4.5",
+                    ..call("s1", "2026-07-27T10:30:00.000Z", 300, 30)
+                },
+                call("s1", "not a time", 50, 5),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
+    /// An exit that added nothing still covers its model's rows up to it,
+    /// including one too far from its receipt to pair.
+    #[test]
+    fn an_exit_that_adds_nothing_covers_its_models_unpaired_rows() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:02:30.000Z", 100, 10),
+                call("s1", "not a time", 50, 5),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110]);
     }
 
     /// A call between an exit that added nothing and the next receipt, with

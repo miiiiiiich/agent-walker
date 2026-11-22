@@ -92,15 +92,16 @@ user.
   dropped, as Copilot drops it from its own totals. If any of a session's
   rows can't be read (a `created_at` that doesn't parse, a value of the
   wrong type), that session keeps all its snapshots: superseding them from
-  the readable rows alone would lose the unreadable row's usage. Its
-  readable rows up to its latest exit are dropped (that exit's cumulative,
-  with the receipts before it, already covers them), even when the exit
-  added nothing; only an exit with usable counters is a snapshot here. Its
-  rows after the exit and its receipts are paired as above, so a receipt
-  whose row is the unreadable one still counts. A session with no exit
-  keeps all its readable rows. A row that can't be tied to a session at all
-  applies the same fallback to every session. An unreadable row dated after
-  the latest exit, whose call left no receipt, can't be counted anywhere.
+  the readable rows alone would lose the unreadable row's usage. A model's
+  readable rows up to the latest exit with usable counters for that model
+  are dropped (that cumulative, with the receipts before it, already covers
+  them), even when the exit added nothing for it; an exit without a
+  model's counters covers none of its rows. The rows left and the receipts
+  are paired as above, so a receipt whose row is the unreadable one still
+  counts. A session with no exit keeps all its readable rows. A row that
+  can't be tied to a session at all applies the same fallback to every
+  session. An unreadable row dated after the latest exit, whose call left
+  no receipt, can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 

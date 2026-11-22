@@ -355,8 +355,6 @@ fn collect_shutdown_usage(
     else {
         return;
     };
-    let mut validated = false;
-    let mut counted = false;
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
             continue;
@@ -371,7 +369,6 @@ fn collect_shutdown_usage(
         {
             continue;
         }
-        validated = true;
         let current = RawCounters {
             input: u64_field(usage, "inputTokens"),
             output: u64_field(usage, "outputTokens"),
@@ -396,10 +393,18 @@ fn collect_shutdown_usage(
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();
+        // An exit that adds nothing for a model still marks how far that
+        // model's cumulative reaches, which the store fallback cuts its rows
+        // at; the empty event goes before merging.
         if usage.token_volume() == 0 {
+            if line.session_id.is_some() {
+                events.usage_events.push(KeyedUsageEvent {
+                    key: None,
+                    event: exit_usage(line, Some(model), project, usage),
+                });
+            }
             continue;
         }
-        counted = true;
         let key = match (line.event_id, line.session_id) {
             (Some(id), _) => Some(format!("copilot:{id}:{model}")),
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
@@ -408,14 +413,6 @@ fn collect_shutdown_usage(
         events.usage_events.push(KeyedUsageEvent {
             key,
             event: exit_usage(line, Some(model), project, usage),
-        });
-    }
-    // An exit that adds nothing still marks how far its cumulative reaches,
-    // which the store fallback cuts at; the empty event goes before merging.
-    if validated && !counted && line.session_id.is_some() {
-        events.usage_events.push(KeyedUsageEvent {
-            key: None,
-            event: exit_usage(line, None, project, TokenUsage::default()),
         });
     }
 }
