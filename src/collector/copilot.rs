@@ -1,4 +1,5 @@
 mod ledger;
+mod receipts;
 mod segments;
 
 use std::collections::HashMap;
@@ -22,7 +23,8 @@ use crate::model::{
 };
 use crate::timestamp::parse_rfc3339;
 
-use ledger::{read_call_ledger, supersede_snapshots};
+use ledger::read_call_ledger;
+use receipts::Receipts;
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -53,8 +55,9 @@ pub fn collect(
         )
     };
     if let Some(mut ledger) = ledger {
+        ledger.yield_catch_up_to_receipts(&per_file);
         ledger.fall_back_where_incomplete(&per_file);
-        supersede_snapshots(&mut per_file, &ledger.first_call);
+        ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
     }
     merge_into(&mut collection, per_file);
@@ -152,6 +155,7 @@ struct SessionState {
     last_nano_aiu: u64,
     credit_index: usize,
     turn_starts: HashMap<String, OffsetDateTime>,
+    receipts: Receipts,
 }
 
 impl SessionState {
@@ -202,6 +206,10 @@ impl SessionState {
             Some("assistant.turn_end") => {
                 collect_turn_duration(value, &line, &mut self.turn_starts, events);
             }
+            Some("session.usage_record") => {
+                self.receipts
+                    .collect(value, &line, self.project.as_deref(), events);
+            }
             Some("session.usage_checkpoint") => {
                 collect_credit_delta(
                     value,
@@ -224,6 +232,7 @@ impl SessionState {
                     &line,
                     self.project.as_deref(),
                     &mut self.cumulative,
+                    &mut self.receipts,
                     self.shutdown_index,
                     events,
                 );
@@ -260,6 +269,14 @@ impl RawCounters {
             || self.reasoning < other.reasoning
     }
 
+    fn add(&mut self, other: Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+    }
+
     fn minus(self, other: Self) -> Self {
         Self {
             input: self.input.saturating_sub(other.input),
@@ -292,6 +309,7 @@ fn collect_shutdown_usage(
     line: &Line,
     project: Option<&str>,
     cumulative: &mut HashMap<String, RawCounters>,
+    receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
 ) {
@@ -309,6 +327,7 @@ fn collect_shutdown_usage(
     else {
         return;
     };
+    let covered = receipts.covered_by(value);
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
             continue;
@@ -339,7 +358,11 @@ fn collect_shutdown_usage(
         } else {
             previous
         };
-        let delta = current.minus(base);
+        // The receipts already counted their calls; what is left is usage
+        // they don't carry, such as calls from before the CLI wrote them.
+        let delta = current
+            .minus(base)
+            .minus(covered.get(model).copied().unwrap_or_default());
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();

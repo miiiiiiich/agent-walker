@@ -2,28 +2,107 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use time::macros::format_description;
-use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime, PrimitiveDateTime, UtcOffset};
 
 use rusqlite::types::Type;
 
 use crate::collector::ident::ident_string;
 use crate::collector::store::{open_store, read_deadline};
 use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
-use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent};
+use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent, UsageGranularity};
 use crate::timestamp::{parse_rfc3339, plausible};
 
 use super::{MAX_SANE_TOKENS, RawCounters};
 
+/// Rows the CLI caught up from a session's log carry an `event_id` with this
+/// prefix; the rest it recorded live.
+const CATCH_UP_PREFIX: &str = "usage-record:";
+
+/// Copilot's own totals drop a caught-up row dated from 60 s before the
+/// session's first live row on, as a copy of a live one. The receipts those
+/// rows are caught up from get the same cut.
+const LIVE_SLACK: Duration = Duration::seconds(60);
+
 pub(super) struct CallLedger {
     pub(super) events: FileEvents,
-    pub(super) first_call: HashMap<String, OffsetDateTime>,
+    first_call: HashMap<String, OffsetDateTime>,
+    first_live: HashMap<String, OffsetDateTime>,
+    catch_up: Vec<CaughtUp>,
     /// Sessions with at least one row that couldn't be read.
     incomplete: HashSet<String>,
     /// A row that couldn't even be tied to a session.
     unattributed: bool,
 }
 
+struct CaughtUp {
+    session: String,
+    time: OffsetDateTime,
+    key: Option<String>,
+}
+
 impl CallLedger {
+    /// Copilot's own cut: a caught-up row dated from its session's first
+    /// live row (less the slack) on is a copy of a live one.
+    fn admit_catch_up(&mut self, caught_up: Vec<CaughtUp>) {
+        let mut copies: HashSet<String> = HashSet::new();
+        for row in caught_up {
+            let copy = self
+                .first_live
+                .get(&row.session)
+                .is_some_and(|live| row.time >= live.checked_sub(LIVE_SLACK).unwrap_or(*live));
+            if copy {
+                copies.extend(row.key);
+            } else {
+                earliest(&mut self.first_call, &row.session, row.time);
+                self.catch_up.push(row);
+            }
+        }
+        drop_keys(&mut self.events, &copies);
+    }
+
+    /// A caught-up row is a copy of a receipt, so where the session's log
+    /// yielded receipts, its rows from the first receipt on give way to them.
+    /// Rows before it stay: their receipts may sit in a segment that is gone.
+    pub(super) fn yield_catch_up_to_receipts(
+        &mut self,
+        per_file: &[(PathBuf, Option<FileEvents>)],
+    ) {
+        if self.catch_up.is_empty() {
+            return;
+        }
+        let mut first_receipt: HashMap<&String, OffsetDateTime> = HashMap::new();
+        for keyed in per_file
+            .iter()
+            .filter_map(|(_, events)| events.as_ref())
+            .flat_map(|events| &events.usage_events)
+            .filter(|keyed| keyed.event.granularity == UsageGranularity::Call)
+        {
+            if let (Some(sid), Some(time)) =
+                (keyed.event.session_id.as_ref(), keyed.event.timestamp)
+            {
+                first_receipt
+                    .entry(sid)
+                    .and_modify(|first| *first = (*first).min(time))
+                    .or_insert(time);
+            }
+        }
+        let mut copies: HashSet<String> = HashSet::new();
+        self.catch_up.retain(|row| {
+            let copy = first_receipt
+                .get(&row.session)
+                .is_some_and(|first| row.time >= *first);
+            if copy && let Some(key) = &row.key {
+                copies.insert(key.clone());
+            }
+            !copy
+        });
+        drop_keys(&mut self.events, &copies);
+        self.first_call.clone_from(&self.first_live);
+        for row in &self.catch_up {
+            earliest(&mut self.first_call, &row.session, row.time);
+        }
+    }
+
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of its readable rows only those after
@@ -68,7 +147,68 @@ impl CallLedger {
         });
         self.first_call
             .retain(|sid, _| falls_back_until(sid).is_none());
+        self.first_live
+            .retain(|sid, _| falls_back_until(sid).is_none());
     }
+
+    /// From a session's first recorded call on, its rows replace its
+    /// snapshots; earlier snapshots still count. Its receipts give way from
+    /// its first live row on, less the slack Copilot allows. A fork's copy of
+    /// a superseded event (same key) is dropped too, or the parent's calls
+    /// would count again under the fork.
+    pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+        let mut superseded: HashSet<String> = HashSet::new();
+        for events in per_file
+            .iter_mut()
+            .filter_map(|(_, events)| events.as_mut())
+        {
+            events.usage_events.retain(|keyed| {
+                let Some(sid) = keyed.event.session_id.as_ref() else {
+                    return true;
+                };
+                let cutoff = match keyed.event.granularity {
+                    UsageGranularity::Aggregate => self.first_call.get(sid).copied(),
+                    UsageGranularity::Call => self
+                        .first_live
+                        .get(sid)
+                        .map(|live| live.checked_sub(LIVE_SLACK).unwrap_or(*live)),
+                };
+                let Some(cutoff) = cutoff else {
+                    return true;
+                };
+                let before_store = keyed.event.timestamp.is_some_and(|time| time < cutoff);
+                if !before_store && let Some(key) = &keyed.key {
+                    superseded.insert(key.clone());
+                }
+                before_store
+            });
+        }
+        if superseded.is_empty() {
+            return;
+        }
+        for events in per_file
+            .iter_mut()
+            .filter_map(|(_, events)| events.as_mut())
+        {
+            drop_keys(events, &superseded);
+        }
+    }
+}
+
+fn drop_keys(events: &mut FileEvents, keys: &HashSet<String>) {
+    if keys.is_empty() {
+        return;
+    }
+    events
+        .usage_events
+        .retain(|keyed| keyed.key.as_ref().is_none_or(|key| !keys.contains(key)));
+}
+
+fn earliest(firsts: &mut HashMap<String, OffsetDateTime>, session: &str, time: OffsetDateTime) {
+    firsts
+        .entry(session.to_owned())
+        .and_modify(|first| *first = (*first).min(time))
+        .or_insert(time);
 }
 
 const CALL_COLUMNS: [&str; 11] = [
@@ -85,10 +225,15 @@ const CALL_COLUMNS: [&str; 11] = [
     "created_at",
 ];
 
-const CALLS_SQL: &str = "SELECT e.id, e.session_id, e.model, e.input_tokens, e.output_tokens, \
-     e.cache_read_tokens, e.cache_write_tokens, e.reasoning_tokens, e.agent_id, e.initiator, \
-     e.created_at, s.cwd \
-     FROM assistant_usage_events e LEFT JOIN sessions s ON s.id = e.session_id";
+/// `event_id` is selected as NULL from a store that predates the column.
+fn calls_sql(event_id: &str) -> String {
+    format!(
+        "SELECT e.id, e.session_id, e.model, e.input_tokens, e.output_tokens, \
+         e.cache_read_tokens, e.cache_write_tokens, e.reasoning_tokens, e.agent_id, e.initiator, \
+         e.created_at, {event_id}, s.cwd \
+         FROM assistant_usage_events e LEFT JOIN sessions s ON s.id = e.session_id"
+    )
+}
 
 struct CallRow {
     id: i64,
@@ -97,6 +242,7 @@ struct CallRow {
     counters: RawCounters,
     subagent: bool,
     created_at: Option<String>,
+    catch_up: bool,
     cwd: Option<String>,
 }
 
@@ -118,7 +264,12 @@ pub(super) fn read_call_ledger(
     {
         return None;
     }
-    let mut stmt = store.prepare(CALLS_SQL).ok()?;
+    let event_id = if store.has_table("assistant_usage_events", &["event_id"]) {
+        "e.event_id"
+    } else {
+        "NULL"
+    };
+    let mut stmt = store.prepare(&calls_sql(event_id)).ok()?;
     // The session id is read on its own so a row that fails elsewhere still
     // names the session it leaves incomplete.
     let rows = stmt
@@ -126,7 +277,7 @@ pub(super) fn read_call_ledger(
             // Only the call's own columns: the joined `cwd` repeats the one
             // session row on every call, and charging it per call cut a
             // 10,000-call ledger short.
-            store.charge(row, CALL_COLUMNS.len())?;
+            store.charge(row, CALL_COLUMNS.len() + 1)?;
             Ok((ident_column(row, 1).ok(), call_row(row)))
         })
         .ok()?;
@@ -134,9 +285,12 @@ pub(super) fn read_call_ledger(
     let mut ledger = CallLedger {
         events: FileEvents::default(),
         first_call: HashMap::new(),
+        first_live: HashMap::new(),
+        catch_up: Vec::new(),
         incomplete: HashSet::new(),
         unattributed: false,
     };
+    let mut caught_up: Vec<CaughtUp> = Vec::new();
     for row in rows {
         ledger.events.lines_seen += 1;
         let Ok((session_id, call)) = row else {
@@ -160,21 +314,27 @@ pub(super) fn read_call_ledger(
             }
             continue;
         };
-        ledger
-            .first_call
-            .entry(row.session_id.clone())
-            .and_modify(|first| *first = (*first).min(timestamp))
-            .or_insert(timestamp);
         ledger.events.session_touches.push(SessionTouch {
             timestamp,
             session_id: row.session_id.clone(),
         });
         let usage = row.counters.to_usage();
-        if usage.token_volume() == 0 {
-            continue;
+        let key = (usage.token_volume() > 0).then(|| format!("copilot-call:{}", row.id));
+        if row.catch_up {
+            caught_up.push(CaughtUp {
+                session: row.session_id.clone(),
+                time: timestamp,
+                key: key.clone(),
+            });
+        } else {
+            earliest(&mut ledger.first_live, &row.session_id, timestamp);
+            earliest(&mut ledger.first_call, &row.session_id, timestamp);
         }
+        let Some(key) = key else {
+            continue;
+        };
         ledger.events.usage_events.push(KeyedUsageEvent {
-            key: Some(format!("copilot-call:{}", row.id)),
+            key: Some(key),
             event: UsageEvent {
                 timestamp: Some(timestamp),
                 session_id: Some(row.session_id),
@@ -192,6 +352,7 @@ pub(super) fn read_call_ledger(
             },
         });
     }
+    ledger.admit_catch_up(caught_up);
     ledger.events.compress_touches(local_offset);
     Some(ledger)
 }
@@ -217,53 +378,11 @@ fn call_row(row: &rusqlite::Row) -> rusqlite::Result<CallRow> {
         subagent: row.get::<_, Option<String>>(8)?.is_some()
             || row.get::<_, Option<String>>(9)?.as_deref() == Some("sub-agent"),
         created_at: row.get(10)?,
-        cwd: row.get(11)?,
+        catch_up: row
+            .get::<_, Option<String>>(11)?
+            .is_some_and(|id| id.starts_with(CATCH_UP_PREFIX)),
+        cwd: row.get(12)?,
     })
-}
-
-/// From a session's first recorded call on, its rows replace its snapshots;
-/// earlier snapshots still count. A fork's copy of a superseded snapshot
-/// (same key) is dropped too, or the parent's calls would count again under
-/// the fork.
-pub(super) fn supersede_snapshots(
-    per_file: &mut [(PathBuf, Option<FileEvents>)],
-    first_call: &HashMap<String, OffsetDateTime>,
-) {
-    let mut superseded: HashSet<String> = HashSet::new();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let Some(first) = keyed
-                .event
-                .session_id
-                .as_ref()
-                .and_then(|sid| first_call.get(sid))
-            else {
-                return true;
-            };
-            let before_store = keyed.event.timestamp.is_some_and(|time| time < *first);
-            if !before_store && let Some(key) = &keyed.key {
-                superseded.insert(key.clone());
-            }
-            before_store
-        });
-    }
-    if superseded.is_empty() {
-        return;
-    }
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            keyed
-                .key
-                .as_ref()
-                .is_none_or(|key| !superseded.contains(key))
-        });
-    }
 }
 
 fn parse_db_time(raw: &str) -> Option<OffsetDateTime> {
@@ -294,6 +413,7 @@ mod tests {
 
     use super::*;
     use crate::collector::copilot::collect;
+    use crate::collector::copilot::receipts::tests::receipt;
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
 
     struct Call<'a> {
@@ -583,6 +703,113 @@ mod tests {
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(session_volumes(&collection, "s1"), vec![300, 50]);
         assert_eq!(session_volumes(&collection, "s2"), vec![50]);
+    }
+
+    /// Gives rows (by insertion order, from 1) the store's `event_id`.
+    fn set_event_ids(root: &Path, ids: &[(i64, &str)]) {
+        let conn = Connection::open(root.join("session-store.db")).expect("store should open");
+        conn.execute_batch("ALTER TABLE assistant_usage_events ADD COLUMN event_id TEXT")
+            .expect("event_id column should be added");
+        for (row, event_id) in ids {
+            conn.execute(
+                "UPDATE assistant_usage_events SET event_id = ?1 WHERE id = ?2",
+                rusqlite::params![event_id, row],
+            )
+            .expect("event_id should be set");
+        }
+    }
+
+    #[test]
+    fn caught_up_row_from_just_before_the_first_live_row_is_a_copy() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("s1", "2026-07-27T09:59:30.000Z", 200, 20),
+                call("s1", "2026-07-27T09:50:00.000Z", 300, 30),
+            ],
+        );
+        set_event_ids(
+            temp.path(),
+            &[(1, "live-1"), (2, "usage-record:b"), (3, "usage-record:c")],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(session_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
+    #[test]
+    fn a_receipt_and_the_live_row_of_its_call_count_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T09:50:00.000Z", "s1", 1, 300, 30),
+                receipt("2026-07-27T10:00:00.000Z", "s1", 2, 100, 10),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(session_volumes(&collection, "s1"), vec![330, 110]);
+        assert_eq!(
+            collection.usage_events[1].project.as_deref(),
+            Some("Users/me/code/app")
+        );
+    }
+
+    /// With no live rows, caught-up rows give way to the receipts they copy
+    /// from the first receipt on, and the calls after the catch-up still
+    /// count. An earlier caught-up row, whose receipt is gone, stays and
+    /// supersedes the exit that also carries it.
+    #[test]
+    fn caught_up_rows_give_way_to_the_receipts_they_copy() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                receipt("2026-07-27T10:01:00.000Z", "s1", 2, 200, 20),
+                receipt("2026-07-27T10:02:00.000Z", "s1", 3, 300, 30),
+                shutdown("e-1", "2026-07-27T11:00:00.000Z", 1_100, 110).replacen(
+                    r#""data":{"#,
+                    r#""data":{"usageAccountingWatermarks":{"s1":3},"#,
+                    1
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T09:00:00.000Z", 500, 50),
+                call("s1", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("s1", "2026-07-27T10:01:00.000Z", 200, 20),
+            ],
+        );
+        set_event_ids(
+            temp.path(),
+            &[
+                (1, "usage-record:a"),
+                (2, "usage-record:b"),
+                (3, "usage-record:c"),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let mut volumes = session_volumes(&collection, "s1");
+        volumes.sort_unstable();
+        assert_eq!(volumes, vec![110, 220, 330, 550]);
     }
 
     #[test]
