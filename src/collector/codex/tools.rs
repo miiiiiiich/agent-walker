@@ -21,9 +21,11 @@ pub(super) struct ToolState {
     /// This file's tool event for the latest `exec`, and whether a command
     /// has named it yet.
     latest_exec: Option<(usize, bool)>,
-    /// A shell function call's `CommandExecution` reuses its call id; the
-    /// call already counted under its command.
-    shell_calls: HashSet<String>,
+    /// Ids a `CommandExecution` item adds nothing under: a shell function
+    /// call's item reuses its call id, already counted under its command, and
+    /// an item read before was settled then. A replay of the command that
+    /// named an `exec` added a second tool under its own id.
+    counted: HashSet<String>,
 }
 
 #[allow(
@@ -67,7 +69,7 @@ pub(super) fn collect_tool_event(
     };
     let call_id = string_path(value, &["payload", "call_id"]);
     if is_shell_call && let Some(call_id) = &call_id {
-        state.shell_calls.insert(call_id.clone());
+        state.counted.insert(call_id.clone());
     }
     if is_code_mode_exec {
         state.latest_exec = Some((events.tool_events.len(), false));
@@ -123,9 +125,8 @@ fn collect_command_item(
         return;
     }
     let item_id = string_path(item, &["id"]);
-    if item_id
-        .as_ref()
-        .is_some_and(|id| state.shell_calls.contains(id))
+    if let Some(id) = &item_id
+        && !state.counted.insert(id.clone())
     {
         return;
     }
@@ -376,6 +377,46 @@ mod tests {
             .map(|event| event.tool_name.as_str())
             .collect();
         assert_eq!(names, vec!["ls", "rg", "cargo", "exec", "cat"]);
+    }
+
+    /// A command item written again counts once: the first command names the
+    /// `exec`, so its replay neither adds a tool under its own id nor names
+    /// the next `exec`, and a command from before any `exec` stays outside.
+    #[test]
+    fn a_replayed_command_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exec = |call: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
+            )
+        };
+        let command = |id: &str, script: &str| {
+            format!(
+                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup","command":["/bin/zsh","-lc","{script}"]}}}}}}"#
+            )
+        };
+        let lines = [
+            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            command("exec-0", "pwd"),
+            exec("e1"),
+            command("exec-a", "rg foo src"),
+            command("exec-a", "rg foo src"),
+            command("exec-b", "cargo test"),
+            command("exec-b", "cargo test"),
+            exec("e2"),
+            command("exec-0", "pwd"),
+            command("exec-a", "rg foo src"),
+        ];
+        write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let names: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .map(|event| event.tool_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["rg", "cargo", "exec"]);
     }
 
     /// Arguments are JSON inside a string, invisible to the line's own
