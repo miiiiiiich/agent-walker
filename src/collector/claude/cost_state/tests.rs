@@ -585,6 +585,57 @@ fn a_sibling_fork_is_not_taken_for_the_parent() {
     assert_eq!(reads(&whole, ["pa", "f1", "f2"]), [50, 10, 5]);
 }
 
+/// A sibling whose own calls were all a subagent's leaves no main call to
+/// tell it by, but its total is more than the later fork started from.
+#[test]
+fn a_sibling_grown_by_a_subagent_is_not_taken_for_the_parent() {
+    let temp = TempDir::new().expect("tempdir");
+    write(
+        temp.path(),
+        "parent.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+            cost_state("pa", 3, &[("claude-opus-5", 0, 1, 0, 149, 0, 0)]),
+        ],
+    );
+    write(
+        temp.path(),
+        "sibling.jsonl",
+        &[
+            assistant("2026-06-06T09:00:00Z", "sb", "m1", "claude-opus-5", 0, 100),
+            cost_state("sb", 3, &[("claude-opus-5", 0, 2, 0, 178, 0, 0)]),
+        ],
+    );
+    write(
+        &temp.path().join("sibling").join("subagents"),
+        "agent-a1.jsonl",
+        &[assistant(
+            "2026-06-06T09:05:00Z",
+            "sb",
+            "s1",
+            "claude-opus-5",
+            0,
+            29,
+        )],
+    );
+    write(
+        temp.path(),
+        "fork.jsonl",
+        &[
+            assistant("2026-06-07T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-07T09:05:00Z", "fk", "f1", "claude-opus-5", 0, 9),
+            cost_state("fk", 3, &[("claude-opus-5", 0, 2, 0, 149 + 9 + 10, 0, 0)]),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    assert_eq!(
+        ["pa", "sb", "fk"].map(|session| reads_of(&collection, session)),
+        [49, 0, 10]
+    );
+}
+
 /// A fork of a fork is compared with the fork it was made from, the nearest
 /// of the two sessions it shares calls with.
 #[test]
@@ -684,7 +735,14 @@ fn tied_parents_are_chosen_the_same_way_every_time() {
         &[
             assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
             assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
-            cost_state("fk", 7, &[("claude-opus-5", 0, 2, 0, 149 + 50 + 20, 0, 0)]),
+            cost_state(
+                "fk",
+                7,
+                &[
+                    ("claude-opus-5", 0, 2, 0, 149 + 50 + 20, 0, 0),
+                    ("claude-haiku-5-5", 50, 0, 0, 0, 0, 0),
+                ],
+            ),
         ],
     );
 

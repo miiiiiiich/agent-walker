@@ -135,17 +135,23 @@ fn runs<'a>(rows: &'a [CostStateRow], restarts: &[bool]) -> Vec<&'a CostStateRow
 
 fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
     earlier.models.iter().all(|(model, before)| {
-        later.models.get(model).is_some_and(|after| {
-            after.input_tokens >= before.input_tokens
-                && after.output_tokens >= before.output_tokens
-                && after.cache_creation_input_tokens >= before.cache_creation_input_tokens
-                && after.cache_read_input_tokens >= before.cache_read_input_tokens
-                && after.cache_creation_ephemeral_5m_input_tokens
-                    >= before.cache_creation_ephemeral_5m_input_tokens
-                && after.cache_creation_ephemeral_1h_input_tokens
-                    >= before.cache_creation_ephemeral_1h_input_tokens
-        })
+        later
+            .models
+            .get(model)
+            .is_some_and(|after| at_least(after, before))
     })
+}
+
+/// Whether every counter of `usage` is at least that of `floor`.
+pub(super) fn at_least(usage: &TokenUsage, floor: &TokenUsage) -> bool {
+    usage.input_tokens >= floor.input_tokens
+        && usage.output_tokens >= floor.output_tokens
+        && usage.cache_creation_input_tokens >= floor.cache_creation_input_tokens
+        && usage.cache_read_input_tokens >= floor.cache_read_input_tokens
+        && usage.cache_creation_ephemeral_5m_input_tokens
+            >= floor.cache_creation_ephemeral_5m_input_tokens
+        && usage.cache_creation_ephemeral_1h_input_tokens
+            >= floor.cache_creation_ephemeral_1h_input_tokens
 }
 
 /// Each call belongs to the first run whose total was written after it. The

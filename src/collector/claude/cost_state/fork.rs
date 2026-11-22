@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{SourceKind, TokenUsage};
 
 use super::CostStateRow;
+use super::spread::at_least;
 use super::transcript::Call;
 
 struct Discount<'a> {
@@ -48,6 +49,9 @@ pub(super) fn discount_forks<'a>(
             else {
                 continue;
             };
+            let Some(restored) = logs[fork].iter().find(|row| row.start_time == Some(start)) else {
+                continue;
+            };
             let parent = sessions
                 .iter()
                 .filter(|&&other| other != fork)
@@ -64,9 +68,14 @@ pub(super) fn discount_forks<'a>(
                     // Taken when the stamp before it precedes the fork's
                     // first call, though it may be written a little later:
                     // a later total is larger, so the doubt subtracts more.
+                    // The fork's first total holds what it restored, so one
+                    // with more of any counter is not it: a sibling whose
+                    // own calls were all a subagent's tied with the parent
+                    // below and won on its larger total.
                     let base = logs.get(other)?.iter().rfind(|row| {
                         row.start_time == Some(start)
                             && row.before.is_none_or(|before| before < first_own)
+                            && within(row, restored)
                     })?;
                     Some((other, base))
                 })
@@ -124,6 +133,13 @@ fn holding(rows: &[CostStateRow], restarts: &[bool], start: i64) -> Vec<usize> {
         }
     }
     held
+}
+
+fn within(base: &CostStateRow, restored: &CostStateRow) -> bool {
+    let zero = TokenUsage::default();
+    base.models
+        .iter()
+        .all(|(model, usage)| at_least(restored.models.get(model).unwrap_or(&zero), usage))
 }
 
 /// The calls `other` made after the last one it shares with the fork, up to
