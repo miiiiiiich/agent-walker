@@ -25,16 +25,25 @@ use label::{display_name_label, selected_models, served_model_label};
 use proto::{message_field, proto_timestamp_ms, string_field, varint_field};
 use trajectory::trajectory_meta;
 
+pub(in crate::collector::agy) use trajectory::Subagent;
+
 mod label;
 mod proto;
 mod trajectory;
+
+pub(super) struct Usage {
+    pub(super) events: Vec<UsageEvent>,
+    /// Subagent conversations by their own id, for the log and history lines
+    /// that name one.
+    pub(super) subagents: HashMap<String, Subagent>,
+}
 
 pub(super) fn collect_usage(
     stores: &[PathBuf],
     mtime_floor: Option<SystemTime>,
     local_offset: UtcOffset,
     stats: &mut ScanStats,
-) -> Vec<UsageEvent> {
+) -> Usage {
     let floor = mtime_floor.and_then(systemtime_to_ms);
     let mut dbs = Vec::new();
     for store in stores {
@@ -54,6 +63,7 @@ pub(super) fn collect_usage(
     }
 
     let mut generations = Generations::default();
+    let mut subagents = HashMap::new();
     let deadline = read_deadline();
     for db in dbs {
         let newest = newest_mtime_ms(&db);
@@ -66,12 +76,15 @@ pub(super) fn collect_usage(
         {
             continue;
         }
-        parse_db(&db, newest, deadline, local_offset, stats, &mut generations);
+        let read = parse_db(&db, newest, deadline, local_offset, stats, &mut generations);
+        if let Some((conversation_id, subagent)) = read {
+            subagents.insert(conversation_id, subagent);
+        }
     }
     // Apply the window only after every copy has been weighed: filtering per row
     // lets an out-of-window copy (dated from its conversation start) claim the
     // id and shadow an in-window copy from the other store.
-    generations
+    let events = generations
         .rows
         .into_iter()
         .map(|(_, event)| event)
@@ -82,7 +95,8 @@ pub(super) fn collect_usage(
                     .is_some_and(|ts| ts.unix_timestamp_nanos() / 1_000_000 < i128::from(floor))
             })
         })
-        .collect()
+        .collect();
+    Usage { events, subagents }
 }
 
 /// How a row's time was found, weakest first.
@@ -140,6 +154,7 @@ fn newest_mtime_ms(db: &Path) -> Option<i64> {
         .max()
 }
 
+/// Returns the conversation's id with its subagent record when it is one.
 fn parse_db(
     db: &Path,
     db_mtime_ms: Option<i64>,
@@ -147,43 +162,46 @@ fn parse_db(
     local_offset: UtcOffset,
     stats: &mut ScanStats,
     generations: &mut Generations,
-) {
+) -> Option<(String, Subagent)> {
     // Skipped unopened: there is nothing to read yet, and a 0-byte file is still
     // in rollback-journal mode, where our read lock would block agy's first write.
     if std::fs::metadata(db).is_ok_and(|meta| meta.len() == 0) {
-        return;
+        return None;
     }
     let Some(store) = open_store(db, deadline) else {
         stats.unreadable_files += 1;
-        return;
+        return None;
     };
     stats.files_seen += 1;
-    let session_id = db
+    let conversation_id = db
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("antigravity")
         .to_owned();
-    let (session_ts, project) = trajectory_meta(&store);
+    let trajectory = trajectory_meta(&store, &conversation_id);
     // Fallback chain for a row's time: its own stamp → its step's created-at →
     // the conversation's created-at → the DB file mtime (so a missing timestamp
     // dates the event near when the file was written, never 1970).
-    let fallback = if session_ts > 0 {
-        (TimeSource::ConversationStart, session_ts)
+    let fallback = if trajectory.started_ms > 0 {
+        (TimeSource::ConversationStart, trajectory.started_ms)
     } else {
         (TimeSource::FileMtime, db_mtime_ms.unwrap_or(0))
     };
+    let subagent = trajectory
+        .subagent
+        .map(|subagent| (conversation_id.clone(), subagent));
 
     if !store.has_table("gen_metadata", &["idx", "data"]) {
-        return;
+        return subagent;
     }
     let Ok(mut stmt) = store.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx") else {
-        return;
+        return subagent;
     };
     let Ok(rows) = stmt.query_map([], |row| {
         store.charge(row, 2)?;
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     }) else {
-        return;
+        return subagent;
     };
     let mut blobs = Vec::new();
     for row in rows {
@@ -198,8 +216,9 @@ fn parse_db(
         }
     }
     let conversation = Conversation {
-        session_id: &session_id,
-        project: project.as_deref(),
+        id: &conversation_id,
+        subagent: subagent.as_ref().map(|(_, subagent)| subagent),
+        project: trajectory.project.as_deref(),
         fallback,
         selected_models: selected_models(&blobs),
         step_times_ms: step_times_by_response(&store),
@@ -214,6 +233,7 @@ fn parse_db(
             ParseGen::Drift => stats.parse_errors += 1,
         }
     }
+    subagent
 }
 
 enum ParseGen {
@@ -229,7 +249,11 @@ struct Generation {
 }
 
 struct Conversation<'a> {
-    session_id: &'a str,
+    /// The DB file name. Id-less rows are keyed by it, not by the session: a
+    /// subagent shares its parent's session, and the same row index in both
+    /// would collide and drop one row's tokens.
+    id: &'a str,
+    subagent: Option<&'a Subagent>,
     project: Option<&'a str>,
     fallback: (TimeSource, i64),
     selected_models: Vec<String>,
@@ -270,10 +294,7 @@ fn parse_gen(
     }
 
     let response_id = string_field(usage, 11).filter(|id| !id.trim().is_empty());
-    let key = response_id.map_or_else(
-        || format!("{}#{idx}", conversation.session_id),
-        ToOwned::to_owned,
-    );
+    let key = response_id.map_or_else(|| format!("{}#{idx}", conversation.id), ToOwned::to_owned);
 
     let (source, timestamp_ms) = message_field(chat_model, 9)
         .and_then(|node| message_field(node, 4))
@@ -314,10 +335,21 @@ fn parse_gen(
     };
     let event = UsageEvent {
         timestamp,
-        session_id: Some(conversation.session_id.to_owned()),
+        session_id: Some(
+            conversation
+                .subagent
+                .map_or(conversation.id, |subagent| subagent.session_id.as_str())
+                .to_owned(),
+        ),
         model,
-        source_kind: SourceKind::Main,
-        attribution_agent: None,
+        source_kind: if conversation.subagent.is_some() {
+            SourceKind::Subagent
+        } else {
+            SourceKind::Main
+        },
+        attribution_agent: conversation
+            .subagent
+            .and_then(|subagent| subagent.name.clone()),
         attribution_skill: None,
         project: conversation.project.and_then(project_from_cwd),
         usage,
@@ -438,7 +470,8 @@ pub(super) mod tests {
 
     fn conversation(fallback_ts_ms: i64) -> Conversation<'static> {
         Conversation {
-            session_id: "s1",
+            id: "s1",
+            subagent: None,
             project: None,
             fallback: (TimeSource::ConversationStart, fallback_ts_ms),
             selected_models: Vec::new(),
@@ -723,6 +756,30 @@ pub(super) mod tests {
         gens: &[Vec<u8>],
         steps: &[Vec<u8>],
     ) {
+        write_trajectory_conversation(path, &lenf(2, &timestamp(started_ms)), gens, steps);
+    }
+
+    /// The trajectory blob of a conversation run as a subagent of `parent`.
+    pub(in crate::collector::agy) fn subagent_trajectory(
+        started_ms: i64,
+        parent: &str,
+        root: &str,
+        name: &str,
+    ) -> Vec<u8> {
+        let mut blob = lenf(2, &timestamp(started_ms));
+        blob.extend(lenf(5, parent.as_bytes()));
+        blob.extend(lenf(6, root.as_bytes()));
+        blob.extend(lenf(8, &lenf(1, name.as_bytes())));
+        blob.extend(varint(17, 1));
+        blob
+    }
+
+    pub(in crate::collector::agy) fn write_trajectory_conversation(
+        path: &Path,
+        trajectory: &[u8],
+        gens: &[Vec<u8>],
+        steps: &[Vec<u8>],
+    ) {
         write_conversation(path, gens);
         let conn = Connection::open(path).expect("fixture db should open");
         conn.execute_batch(
@@ -732,7 +789,7 @@ pub(super) mod tests {
         .expect("fixture schema should be created");
         conn.execute(
             "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
-            [lenf(2, &timestamp(started_ms))],
+            [trajectory],
         )
         .expect("trajectory row should insert");
         for (idx, metadata) in (0_i64..).zip(steps) {
@@ -773,7 +830,7 @@ pub(super) mod tests {
 
         for stores in [[cli.clone(), app.clone()], [app.clone(), cli.clone()]] {
             let mut stats = ScanStats::default();
-            let events = collect_usage(&stores, Some(floor), UtcOffset::UTC, &mut stats);
+            let events = collect_usage(&stores, Some(floor), UtcOffset::UTC, &mut stats).events;
             let times: Vec<_> = events
                 .iter()
                 .map(|e| e.timestamp.map(OffsetDateTime::unix_timestamp))
@@ -808,13 +865,72 @@ pub(super) mod tests {
         );
 
         let mut stats = ScanStats::default();
-        let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats);
+        let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats).events;
 
         assert_eq!(stats.files_seen, 3);
         assert_eq!(stats.parse_errors, 0);
         assert_eq!(events.len(), 5, "c1 rows once each, plus r3 and r4");
         let input: u64 = events.iter().map(|e| e.usage.input_tokens).sum();
         assert_eq!(input, 10 + 4 * 200);
+    }
+
+    #[test]
+    fn subagent_rows_join_the_top_level_session_and_keep_their_own_keys() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let dir = temp.path().join("conversations");
+        std::fs::create_dir_all(&dir).expect("conversations dir should be created");
+        let started_ms = 1_780_000_000_000;
+        // Neither row has a response id, so both are keyed by DB name + index 0.
+        let unkeyed = gen_blob(1532, 10, 0, 5, 0, Some(5), "");
+        let mut top = lenf(2, &timestamp(started_ms));
+        top.extend(lenf(6, b"parent"));
+        write_trajectory_conversation(
+            &dir.join("parent.db"),
+            &top,
+            std::slice::from_ref(&unkeyed),
+            &[],
+        );
+        write_trajectory_conversation(
+            &dir.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            std::slice::from_ref(&unkeyed),
+            &[],
+        );
+
+        let mut stats = ScanStats::default();
+        let usage = collect_usage(
+            &[temp.path().to_path_buf()],
+            None,
+            UtcOffset::UTC,
+            &mut stats,
+        );
+
+        let rows: Vec<_> = usage
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    e.session_id.as_deref(),
+                    e.source_kind,
+                    e.attribution_agent.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("parent"), SourceKind::Subagent, Some("research")),
+                (Some("parent"), SourceKind::Main, None),
+            ]
+        );
+        assert_eq!(
+            usage
+                .subagents
+                .get("child")
+                .map(|sub| sub.session_id.as_str()),
+            Some("parent")
+        );
+        assert!(!usage.subagents.contains_key("parent"));
     }
 
     #[test]
@@ -876,7 +992,8 @@ pub(super) mod tests {
             None,
             UtcOffset::UTC,
             &mut stats,
-        );
+        )
+        .events;
         drop(writer);
 
         assert_eq!(stats.files_seen, 1);

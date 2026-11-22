@@ -73,6 +73,14 @@ user.
   a CLI conversation seen in both counts as one session. App conversations, and
   CLI conversations with no history or log lines, are dated by their
   generations alone.
+- ✅ **Subagents** — a subagent runs as a conversation (and DB) of its own,
+  whose trajectory metadata (`trajectory_metadata_blob`) names its parent
+  conversation (`#5`). Its tokens and tools count as **Subagent** work under the
+  subagent's name (`#8.#1`, e.g. `research`) and in the top-level
+  conversation's session — the root (`#6`), else the parent — the way Claude's
+  subagents count in the parent session. Top-level conversations carry `#6`
+  too, set to their own id, so only `#5` marks a subagent. Tokens are not
+  shared between the two DBs, so nothing is counted twice.
 - ✅ **Some tools** — the commands you *confirmed* in approval dialogs
   (`command:<exe>`) from the logs. Headless print-mode runs log neither
   user input nor tool confirmations, so they add tokens but no tools.

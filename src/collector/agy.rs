@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
 
 use time::UtcOffset;
 
 use crate::collector::{FileEvents, list_files, merge_into, parse_files_cached};
-use crate::model::{Collection, Provider, SessionTouch};
+use crate::model::{Collection, Provider, SessionTouch, SourceKind};
 
 mod conv;
 mod history;
@@ -51,6 +52,7 @@ pub fn collect(
         local_offset,
         &mut collection.stats,
     );
+    attribute_subagents(&mut collection, &usage.subagents);
     // App conversations, and CLI conversations with no history or log lines,
     // have nothing but their generations: without a touch per generation their
     // sessions count in the total but never reach daily sessions, spans or
@@ -59,15 +61,37 @@ pub fn collect(
     // into one session.
     collection
         .session_touches
-        .extend(usage.iter().filter_map(|event| {
+        .extend(usage.events.iter().filter_map(|event| {
             Some(SessionTouch {
                 timestamp: event.timestamp?,
                 session_id: event.session_id.clone()?,
             })
         }));
-    collection.usage_events.extend(usage);
+    collection.usage_events.extend(usage.events);
     collection.stats.usage_events = collection.usage_events.len();
     collection
+}
+
+/// Log and history lines are parsed per file, without the conversation DBs,
+/// so a line naming a subagent conversation is moved to its top-level session
+/// here, the way its generations are.
+fn attribute_subagents(collection: &mut Collection, subagents: &HashMap<String, conv::Subagent>) {
+    if subagents.is_empty() {
+        return;
+    }
+    for touch in &mut collection.session_touches {
+        if let Some(subagent) = subagents.get(&touch.session_id) {
+            touch.session_id.clone_from(&subagent.session_id);
+        }
+    }
+    for tool in &mut collection.tool_events {
+        let Some(subagent) = tool.session_id.as_ref().and_then(|id| subagents.get(id)) else {
+            continue;
+        };
+        tool.session_id = Some(subagent.session_id.clone());
+        tool.source_kind = SourceKind::Subagent;
+        tool.subagent_type.clone_from(&subagent.name);
+    }
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
@@ -85,7 +109,10 @@ mod tests {
     use tempfile::TempDir;
     use time::macros::{date, datetime};
 
-    use super::conv::tests::{served_only_gen_blob, step_metadata, write_dated_conversation};
+    use super::conv::tests::{
+        served_only_gen_blob, step_metadata, subagent_trajectory, write_dated_conversation,
+        write_trajectory_conversation,
+    };
     use super::*;
     use crate::collector::ident::tests::overlong_ident;
     use crate::collector::read::tests::oversized_json;
@@ -190,6 +217,54 @@ mod tests {
                 .duration_secs(),
             7_200
         );
+    }
+
+    #[test]
+    fn subagent_work_counts_in_the_parent_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
+        let conversations = cli.join("conversations");
+        fs::create_dir_all(&log_dir).expect("log dir should be created");
+        fs::create_dir_all(&conversations).expect("conversations dir should be created");
+        let started_ms = 1_780_966_800_000; // 2026-06-09 01:00 UTC
+        write_dated_conversation(
+            &conversations.join("parent.db"),
+            started_ms,
+            &[served_only_gen_blob("gemini-3.8-flash", "r1", None)],
+            &[step_metadata(started_ms + 60_000, "r1")],
+        );
+        write_trajectory_conversation(
+            &conversations.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            &[served_only_gen_blob("gemini-3.8-flash", "r2", None)],
+            &[step_metadata(started_ms + 120_000, "r2")],
+        );
+        fs::write(
+            log_dir.join("cli-20260609_010000.log"),
+            "I0609 01:03:00.000000  8577 input_loop.go:451] Responding to tool confirmation: convID=child, stepIdx=3, approved=true, turnGrants=[command(bun run)]\n",
+        )
+        .expect("log fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let summary = crate::analyzer::summarize(
+            &collection,
+            datetime!(2026-06-09 23:00 UTC),
+            7,
+            UtcOffset::UTC,
+        );
+
+        assert_eq!(summary.sessions, 1);
+        let tool = &collection.tool_events[0];
+        assert_eq!(tool.session_id.as_deref(), Some("parent"));
+        assert_eq!(tool.source_kind, SourceKind::Subagent);
+        assert_eq!(tool.subagent_type.as_deref(), Some("research"));
+        let agents: Vec<_> = summary
+            .agents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.usage.token_volume()))
+            .collect();
+        assert_eq!(agents, [("research", 4270)]);
     }
 
     #[test]
