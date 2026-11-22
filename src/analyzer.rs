@@ -568,6 +568,33 @@ mod tests {
         }
     }
 
+    /// A cost-state remainder adds its tokens and their cost at base rates,
+    /// but no call: how many calls made it up is not recorded. An aggregate
+    /// row still counts as one.
+    #[test]
+    fn a_remainder_adds_tokens_and_cost_but_no_call() {
+        crate::cost::tests::install_test_pricing();
+        let now = datetime!(2026-06-08 12:00 UTC);
+        let mut remainder = haiku_call(119_000);
+        remainder.granularity = crate::model::UsageGranularity::Remainder;
+        let mut aggregate = haiku_call(119_000);
+        aggregate.granularity = crate::model::UsageGranularity::Aggregate;
+        let claude = Collection {
+            usage_events: vec![haiku_call(59_000), remainder, aggregate],
+            ..Collection::new(Provider::Claude, "/tmp".into())
+        };
+
+        let summary = summarize(&claude, now, 7, UtcOffset::UTC);
+
+        let model = &summary.models[0];
+        assert_eq!(model.events, 2);
+        assert_eq!(model.usage.token_volume(), 3_000 + 59_000 + 2 * 119_000);
+        let short = (1_000.0 * 0.1 + 59_000.0 * 0.01) / 1e6;
+        let base = (1_000.0 * 0.1 + 119_000.0 * 0.01) / 1e6;
+        assert!((model.estimated.priced_usd - (short + 2.0 * base)).abs() < 1e-12);
+        assert_eq!(summary.context.expect("context").calls, 1);
+    }
+
     /// Two calls under the long-context threshold stay at base rates even
     /// though their sum is over it, and an aggregate row never crosses it,
     /// whichever provider it comes from — the Total tab included.

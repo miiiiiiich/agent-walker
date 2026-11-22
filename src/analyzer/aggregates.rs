@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use time::{Date, UtcOffset};
 
-use crate::model::{AgentStat, CostTally, ModelStat, ProjectStat, SourceKind, TokenUsage};
+use crate::model::{
+    AgentStat, CostTally, ModelStat, ProjectStat, SourceKind, TokenUsage, UsageGranularity,
+};
 use crate::timestamp::{local_date, to_local};
 
 #[derive(Default)]
@@ -67,10 +69,11 @@ impl Aggregates {
         let model_name = event.model.clone().unwrap_or_else(|| "unknown".to_owned());
         let estimated =
             crate::cost::estimate(&model_name, &event.usage, event.granularity, event.billing);
-        self.model_map
-            .entry(model_name.clone())
-            .or_default()
-            .add(&event.usage, &estimated);
+        self.model_map.entry(model_name.clone()).or_default().add(
+            &event.usage,
+            &estimated,
+            event.granularity != UsageGranularity::Remainder,
+        );
         self.model_daily_usage
             .entry((date, model_name.clone()))
             .or_default()
@@ -182,9 +185,9 @@ pub(super) struct ModelAccumulator {
 }
 
 impl ModelAccumulator {
-    fn add(&mut self, usage: &TokenUsage, estimated: &CostTally) {
+    fn add(&mut self, usage: &TokenUsage, estimated: &CostTally, is_call: bool) {
         self.usage.add_assign(usage);
-        self.events += 1;
+        self.events += usize::from(is_call);
         self.estimated.add(estimated);
     }
 

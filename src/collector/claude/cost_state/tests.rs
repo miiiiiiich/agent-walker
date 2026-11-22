@@ -53,7 +53,7 @@ fn added(collection: &Collection) -> Vec<&UsageEvent> {
     collection
         .usage_events
         .iter()
-        .filter(|event| event.granularity == UsageGranularity::Aggregate)
+        .filter(|event| event.granularity == UsageGranularity::Remainder)
         .collect()
 }
 
@@ -184,6 +184,14 @@ fn excess_is_spread_over_the_sessions_days_by_volume() {
         after.total_usage.token_volume(),
         before.total_usage.token_volume() + 400
     );
+    let calls = |summary: &crate::model::Summary| {
+        summary
+            .models
+            .iter()
+            .map(|model| (model.name.clone(), model.events))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(calls(&after), calls(&before));
     assert_eq!(after.sessions, before.sessions);
     assert_eq!(after.active_days, before.active_days);
     assert_eq!(

@@ -55,7 +55,7 @@ pub(in crate::collector::claude) fn uncounted_calls(
             attribution_skill: None,
             project: bucket.project,
             usage: bucket.usage,
-            granularity: UsageGranularity::Aggregate,
+            granularity: UsageGranularity::Remainder,
             billing: Billing::default(),
         })
         .collect()

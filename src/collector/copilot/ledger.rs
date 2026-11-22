@@ -165,7 +165,9 @@ impl CallLedger {
                     return true;
                 };
                 let cutoff = match keyed.event.granularity {
-                    UsageGranularity::Aggregate => self.first_call.get(sid).copied(),
+                    UsageGranularity::Aggregate | UsageGranularity::Remainder => {
+                        self.first_call.get(sid).copied()
+                    }
                     UsageGranularity::Call => self
                         .first_live
                         .get(sid)

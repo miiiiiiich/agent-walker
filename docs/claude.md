@@ -106,9 +106,9 @@ their own. The log does not say which calls these are.
   stays outside it. A session with no dated call adds nothing.
 - **How it counts.** Each part is a summed row: priced at base rates, never a
   long-context tier, and at standard speed and geography, which the total
-  does not record. It counts as one call in its model's row, falls in the
-  CONTEXT section's `other` row, and goes to the project of the call it is
-  dated at.
+  does not record. It adds tokens and cost to its model's row but no calls,
+  since how many calls made it up is not recorded. It falls in the CONTEXT
+  section's `other` row and goes to the project of the call it is dated at.
 - So that a long session is compared whole, its subagent files are read even
   when they are older than the files the window would otherwise read; the
   rows in them are older than any window.

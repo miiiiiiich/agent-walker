@@ -302,7 +302,7 @@ fn priced(
     let card = pricing.card(billing.tier);
     let rates = match granularity {
         UsageGranularity::Call => card.rates_for(usage),
-        UsageGranularity::Aggregate => card.base,
+        UsageGranularity::Aggregate | UsageGranularity::Remainder => card.base,
     };
     cost_at(&rates, usage) * pricing.multiplier(billing)
 }

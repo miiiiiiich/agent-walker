@@ -48,6 +48,10 @@ pub enum ServiceTier {
 pub enum UsageGranularity {
     Call,
     Aggregate,
+    /// The part of a running total over the calls the log has rows for
+    /// (Claude Code's cost-state). Priced like an aggregate, but it is not a
+    /// call: how many calls made it up is not recorded.
+    Remainder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
