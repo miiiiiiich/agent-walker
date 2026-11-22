@@ -192,7 +192,9 @@ The collector prefers the **display name**: it names the user's selection —
 rows served under different internal ids (`gemini-3-flash-a`, `gemini-default`)
 carried the same display name. It is normalized the way the pricing lookup
 normalizes names: lowercase, drop a `(tier)` suffix, hyphenate spaces
-(`Gemini 4 Neon (High)` → `gemini-4-neon`).
+(`Gemini 4 Neon (High)` → `gemini-4-neon`). Only the space character is
+hyphenated: a tab or line break inside the name is kept, so the share card
+shows that model as `Other`.
 
 Some agy builds don't write `#1.#21`, and rows on a `-tiered` selection (the
 app, and subagents) still lack it in builds that do. The internal id then

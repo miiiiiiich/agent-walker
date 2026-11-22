@@ -4,9 +4,10 @@ use super::proto::{message_field, string_field};
 /// (`gemini-4-neon`). Rows on a `-tiered` selection carry no display name, so
 /// labelling the rest by it raw split one model into two labels. The steps are
 /// the pricing lookup's (lowercase, cut a `[deploy]` or `(tier)` suffix,
-/// hyphenate spaces), so a label is the key it prices under. Only ASCII
-/// whitespace becomes `-`: any other stays, and the shared-output sanitizer
-/// still collapses the label.
+/// hyphenate spaces), so a label is the key it prices under. Only the space
+/// becomes `-`: hyphenating a tab or a line break turned `Gemini\tprivate-repo`
+/// into `gemini-private-repo`, which the shared-output sanitizer passes. Any
+/// other whitespace stays, so the sanitizer still collapses the label.
 pub(in crate::collector::agy) fn display_name_label(display: &str) -> String {
     let lower = display.to_ascii_lowercase();
     let no_deploy = lower
@@ -16,7 +17,8 @@ pub(in crate::collector::agy) fn display_name_label(display: &str) -> String {
         .split_once('(')
         .map_or(no_deploy, |(head, _)| head);
     no_tier
-        .split_ascii_whitespace()
+        .split(' ')
+        .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join("-")
 }
@@ -79,6 +81,26 @@ mod tests {
             display_name_label("Gemini\u{2028}Neon"),
             "gemini\u{2028}neon"
         );
+    }
+
+    /// A tab or line break is not turned into a hyphen: the label keeps it,
+    /// so the share card shows `Other` instead of a smuggled name.
+    #[test]
+    fn whitespace_other_than_a_space_still_collapses_on_the_card() {
+        for display in [
+            "Gemini\tprivate-repo",
+            "Gemini\nprivate-repo",
+            "Gemini\rprivate-repo",
+            "Gemini\u{c}private-repo",
+        ] {
+            let label = display_name_label(display);
+            assert_ne!(label, "gemini-private-repo", "{display:?}");
+            assert_eq!(
+                crate::format::short_model_name(&label),
+                "Other",
+                "{display:?}"
+            );
+        }
     }
 
     #[test]
