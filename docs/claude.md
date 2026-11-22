@@ -100,6 +100,12 @@ input×rate + output×rate + cache_read×cache_read_rate + cache_write×write_ra
 Per-model rates come from the LiteLLM pricing database. Claude cache reads price
 at ≈0.1×, cache writes at 1.25× (5-minute cache) or 2× (1-hour cache).
 
+**A model prices only at its own rates.** A logged model id uses the LiteLLM
+key it equals, or the key it extends by `-latest` or by a date (`-20251001`,
+`-2026-10-01`). Any other id shows as unpriced (—) until LiteLLM lists it,
+including a newer version of a listed model: `claude-opus-5-6` does not price
+as `claude-opus-5`.
+
 **Long-context tiers are priced per request.** Where LiteLLM lists a tier for a
 model (`input_cost_per_token_above_<N>k_tokens`, with the same
 `_above_<N>k_tokens` suffix on the output, cache-read and cache-write rates,

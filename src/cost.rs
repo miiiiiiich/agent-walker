@@ -210,7 +210,7 @@ impl Snapshot {
     }
 
     /// Exact snapshot match first, then the longest snapshot key the name
-    /// extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
+    /// extends with a date suffix (`claude-sonnet-4-5-20250929` ->
     /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`).
     /// A plain word suffix (`gemini-pro-default`) must not match a shorter
     /// base key. Retry dotted version segments as dashed only as a fallback,
@@ -242,12 +242,18 @@ fn lookup(snapshot: &Snapshot, name: &str) -> Option<ModelPricing> {
         .filter(|(key, _)| {
             name.strip_prefix(key.as_str())
                 .and_then(|rest| rest.strip_prefix('-'))
-                .is_some_and(|suffix| {
-                    suffix == "latest" || suffix.starts_with(|c: char| c.is_ascii_digit())
-                })
+                .is_some_and(|suffix| suffix == "latest" || is_date_suffix(suffix))
         })
         .max_by_key(|(key, _)| key.len())
         .map(|(_, pricing)| *pricing)
+}
+
+/// A date (`20250929`, `2026-10-01`, `0613`) names a snapshot of the key's
+/// model. A shorter digit run is the next version: `claude-opus-5-6` priced
+/// silently at `claude-opus-5`'s rates, so it stays unpriced until `LiteLLM`
+/// lists it.
+fn is_date_suffix(suffix: &str) -> bool {
+    suffix.bytes().take_while(u8::is_ascii_digit).count() >= 4
 }
 
 /// Price `usage` as one request, so a prompt over the model's long-context
@@ -479,6 +485,35 @@ pub(crate) mod tests {
         let cost =
             usage_cost_usd("claude-sonnet-4-5-20250929", &usage).expect("sonnet should be priced");
         assert!((cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn matches_dashed_dates_and_versioned_snapshots_by_prefix() {
+        install_test_pricing();
+        for name in [
+            "claude-sonnet-4-5-2026-10-01",
+            "claude-sonnet-4-5-20250929-v1:0",
+            "claude-sonnet-4-5-0613",
+        ] {
+            let pricing = pricing_for(name).unwrap_or_else(|| panic!("{name} should resolve"));
+            assert!((pricing.input - 3.0 / 1e6).abs() < f64::EPSILON, "{name}");
+        }
+    }
+
+    /// A newer version past a listed key, dashed or dotted, with or without a
+    /// variant word, is unpriced rather than priced as the older version.
+    #[test]
+    fn newer_versions_are_not_priced_as_an_older_key() {
+        install_test_pricing();
+        for name in [
+            "claude-fable-5-3",
+            "claude-fable-5.3",
+            "claude-fable-5-3-fast",
+            "claude-opus-4-8-1",
+            "claude-sonnet-4-5-123",
+        ] {
+            assert!(pricing_for(name).is_none(), "{name}");
+        }
     }
 
     #[test]
