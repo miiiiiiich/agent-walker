@@ -111,7 +111,8 @@ cache writes use LiteLLM's cache-creation rate for the model. Where LiteLLM
 lists no cache-write rate (or lists 0), writes price at the model's input rate:
 they are prompt tokens moved out of `input`, and a $0 rate would make them
 free. Rates come from LiteLLM. Sessions that log only the provider name, and
-`codex-auto-review`, are priced as the current Codex default model. The same
+`codex-auto-review`, are priced as the current Codex default model
+(gpt-6.2-sol). The same
 API-equivalent caveat applies — it is not your ChatGPT subscription bill.
 
 Long-context tiers are priced per request, by the same rule as Claude: each

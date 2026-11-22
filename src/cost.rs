@@ -26,7 +26,7 @@ const SNAPSHOT_FORMAT: u32 = 3;
 /// Codex logs only the provider (`openai`, `codex`) for some sessions, and
 /// `codex-auto-review` has no `LiteLLM` key; all of them price as the model
 /// Codex runs by default, so this follows Codex's default.
-const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+const CODEX_DEFAULT_MODEL: &str = "gpt-6.2-sol";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Pricing {
@@ -393,6 +393,9 @@ pub(crate) mod tests {
                         }),
                     },
                 ),
+                // Off the real rates, which equal gpt-6.1-sol's: the
+                // provider-only test must tell the two apart.
+                ("gpt-6.2-sol".to_owned(), flat(openai(2.5, 12.0, 0.25))),
                 ("gemini-3.5-flash".to_owned(), flat(openai(1.5, 9.0, 0.15))),
                 (
                     "tiny-input".to_owned(),
@@ -547,7 +550,7 @@ pub(crate) mod tests {
         };
         for name in ["codex", "openai", "codex-auto-review"] {
             let cost = usage_cost_usd(name, &usage).expect("provider-only name should price");
-            assert!((cost - 0.2).abs() < 1e-9, "{name}: {cost}");
+            assert!((cost - 0.25).abs() < 1e-9, "{name}: {cost}");
         }
     }
 
