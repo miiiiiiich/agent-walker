@@ -77,12 +77,12 @@ path longer than 4,096, is treated as missing.
   not a person, and are not counted.
 - **Model / project** from `session_meta` and `turn_context`.
 - **Limits** from `token_count` `rate_limits.primary`: LIMITS plots each
-  day's highest `used_percent`. Codex used to send its 5-hour window as
-  `primary` and the weekly window as `secondary`; it now sends the weekly
-  window (`window_minutes` 10080) as `primary` and `secondary` as null, so
-  the chart shows how far into the weekly limit each day went. Rows also
-  carry a `limit_id`; most say `codex`, a few name another limit, and LIMITS
-  does not tell them apart.
+  day's highest `used_percent`. Until 2026-07 Codex sent its 5-hour window
+  as `primary` and the weekly window as `secondary`; since then `primary` is
+  the weekly window (`window_minutes` 10080) and `secondary` is null, so the
+  chart shows how far into the weekly limit each day went. Rows also carry a
+  `limit_id` (`codex`, `codex_bengalfox`, `premium` have been seen), and
+  rows of every `limit_id` are plotted together.
 
 ## How tokens are counted
 
