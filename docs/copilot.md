@@ -74,32 +74,33 @@ user.
     carries no usable counters for. What remains, such as calls from before
     the CLI wrote receipts, counts at that exit.
 
+  A receipt and the store row of its call count once. They are paired one
+  to one: a row of the session named as the receipt's `sourceSessionId` (a
+  fork's copy keeps the parent there) or of a session whose log holds the
+  receipt, with the same model and the same five token counts, dated within
+  61 s of it (Copilot's 60 s slack, plus the second the store's default
+  stamp drops). The receipt and the live event behind a row carry the same
+  usage record, and the store copies it field for field. A live row stands
+  for the pair; a row the CLI caught up from the log (`event_id` starting
+  `usage-record:`) is a copy and gives way to the receipt. A receipt or a
+  row left without a partner counts on its own.
+
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
-  CLI upgrade keeps the history from before the store existed). Its receipts
-  give way to its rows from 60 s before its first live row on. Rows the CLI
-  caught up from the log (`event_id` starting `usage-record:`) are copies:
-  one dated from 60 s before the session's first live row on is dropped, as
-  Copilot drops it from its own totals, and so is one dated from the
-  session's first receipt read here on. A fork's copy of a receipt keeps
-  the parent as its `sourceSessionId`, so it gives way to the parent's rows
-  the same way even when the parent's log is gone, and the parent's
-  caught-up rows give way to the copies over the span the fork copied. If
-  any of a
-  session's rows can't be read (a `created_at` that doesn't parse, a value of
-  the wrong type), that session keeps its snapshots: superseding them from the
-  readable rows alone would lose the unreadable row's usage. Its readable
-  rows up to its latest exit are dropped (that exit's cumulative, with the
-  receipts before it, already covers them), even when the exit added
-  nothing. Only an exit with usable counters is a snapshot here: a receipt
-  covers just its own call. After the exit the session keeps its receipts,
-  since one may be the only record of the unreadable row, and its rows
-  from 60 s before its first receipt there to 60 s after its last are
-  dropped as their copies; its other rows still count, so calls since the
-  last clean exit aren't lost. A session with neither an exit nor receipts
+  CLI upgrade keeps the history from before the store existed). A
+  caught-up row dated from 60 s before the session's first live row on is
+  dropped, as Copilot drops it from its own totals. If any of a session's
+  rows can't be read (a `created_at` that doesn't parse, a value of the
+  wrong type), that session keeps all its snapshots: superseding them from
+  the readable rows alone would lose the unreadable row's usage. Its
+  readable rows up to its latest exit are dropped (that exit's cumulative,
+  with the receipts before it, already covers them), even when the exit
+  added nothing; only an exit with usable counters is a snapshot here. Its
+  rows after the exit and its receipts are paired as above, so a receipt
+  whose row is the unreadable one still counts. A session with no exit
   keeps all its readable rows. A row that can't be tied to a session at all
   applies the same fallback to every session. An unreadable row dated after
-  the latest exit and outside that span can't be counted anywhere.
+  the latest exit, whose call left no receipt, can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 

@@ -1,4 +1,5 @@
 mod ledger;
+mod pairing;
 mod receipts;
 mod segments;
 
@@ -47,8 +48,8 @@ pub fn collect(
 
     let mut per_file = parse_heads(files, use_cache, local_offset);
     if let Some(mut ledger) = ledger {
-        ledger.yield_catch_up_to_receipts(&per_file);
         ledger.fall_back_where_incomplete(&per_file);
+        ledger.reconcile_receipts(&mut per_file);
         ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
     }
