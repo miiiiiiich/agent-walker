@@ -609,7 +609,8 @@ fn a_fork_of_a_fork_is_compared_with_the_nearer_fork() {
 
 /// A later process that carries the fork's total on still holds the
 /// parent's part: it comes off that process's totals too. A process that
-/// starts again from zero holds none of it.
+/// starts again from zero holds none of it, and stays a run of its own even
+/// once its total outgrows what the discount leaves of the fork's.
 #[test]
 fn a_later_process_carrying_a_forks_total_loses_the_parents_part_too() {
     let temp = TempDir::new().expect("tempdir");
@@ -636,13 +637,16 @@ fn a_later_process_carrying_a_forks_total_loses_the_parents_part_too() {
     };
     later(&temp.path().join("carried"), 3 + 1, 600 + 30 + 10);
     later(&temp.path().join("restarted"), 1, 30 + 10);
+    later(&temp.path().join("outgrown"), 1, 30 + 70);
 
-    let carried = collect(&temp.path().join("carried"), None, false, UtcOffset::UTC);
-    let restarted = collect(&temp.path().join("restarted"), None, false, UtcOffset::UTC);
+    let reads = |name: &str| {
+        let collection = collect(&temp.path().join(name), None, false, UtcOffset::UTC);
+        reads_of(&collection, "fk")
+    };
 
     assert_eq!(
-        (reads_of(&carried, "fk"), reads_of(&restarted, "fk")),
-        (30, 30)
+        (reads("carried"), reads("restarted"), reads("outgrown")),
+        (30, 30, 20 + 70)
     );
 }
 

@@ -91,11 +91,12 @@ their own. The log does not say which calls these are.
   each run's last total is compared with the calls made before it was
   written. A carried total never loses a counter, so a new process whose
   total is below the previous one for any model and field, or lacks one of
-  its models, has started again, even if its total is larger overall. When
-  calls follow the last total, their process has recorded no total yet; the
-  total is compared with the calls before it, and the later calls add nothing
-  until their process writes one. If two main files hold totals for the same
-  session, only the one written last is used.
+  its models, has started again, even if its total is larger overall. This
+  is judged on the totals as written, before a fork's carried part (below)
+  comes off them. When calls follow the last total, their process has
+  recorded no total yet; the total is compared with the calls before it, and
+  the later calls add nothing until their process writes one. If two main
+  files hold totals for the same session, only the one written last is used.
 - **Forks.** A session forked from another starts from the other's total
   (with its `startTime`) and copies only part of its calls. The other
   session's last total written before the fork's first call of its own is

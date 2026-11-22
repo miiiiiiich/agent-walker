@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{SourceKind, TokenUsage};
 
 use super::CostStateRow;
-use super::spread::carries;
 use super::transcript::Call;
 
 struct Discount<'a> {
@@ -29,6 +28,7 @@ struct Discount<'a> {
 pub(super) fn discount_forks<'a>(
     logs: &mut HashMap<&'a str, Vec<CostStateRow>>,
     transcripts: &mut HashMap<&'a str, Vec<Call<'a>>>,
+    restarts: &HashMap<&'a str, Vec<bool>>,
 ) {
     let mut by_start: HashMap<i64, Vec<&'a str>> = HashMap::new();
     for (&session, rows) in logs.iter() {
@@ -86,7 +86,7 @@ pub(super) fn discount_forks<'a>(
             if let Some((parent, base)) = parent {
                 discounts.push(Discount {
                     fork,
-                    rows: holding(&logs[fork], start),
+                    rows: holding(&logs[fork], &restarts[fork], start),
                     carried: base.models.clone(),
                     copied: transcripts[parent]
                         .iter()
@@ -115,13 +115,10 @@ pub(super) fn discount_forks<'a>(
 
 /// The rows of the restored `startTime`, and those of each later process
 /// that carried them on, up to the first that started again.
-fn holding(rows: &[CostStateRow], start: i64) -> Vec<usize> {
+fn holding(rows: &[CostStateRow], restarts: &[bool], start: i64) -> Vec<usize> {
     let mut held: Vec<usize> = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        let carried_on = index > 0 && held.last() == Some(&(index - 1)) && {
-            let previous = &rows[index - 1];
-            previous.start_time == row.start_time || carries(previous, row)
-        };
+    for (index, (row, &restarted)) in rows.iter().zip(restarts).enumerate() {
+        let carried_on = index > 0 && held.last() == Some(&(index - 1)) && !restarted;
         if row.start_time == Some(start) || carried_on {
             held.push(index);
         }

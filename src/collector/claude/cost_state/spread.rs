@@ -36,13 +36,20 @@ pub(in crate::collector::claude) fn uncounted_calls(
     }
     let sessions: HashSet<&str> = logs.keys().copied().collect();
     let mut transcripts = transcripts(per_file, &sessions);
-    discount_forks(&mut logs, &mut transcripts);
+    // Judged after a fork's discount, a restart whose total outgrew what the
+    // discount left of the fork's read as carried, and two runs merged.
+    let restarts: HashMap<&str, Vec<bool>> = logs
+        .iter()
+        .map(|(&session, rows)| (session, restarts(rows)))
+        .collect();
+    discount_forks(&mut logs, &mut transcripts, &restarts);
     let mut buckets: BTreeMap<(String, String, Slot), Bucket> = BTreeMap::new();
     for (session, rows) in logs {
         let Some(calls) = transcripts.remove(session) else {
             continue;
         };
-        spread_session(session, &runs(&rows), calls, local_offset, &mut buckets);
+        let runs = runs(&rows, &restarts[session]);
+        spread_session(session, &runs, calls, local_offset, &mut buckets);
     }
     buckets
         .into_iter()
@@ -96,19 +103,28 @@ fn log_per_session(per_file: &[(PathBuf, Option<FileEvents>)]) -> HashMap<&str, 
         .collect()
 }
 
-/// The rows that close each run of a session's totals. A process that
+/// Whether each row begins a new run of a session's totals. A process that
 /// resumes a session either carries the previous total forward or starts again
 /// from zero; only a restart begins a new run. Splitting at every process
 /// counted a carried-over total once per process. A carried total never
 /// loses a counter. A restart can outgrow the previous total and still lack
 /// the models it has not used yet; judged by volume alone, it read as carried
 /// and their excess was lost.
-fn runs(rows: &[CostStateRow]) -> Vec<&CostStateRow> {
+pub(super) fn restarts(rows: &[CostStateRow]) -> Vec<bool> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            index > 0
+                && row.start_time != rows[index - 1].start_time
+                && !carries(&rows[index - 1], row)
+        })
+        .collect()
+}
+
+/// The rows that close each run.
+fn runs<'a>(rows: &'a [CostStateRow], restarts: &[bool]) -> Vec<&'a CostStateRow> {
     let mut runs: Vec<&CostStateRow> = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        let restarted = index > 0
-            && row.start_time != rows[index - 1].start_time
-            && !carries(&rows[index - 1], row);
+    for (row, &restarted) in rows.iter().zip(restarts) {
         match runs.last_mut() {
             Some(last) if !restarted => *last = row,
             _ => runs.push(row),
@@ -117,7 +133,7 @@ fn runs(rows: &[CostStateRow]) -> Vec<&CostStateRow> {
     runs
 }
 
-pub(super) fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
+fn carries(earlier: &CostStateRow, later: &CostStateRow) -> bool {
     earlier.models.iter().all(|(model, before)| {
         later.models.get(model).is_some_and(|after| {
             after.input_tokens >= before.input_tokens
