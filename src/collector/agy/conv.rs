@@ -1,7 +1,8 @@
 //! With no public schema, read the wire format directly and pull only the needed fields.
 //! Field numbers follow the usage message in the protobuf descriptor embedded in
-//! the agy binary. Its `#1` is the model enum, not a token count: reading it as
-//! system-prompt tokens added the enum value to every row's input.
+//! the agy binary, cross-checked against the `tokscale` project (its #1610 /
+//! #1611 identified `#1` as the model enum). `#1` is not a token count: reading
+//! it as system-prompt tokens added the enum value to every row's input.
 //! Because the numbers are unofficial and could shift on an Antigravity update,
 //! every row is self-verified against the precomputed output total `#3` (fields:
 //! `#3` output total, `#9` thinking, `#10` response text, `#11` response id): it

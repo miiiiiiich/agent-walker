@@ -6,7 +6,7 @@ Two stores under `~/.gemini` (read-only, auto-detected), both shown as the one
 Antigravity provider:
 
 - `antigravity-cli/` — the agy CLI.
-  - `history.jsonl` + `log/cli-*.log` → session timestamps and confirmed
+  - `history.jsonl` + `log/cli-*.log` → session timestamps and approved
     **tools**.
   - `conversations/<uuid>.db` (SQLite) → **token usage, model, project, and
     session timestamps**, one row per generation in the `gen_metadata` table;
@@ -108,8 +108,9 @@ user.
 `gen_metadata` rows are Antigravity's internal **protobuf with no field names**,
 and there's no public schema. agent-walker reads the wire format directly and
 pulls the few fields it needs by number. What each number means comes from the
-protobuf descriptor compiled into the agy binary, read as data. In the usage
-message (`#1.#4`):
+protobuf descriptor compiled into the agy binary, read as data, cross-checked
+against the `tokscale` project (whose #1610 / #1611 identified `#1` as the model
+enum). In the usage message (`#1.#4`):
 
 | Field | Meaning | Read as |
 |---|---|---|
