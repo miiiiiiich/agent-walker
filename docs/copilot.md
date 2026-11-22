@@ -78,7 +78,11 @@ user.
   caught up from the log (`event_id` starting `usage-record:`) are copies:
   one dated from 60 s before the session's first live row on is dropped, as
   Copilot drops it from its own totals, and so is one dated from the
-  session's first receipt read here on. If any of a
+  session's first receipt read here on. A fork's copy of a receipt keeps
+  the parent as its `sourceSessionId`, so it gives way to the parent's rows
+  the same way even when the parent's log is gone, and the parent's
+  caught-up rows give way to the copies over the span the fork copied. If
+  any of a
   session's rows can't be read (a `created_at` that doesn't parse, a value of
   the wrong type), that session keeps its snapshots: superseding them from the
   readable rows alone would lose the unreadable row's usage. Its readable

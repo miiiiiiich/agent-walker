@@ -8,6 +8,15 @@ use crate::model::{SourceKind, UsageEvent, UsageGranularity};
 
 use super::{Line, RawCounters, u64_field};
 
+const KEY_PREFIX: &str = "copilot-receipt:";
+
+/// The accounting source a receipt's key names: the session that made the
+/// call, which a fork's copy keeps.
+pub(super) fn source_of(key: &str) -> Option<&str> {
+    let (source, sequence) = key.strip_prefix(KEY_PREFIX)?.rsplit_once(':')?;
+    (!sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())).then_some(source)
+}
+
 /// `session.usage_record` receipts read so far in one session's stream, and
 /// those no snapshot has covered yet.
 #[derive(Default)]
@@ -48,9 +57,9 @@ impl Receipts {
             Some((source.to_owned(), sequence))
         });
         let key = match (&identity, line.event_id, line.session_id) {
-            (Some((source, sequence)), _, _) => format!("copilot-receipt:{source}:{sequence}"),
-            (None, Some(id), _) => format!("copilot-receipt:{id}"),
-            (None, None, Some(sid)) => format!("copilot-receipt:{sid}:{}", self.index),
+            (Some((source, sequence)), _, _) => format!("{KEY_PREFIX}{source}:{sequence}"),
+            (None, Some(id), _) => format!("{KEY_PREFIX}{id}"),
+            (None, None, Some(sid)) => format!("{KEY_PREFIX}{sid}:{}", self.index),
             (None, None, None) => return,
         };
         self.index += 1;

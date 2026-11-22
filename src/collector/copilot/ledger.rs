@@ -12,6 +12,7 @@ use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
 use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent, UsageGranularity};
 use crate::timestamp::{parse_rfc3339, plausible};
 
+use super::receipts::source_of;
 use super::{MAX_SANE_TOKENS, RawCounters};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
@@ -66,6 +67,9 @@ impl CallLedger {
     /// A caught-up row is a copy of a receipt, so where the session's log
     /// yielded receipts, its rows from the first receipt on give way to them.
     /// Rows before it stay: their receipts may sit in a segment that is gone.
+    /// A fork's copies of the session's receipts cover only the span the
+    /// fork copied, or the rows after the fork, whose receipts were in the
+    /// session's own log alone, would be lost with that log.
     pub(super) fn yield_catch_up_to_receipts(
         &mut self,
         per_file: &[(PathBuf, Option<FileEvents>)],
@@ -73,27 +77,42 @@ impl CallLedger {
         if self.catch_up.is_empty() {
             return;
         }
-        let mut first_receipt: HashMap<&String, OffsetDateTime> = HashMap::new();
+        let mut first_receipt: HashMap<&str, OffsetDateTime> = HashMap::new();
+        let mut fork_spans: HashMap<&str, (OffsetDateTime, OffsetDateTime)> = HashMap::new();
         for keyed in per_file
             .iter()
             .filter_map(|(_, events)| events.as_ref())
             .flat_map(|events| &events.usage_events)
             .filter(|keyed| keyed.event.granularity == UsageGranularity::Call)
         {
-            if let (Some(sid), Some(time)) =
-                (keyed.event.session_id.as_ref(), keyed.event.timestamp)
-            {
-                first_receipt
-                    .entry(sid)
-                    .and_modify(|first| *first = (*first).min(time))
-                    .or_insert(time);
+            let (Some(sid), Some(time)) =
+                (keyed.event.session_id.as_deref(), keyed.event.timestamp)
+            else {
+                continue;
+            };
+            first_receipt
+                .entry(sid)
+                .and_modify(|first| *first = (*first).min(time))
+                .or_insert(time);
+            if let Some(source) = copied_from(keyed, sid) {
+                fork_spans
+                    .entry(source)
+                    .and_modify(|(first, last)| {
+                        *first = (*first).min(time);
+                        *last = (*last).max(time);
+                    })
+                    .or_insert((time, time));
             }
         }
         let mut copies: HashSet<String> = HashSet::new();
         self.catch_up.retain(|row| {
+            let session = row.session.as_str();
             let copy = first_receipt
-                .get(&row.session)
-                .is_some_and(|first| row.time >= *first);
+                .get(session)
+                .is_some_and(|first| row.time >= *first)
+                || fork_spans
+                    .get(session)
+                    .is_some_and(|(first, last)| (*first..=*last).contains(&row.time));
             if copy && let Some(key) = &row.key {
                 copies.insert(key.clone());
             }
@@ -171,7 +190,9 @@ impl CallLedger {
     /// snapshots; earlier snapshots still count. Its receipts give way from
     /// its first live row on, less the slack Copilot allows. A fork's copy of
     /// a superseded event (same key) is dropped too, or the parent's calls
-    /// would count again under the fork.
+    /// would count again under the fork. A copied receipt also gives way to
+    /// the rows of the session that made the call: with that session's log
+    /// gone, nothing else matches the copy to its row.
     pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
         let mut superseded: HashSet<String> = HashSet::new();
         for events in per_file
@@ -179,26 +200,12 @@ impl CallLedger {
             .filter_map(|(_, events)| events.as_mut())
         {
             events.usage_events.retain(|keyed| {
-                let Some(sid) = keyed.event.session_id.as_ref() else {
+                let Some(sid) = keyed.event.session_id.as_deref() else {
                     return true;
                 };
-                let cutoff = match keyed.event.granularity {
-                    UsageGranularity::Aggregate | UsageGranularity::Remainder => {
-                        self.first_call.get(sid).copied()
-                    }
-                    UsageGranularity::Call => self
-                        .first_live
-                        .get(sid)
-                        .map(|live| live.checked_sub(LIVE_SLACK).unwrap_or(*live)),
-                };
-                let Some(cutoff) = cutoff else {
-                    return true;
-                };
-                let exit = self.fallback_exits.get(sid);
-                let before_store = keyed
-                    .event
-                    .timestamp
-                    .is_some_and(|time| time < cutoff || exit.is_some_and(|exit| time <= *exit));
+                let before_store = std::iter::once(sid)
+                    .chain(copied_from(keyed, sid))
+                    .all(|session| self.before_store(session, &keyed.event));
                 if !before_store && let Some(key) = &keyed.key {
                     superseded.insert(key.clone());
                 }
@@ -215,6 +222,38 @@ impl CallLedger {
             drop_keys(events, &superseded);
         }
     }
+
+    /// Whether a log event of `session` predates the rows that replace it.
+    fn before_store(&self, session: &str, event: &UsageEvent) -> bool {
+        let cutoff = match event.granularity {
+            UsageGranularity::Aggregate | UsageGranularity::Remainder => {
+                self.first_call.get(session).copied()
+            }
+            UsageGranularity::Call => self
+                .first_live
+                .get(session)
+                .map(|live| live.checked_sub(LIVE_SLACK).unwrap_or(*live)),
+        };
+        let Some(cutoff) = cutoff else {
+            return true;
+        };
+        let exit = self.fallback_exits.get(session);
+        event
+            .timestamp
+            .is_some_and(|time| time < cutoff || exit.is_some_and(|exit| time <= *exit))
+    }
+}
+
+/// The session a receipt read in `session`'s log was copied from.
+fn copied_from<'a>(keyed: &'a KeyedUsageEvent, session: &str) -> Option<&'a str> {
+    if keyed.event.granularity != UsageGranularity::Call {
+        return None;
+    }
+    keyed
+        .key
+        .as_deref()
+        .and_then(source_of)
+        .filter(|source| *source != session)
 }
 
 fn drop_keys(events: &mut FileEvents, keys: &HashSet<String>) {
@@ -983,6 +1022,59 @@ mod tests {
         let mut volumes = session_volumes(&collection, "s1");
         volumes.sort_unstable();
         assert_eq!(volumes, vec![110, 220, 330, 550]);
+    }
+
+    /// A fork's copy of a receipt still names the parent as its source, so
+    /// with the parent's log gone it gives way to the parent's live row.
+    #[test]
+    fn a_forks_copy_of_a_receipt_gives_way_to_the_parents_row() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10),
+                receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 440);
+    }
+
+    /// The parent's caught-up rows give way to the fork's copies of their
+    /// receipts, but only as far as the fork copied: a later row's receipt
+    /// was in the parent's log alone.
+    #[test]
+    fn a_parents_caught_up_rows_give_way_to_the_forks_copies() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10),
+                receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("parent", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("parent", "2026-07-27T12:00:00.000Z", 300, 30),
+            ],
+        );
+        set_event_ids(temp.path(), &[(1, "usage-record:a"), (2, "usage-record:b")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 330 + 440);
     }
 
     #[test]
