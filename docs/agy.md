@@ -66,13 +66,23 @@ user.
   `gemini-3.8-flash` (see [Cost](#cost)).
 - ✅ **Project** — the workspace path recorded in the conversation.
 - ✅ **Sessions / activity** — session timestamps come from every dated
-  generation, every `history.jsonl` line, and each logged user input or tool
-  confirmation → sessions, active days, streak, daily session counts, longest
-  session, and the concurrency (PARALLEL AGENTS) sweep. A conversation's id is
-  its DB file name, which is also its `conversationId` in `history.jsonl`, so
-  a CLI conversation seen in both counts as one session. App conversations, and
-  CLI conversations with no history or log lines, are dated by their
-  generations alone.
+  generation, every `history.jsonl` line that names a conversation, and each
+  logged user input or tool confirmation → sessions, active days, streak, daily
+  session counts, longest session, and the concurrency (PARALLEL AGENTS) sweep.
+  A conversation's id is its DB file name, which is also its `conversationId`
+  in `history.jsonl`, so a CLI conversation seen in both counts as one session.
+  App conversations, and CLI conversations with no history or log lines, are
+  dated by their generations alone.
+  - A `history.jsonl` line without a `conversationId` (slash commands log
+    some) opens no session.
+  - A user input is logged just before the line naming its conversation, so it
+    joins the next conversation a log line names: `Sending user message to
+    conversation <id>`, `Created conversation <id>`, `Print mode:
+    conversation=<id>`, or a tool confirmation's `convID=`. An input no later
+    line names a conversation for stays with the last one named, or with the
+    log file when the log names none. These markers count only at the start of
+    a log message (after the `file.go:line] ` header), so prompt or tool text
+    quoted inside another message can't pass for one.
 - ✅ **Subagents** — a subagent runs as a conversation (and DB) of its own,
   whose trajectory metadata (`trajectory_metadata_blob`) names its parent
   conversation (`#5`). Its tokens and tools count as **Subagent** work under the

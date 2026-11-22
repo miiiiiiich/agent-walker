@@ -18,7 +18,7 @@ pub(in crate::collector::agy) fn parse_history_file(
     let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let mut events = FileEvents::default();
 
-    while let Some((line_index, line)) = lines.next(&mut events) {
+    while let Some((_, line)) = lines.next(&mut events) {
         let Some(value) = parse_line(line, &mut events) else {
             continue;
         };
@@ -32,8 +32,11 @@ pub(in crate::collector::agy) fn parse_history_file(
             events.parse_errors += 1;
             continue;
         };
-        let session_id = string_field(&value, "conversationId")
-            .unwrap_or_else(|| format!("history:{}", line_index + 1));
+        // A line without a conversationId (a slash command, say) names no
+        // conversation; a session per such line counted sessions that never ran.
+        let Some(session_id) = string_field(&value, "conversationId") else {
+            continue;
+        };
         events.session_touches.push(SessionTouch {
             timestamp,
             session_id,
@@ -51,4 +54,34 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
         .and_then(ident)
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_without_a_conversation_opens_no_session() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let path = temp.path().join("history.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":1780726748000,"display":"/model","type":"slash_command","workspace":"/w"}"#,
+                "\n",
+                r#"{"timestamp":1780726749000,"display":"hi","workspace":"/w","conversationId":"c1"}"#,
+            ),
+        )
+        .expect("history fixture should be written");
+
+        let events = parse_history_file(&path, UtcOffset::UTC).expect("history should parse");
+
+        let sessions: Vec<_> = events
+            .session_touches
+            .iter()
+            .map(|touch| touch.session_id.as_str())
+            .collect();
+        assert_eq!(sessions, ["c1"]);
+        assert_eq!(events.parse_errors, 0);
+    }
 }
