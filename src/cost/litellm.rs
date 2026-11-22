@@ -1,7 +1,7 @@
 //! Map `LiteLLM`'s pricing table onto the rates `cost` prices with.
 use std::collections::HashMap;
 
-use super::validate::in_bounds;
+use super::validate::{in_bounds, multiplier_in_bounds};
 use super::{LongContext, ModelPricing, Pricing};
 
 mod table;
@@ -39,9 +39,13 @@ fn model_pricing(entry: &Entry) -> Option<ModelPricing> {
         cache_write_5m: write_short,
         cache_write_1h: write_long,
     };
+    let multiplier =
+        |listed: Option<f64>| listed.filter(|multiplier| multiplier_in_bounds(*multiplier));
     Some(ModelPricing {
         base,
         long_context: long_context(entry, &base),
+        fast: multiplier(entry.multipliers.fast),
+        us: multiplier(entry.multipliers.us),
     })
 }
 

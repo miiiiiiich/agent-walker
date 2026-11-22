@@ -62,8 +62,8 @@ tokens = input + output + cache_creation + cache_read
 Claude Code re-sends the **entire conversation context every turn**, so almost
 all of it is served from the prompt cache and lands in **cache_read**. In
 practice cache_read is **~90–96%** of the total. Those tokens are real (the model
-reads them) and they are billed — just cheaply (≈0.1× input) — but they are the
-*same context re-read*, not new work.
+reads them) and they are billed — just cheaply (0.025×–0.1× input on current
+models) — but they are the *same context re-read*, not new work.
 
 So the headline token number is a **scale** signal, not "fresh work":
 
@@ -97,8 +97,9 @@ COST is **API-equivalent** and **cache-aware**:
 input×rate + output×rate + cache_read×cache_read_rate + cache_write×write_rate
 ```
 
-Per-model rates come from the LiteLLM pricing database. Claude cache reads price
-at ≈0.1×, cache writes at 1.25× (5-minute cache) or 2× (1-hour cache).
+Per-model rates come from the LiteLLM pricing database, cache rates included:
+on current Claude models a cache read costs 0.025×–0.1× the input rate, and a
+cache write 1.25× (5-minute cache) or 2× (1-hour cache).
 
 **A model prices only at its own rates.** A logged model id uses the LiteLLM
 key it equals, or the key it extends by `-latest` or by a date (`-20251001`,
@@ -118,6 +119,15 @@ base value, as in LiteLLM's own calculator. Claude Haiku 5.5 is tiered this way
 (over 100,000 prompt tokens); Opus and Sonnet 5.5 price their whole 1M window
 at the base rates, and LiteLLM lists no tier for them.
 
+**Fast mode and US-only inference are priced where the log records them.** A
+call whose `usage.speed` is `fast` pays the fast-mode multiplier LiteLLM lists
+for its model (`provider_specific_entry.fast`), and one whose
+`usage.inference_geo` is `us` pays the US multiplier (`provider_specific_entry.us`).
+Each scales every rate of the request, long-context rates included, and the two
+stack, as Anthropic bills them. A model LiteLLM lists no multiplier for keeps
+its rates. An advisor iteration records neither field of its own, so it prices
+at its model's standard rates.
+
 **Rates are bounds-checked**, for every provider. A rate must be a number from
 0 to $0.01 per token ($10,000 per million tokens). That is about 16× the
 highest rate agent-walker reads from LiteLLM's table (o1-pro output, $600 per
@@ -126,7 +136,9 @@ cannot price a month of tokens in the millions. A base rate outside the bounds
 drops its model, which then shows as unpriced (—), never as $0. A tier rate
 outside the bounds drops only the tier, and the model prices at its base
 rates. A tier threshold under 1,000 prompt tokens is ignored, and the next
-listed threshold is used. The same checks run again when the stored copy,
+listed threshold is used. A multiplier must be from 1 to 10 (fast mode, the
+highest listed, is 2×); one outside that is ignored, and the call prices at
+standard rates. The same checks run again when the stored copy,
 `~/.cache/agent-walker/pricing.json`, is read back. A stored fetch stamp that
 is not a date is dropped, so the table is fetched again.
 

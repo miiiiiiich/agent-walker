@@ -14,6 +14,11 @@ use super::{LongContext, ModelPricing, Pricing};
 /// pricing a month of tokens in the millions.
 const MAX_RATE_PER_TOKEN: f64 = 1e-2;
 
+/// Five times the highest multiplier the table lists (fast mode, 2×). Under
+/// 1 it would be a discount nobody offers, and at 0 a fast call would price
+/// at $0 while the total passed as complete.
+const MAX_PRICE_MULTIPLIER: f64 = 10.0;
+
 /// A lower threshold would put nearly every request on the tier's rates.
 pub(super) const MIN_TIER_PROMPT_TOKENS: u64 = 1_000;
 
@@ -24,6 +29,12 @@ pub(super) const MAX_TABLE_ENTRIES: usize = 50_000;
 
 pub(super) fn in_bounds(rate: f64) -> bool {
     (0.0..=MAX_RATE_PER_TOKEN).contains(&rate)
+}
+
+/// A multiplier out of bounds is dropped, and its calls price at standard
+/// rates: unlike a dropped rate, that never prices anything at $0.
+pub(super) fn multiplier_in_bounds(multiplier: f64) -> bool {
+    (1.0..=MAX_PRICE_MULTIPLIER).contains(&multiplier)
 }
 
 fn rates_in_bounds(rates: &Pricing) -> bool {
@@ -53,6 +64,11 @@ pub(super) fn retain_in_bounds(models: &mut HashMap<String, ModelPricing>) {
             .is_some_and(|tier| !tier_in_bounds(tier))
         {
             pricing.long_context = None;
+        }
+        for multiplier in [&mut pricing.fast, &mut pricing.us] {
+            if multiplier.is_some_and(|multiplier| !multiplier_in_bounds(multiplier)) {
+                *multiplier = None;
+            }
         }
         rates_in_bounds(&pricing.base)
     });
@@ -159,6 +175,30 @@ mod tests {
             .long_context
             .expect("a threshold at the floor stays");
         assert_eq!(tier.above_prompt_tokens, MIN_TIER_PROMPT_TOKENS);
+    }
+
+    /// A stored multiplier gets the fetch's bounds too: out of them it is
+    /// dropped and the model keeps its rates.
+    #[test]
+    fn a_stored_snapshot_keeps_only_multipliers_in_bounds() {
+        let raw = r#"{"_fetched":"2026-11-22","_format":4,"models":{
+            "kept":{"input":1e-6,"output":0.0,"fast":2,"us":1.1},
+            "at-bounds":{"input":1e-6,"output":0.0,"fast":10,"us":1},
+            "zero":{"input":1e-6,"output":0.0,"fast":0},
+            "discount":{"input":1e-6,"output":0.0,"us":0.5},
+            "negative":{"input":1e-6,"output":0.0,"fast":-2},
+            "huge":{"input":1e-6,"output":0.0,"fast":1e308,"us":10.000001}
+        }}"#;
+        let snapshot = parse_snapshot_json(raw).expect("every model stays");
+        let multipliers = |model: &str| {
+            let pricing = snapshot.models[model];
+            (pricing.fast, pricing.us)
+        };
+        assert_eq!(multipliers("kept"), (Some(2.0), Some(1.1)));
+        assert_eq!(multipliers("at-bounds"), (Some(10.0), Some(1.0)));
+        for dropped in ["zero", "discount", "negative", "huge"] {
+            assert_eq!(multipliers(dropped), (None, None), "{dropped}");
+        }
     }
 
     /// Fields a stored model does not use are skipped unbuilt, and a stored

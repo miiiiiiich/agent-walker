@@ -6,8 +6,9 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{CostTally, TokenUsage, UsageGranularity};
+use crate::model::{Billing, CostTally, TokenUsage, UsageGranularity};
 
+mod billing;
 mod litellm;
 mod remote;
 mod validate;
@@ -21,7 +22,7 @@ static LOADED: OnceLock<RwLock<Option<Snapshot>>> = OnceLock::new();
 /// parses, and trusted for the rest of the day it would misprice until the
 /// next day's fetch, so a mismatch refetches and keeps the file only as the
 /// offline fallback.
-const SNAPSHOT_FORMAT: u32 = 3;
+const SNAPSHOT_FORMAT: u32 = 4;
 
 /// Codex logs only the provider (`openai`, `codex`) for some sessions, and
 /// `codex-auto-review` has no `LiteLLM` key; all of them price as the model
@@ -47,6 +48,12 @@ struct ModelPricing {
     base: Pricing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     long_context: Option<LongContext>,
+    /// What Anthropic's fast mode and US-only inference multiply the rates
+    /// by; `None` where the table lists none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fast: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    us: Option<f64>,
 }
 
 /// A stored model as written, base rates inline. Read through this rather
@@ -64,6 +71,10 @@ struct StoredModel {
     cache_write_1h: f64,
     #[serde(default)]
     long_context: Option<LongContext>,
+    #[serde(default)]
+    fast: Option<f64>,
+    #[serde(default)]
+    us: Option<f64>,
 }
 
 impl From<StoredModel> for ModelPricing {
@@ -77,6 +88,8 @@ impl From<StoredModel> for ModelPricing {
                 cache_write_1h: stored.cache_write_1h,
             },
             long_context: stored.long_context,
+            fast: stored.fast,
+            us: stored.us,
         }
     }
 }
@@ -256,11 +269,21 @@ fn is_date_suffix(suffix: &str) -> bool {
     suffix.bytes().take_while(u8::is_ascii_digit).count() >= 4
 }
 
-/// Price `usage` as one request, so a prompt over the model's long-context
-/// threshold puts the whole request on the long-context rates.
-pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
-    let pricing = model_pricing(model_name)?;
-    Some(cost_at(&pricing.rates_for(usage), usage))
+/// Only a `Call` can cross a long-context threshold, and a prompt over it
+/// puts the whole request on the long-context rates. An aggregate stays at
+/// base rates rather than billing every request in it at the premium because
+/// their sum is large.
+fn priced(
+    pricing: &ModelPricing,
+    usage: &TokenUsage,
+    granularity: UsageGranularity,
+    billing: Billing,
+) -> f64 {
+    let rates = match granularity {
+        UsageGranularity::Call => pricing.rates_for(usage),
+        UsageGranularity::Aggregate => pricing.base,
+    };
+    cost_at(&rates, usage) * pricing.multiplier(billing)
 }
 
 #[allow(
@@ -289,18 +312,19 @@ fn cost_at(rates: &Pricing, usage: &TokenUsage) -> f64 {
         + write_long as f64 * rates.cache_write_1h
 }
 
-/// Price one usage event. Only a `Call` can cross a long-context threshold:
-/// an aggregate stays at base rates rather than billing every request in it
-/// at the premium because their sum is large.
-pub fn estimate(model_name: &str, usage: &TokenUsage, granularity: UsageGranularity) -> CostTally {
+/// Price one usage event, at the rates of the options it was billed with.
+pub fn estimate(
+    model_name: &str,
+    usage: &TokenUsage,
+    granularity: UsageGranularity,
+    billing: Billing,
+) -> CostTally {
     let volume = usage.token_volume();
     if volume == 0 {
         return CostTally::default();
     }
-    let cost = match granularity {
-        UsageGranularity::Call => usage_cost_usd(model_name, usage),
-        UsageGranularity::Aggregate => pricing_for(model_name).map(|base| cost_at(&base, usage)),
-    };
+    let cost =
+        model_pricing(model_name).map(|pricing| priced(&pricing, usage, granularity, billing));
     match cost {
         Some(priced_usd) => CostTally {
             priced_usd,
@@ -318,6 +342,17 @@ pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// One request at standard options.
+    fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
+        let pricing = model_pricing(model_name)?;
+        Some(priced(
+            &pricing,
+            usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        ))
+    }
 
     #[test]
     fn grok_models_resolve_from_bare_keys() {
@@ -348,6 +383,8 @@ pub(crate) mod tests {
         let flat = |base: Pricing| ModelPricing {
             base,
             long_context: None,
+            fast: None,
+            us: None,
         };
         let openai = |input: f64, output: f64, cache_read: f64| Pricing {
             input: input / 1e6,
@@ -381,6 +418,8 @@ pub(crate) mod tests {
                             above_prompt_tokens: 100_000,
                             rates: per_mtok(0.5, 2.5, 0.625, 1.0),
                         }),
+                        fast: None,
+                        us: None,
                     },
                 ),
                 (
@@ -397,6 +436,8 @@ pub(crate) mod tests {
                             above_prompt_tokens: 272_000,
                             rates: openai(4.0, 15.0, 0.2),
                         }),
+                        fast: None,
+                        us: None,
                     },
                 ),
                 // Off the real rates, which equal gpt-6.1-sol's: the
@@ -435,6 +476,8 @@ pub(crate) mod tests {
                         cache_write_1h: 6e-6,
                     },
                     long_context: None,
+                    fast: None,
+                    us: None,
                 },
             )]),
             resolved: RwLock::default(),
@@ -642,9 +685,19 @@ pub(crate) mod tests {
             input_tokens: 1_000_000,
             ..TokenUsage::default()
         };
-        let aggregate = estimate("claude-haiku-5-5", &usage, UsageGranularity::Aggregate);
+        let aggregate = estimate(
+            "claude-haiku-5-5",
+            &usage,
+            UsageGranularity::Aggregate,
+            Billing::default(),
+        );
         assert!((aggregate.priced_usd - 0.1).abs() < 1e-12);
-        let call = estimate("claude-haiku-5-5", &usage, UsageGranularity::Call);
+        let call = estimate(
+            "claude-haiku-5-5",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         assert!((call.priced_usd - 0.5).abs() < 1e-12);
     }
 
@@ -672,11 +725,21 @@ pub(crate) mod tests {
             ..TokenUsage::default()
         };
 
-        let priced = estimate("claude-opus-4-8", &usage, UsageGranularity::Call);
+        let priced = estimate(
+            "claude-opus-4-8",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         assert!(priced.is_complete());
         assert!((priced.usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
 
-        let unpriced = estimate("model-nobody-priced", &usage, UsageGranularity::Call);
+        let unpriced = estimate(
+            "model-nobody-priced",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         let mut mixed = CostTally::default();
         mixed.add(&priced);
         mixed.add(&unpriced);
@@ -693,6 +756,7 @@ pub(crate) mod tests {
             "model-nobody-priced",
             &TokenUsage::default(),
             UsageGranularity::Call,
+            Billing::default(),
         );
         assert!(empty.is_complete());
     }

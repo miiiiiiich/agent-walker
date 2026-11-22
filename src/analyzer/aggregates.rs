@@ -64,7 +64,8 @@ impl Aggregates {
         }
 
         let model_name = event.model.clone().unwrap_or_else(|| "unknown".to_owned());
-        let estimated = crate::cost::estimate(&model_name, &event.usage, event.granularity);
+        let estimated =
+            crate::cost::estimate(&model_name, &event.usage, event.granularity, event.billing);
         self.model_map
             .entry(model_name.clone())
             .or_default()

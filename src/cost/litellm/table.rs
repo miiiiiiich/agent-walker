@@ -9,6 +9,10 @@ use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAcce
 
 use crate::cost::validate::{MAX_TABLE_ENTRIES, MIN_TIER_PROMPT_TOKENS};
 
+mod multipliers;
+
+pub(in crate::cost) use multipliers::Multipliers;
+
 pub(in crate::cost) const INPUT: usize = 0;
 pub(in crate::cost) const OUTPUT: usize = 1;
 pub(in crate::cost) const CACHE_READ: usize = 2;
@@ -47,6 +51,7 @@ pub(in crate::cost) struct Entry {
     pub(in crate::cost) rates: Rates,
     pub(in crate::cost) tiers: Vec<Tier>,
     pub(in crate::cost) too_many_tiers: bool,
+    pub(in crate::cost) multipliers: Multipliers,
 }
 
 /// Chat-like entries under bare model ids: listed bare keys in table order,
@@ -254,6 +259,10 @@ impl<'de> Visitor<'de> for EntryVisitor {
         while let Some(key) = map.next_key::<String>()? {
             if key == "mode" {
                 entry.chat = matches!(map.next_value::<Scalar>()?, Scalar::ChatMode);
+                continue;
+            }
+            if key == "provider_specific_entry" {
+                entry.multipliers = map.next_value()?;
                 continue;
             }
             let Some(slot) = slot(&key) else {

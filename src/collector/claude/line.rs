@@ -8,8 +8,8 @@ use crate::collector::{
     KeyedToolEvent, KeyedUsageEvent,
 };
 use crate::model::{
-    EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    Billing, EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, ServiceTier, SessionTouch,
+    SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 use super::turns::is_human_turn;
@@ -91,7 +91,7 @@ pub(in crate::collector::claude) fn parse_line(
                 project: project.map(ToOwned::to_owned),
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
-                billing: crate::model::Billing::default(),
+                billing: billing(usage_value),
             },
         });
     }
@@ -123,7 +123,7 @@ pub(in crate::collector::claude) fn parse_line(
                     project: project.map(ToOwned::to_owned),
                     usage,
                     granularity: crate::model::UsageGranularity::Call,
-                    billing: crate::model::Billing::default(),
+                    billing: billing(Some(iteration)),
                 },
             });
         }
@@ -320,6 +320,25 @@ fn collect_tool_events(
     }
 }
 
+/// Read from the object the tokens come from. An advisor iteration records
+/// no speed or geography of its own; it is not given the main call's, which
+/// bill the main model.
+fn billing(usage: Option<&Value>) -> Billing {
+    let field = |key: &str| {
+        usage
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_str)
+    };
+    Billing {
+        tier: if field("speed") == Some("fast") {
+            ServiceTier::Fast
+        } else {
+            ServiceTier::Standard
+        },
+        us_only: field("inference_geo") == Some("us"),
+    }
+}
+
 fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let value = value?;
     let input_tokens = u64_field(value, "input_tokens");
@@ -368,6 +387,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::claude::collect;
+    use crate::model::{Billing, ServiceTier};
 
     /// A mid-turn model fallback: the failed attempt in `usage.iterations`
     /// is NOT billed (the turn is billed as the serving model, mirrored at
@@ -425,6 +445,45 @@ mod tests {
             .find(|event| event.model.as_deref() == Some("claude-sonnet-5"))
             .expect("main turn should be counted once");
         assert_eq!(main.usage.token_volume(), 22 + 12 + 220);
+    }
+
+    /// Fast mode and US-only inference come from the call's own usage; the
+    /// advisor iteration records neither and stays standard.
+    #[test]
+    fn billing_is_read_from_the_usage_of_each_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":22,"output_tokens":12,"speed":"fast","inference_geo":"us","iterations":[{"type":"message","input_tokens":10,"output_tokens":5},{"type":"advisor_message","model":"claude-fable-5-2","input_tokens":3,"output_tokens":9},{"type":"message","input_tokens":12,"output_tokens":7}]},"content":[{"type":"text","text":"hi"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","usage":{"input_tokens":5,"output_tokens":2,"speed":"standard","inference_geo":"global"},"content":[{"type":"text","text":"plain"}]}}"#,
+                "
+"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let billing = |model: &str, input: u64| {
+            collection
+                .usage_events
+                .iter()
+                .find(|event| {
+                    event.model.as_deref() == Some(model) && event.usage.input_tokens == input
+                })
+                .map(|event| event.billing)
+                .expect("event present")
+        };
+        let fast_us = Billing {
+            tier: ServiceTier::Fast,
+            us_only: true,
+        };
+        assert_eq!(billing("claude-opus-5-5", 22), fast_us);
+        assert_eq!(billing("claude-fable-5-2", 3), Billing::default());
+        assert_eq!(billing("claude-opus-5-5", 5), Billing::default());
     }
 
     #[test]
