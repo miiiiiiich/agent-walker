@@ -27,11 +27,7 @@ pub(super) struct CallLedger {
     pub(super) events: FileEvents,
     first_call: HashMap<String, OffsetDateTime>,
     first_live: HashMap<String, OffsetDateTime>,
-    live_calls: HashMap<String, Vec<OffsetDateTime>>,
     catch_up: Vec<CaughtUp>,
-    /// A falling-back session's latest exit. Its log usage up to it stays:
-    /// the exit's delta already left out the receipts before it.
-    fallback_exits: HashMap<String, OffsetDateTime>,
     /// Sessions with at least one row that couldn't be read.
     incomplete: HashSet<String>,
     /// A row that couldn't even be tied to a session.
@@ -129,11 +125,13 @@ impl CallLedger {
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of its readable rows only those after
     /// its latest exit stay: the snapshots cover everything up to it, and
-    /// dropping the later rows would lose every call since that exit. After
-    /// it the session is read like a complete one. A session without an
-    /// exit keeps all its readable rows. Only exits count, even one whose
-    /// delta is zero: a receipt covers its own call, and taken as a snapshot
-    /// it dropped every store-only call before it.
+    /// dropping the later rows would lose every call since that exit. Only
+    /// exits count, even one whose delta is zero: a receipt covers its own
+    /// call, and taken as a snapshot it dropped every store-only call before
+    /// it. After the exit the session keeps its receipts, and its rows from
+    /// just before its first receipt to just after its last give way to
+    /// them: a receipt whose row is the unreadable one is the only record of
+    /// that call, and giving way to the rows lost it.
     pub(super) fn fall_back_where_incomplete(
         &mut self,
         per_file: &[(PathBuf, Option<FileEvents>)],
@@ -142,48 +140,64 @@ impl CallLedger {
             return;
         }
         let mut exits: HashMap<String, OffsetDateTime> = HashMap::new();
+        let mut receipts: HashMap<String, Vec<OffsetDateTime>> = HashMap::new();
         for keyed in per_file
             .iter()
             .filter_map(|(_, events)| events.as_ref())
             .flat_map(|events| &events.usage_events)
-            .filter(|keyed| keyed.event.granularity == UsageGranularity::Aggregate)
         {
-            if let (Some(sid), Some(time)) =
-                (keyed.event.session_id.as_ref(), keyed.event.timestamp)
-                && (self.unattributed || self.incomplete.contains(sid))
-            {
-                exits
-                    .entry(sid.clone())
-                    .and_modify(|exit| *exit = (*exit).max(time))
-                    .or_insert(time);
+            let (Some(sid), Some(time)) = (keyed.event.session_id.as_ref(), keyed.event.timestamp)
+            else {
+                continue;
+            };
+            if !self.unattributed && !self.incomplete.contains(sid) {
+                continue;
+            }
+            match keyed.event.granularity {
+                UsageGranularity::Aggregate => {
+                    exits
+                        .entry(sid.clone())
+                        .and_modify(|exit| *exit = (*exit).max(time))
+                        .or_insert(time);
+                }
+                UsageGranularity::Call => receipts.entry(sid.clone()).or_default().push(time),
+                UsageGranularity::Remainder => {}
             }
         }
+        let spans: HashMap<String, (OffsetDateTime, OffsetDateTime)> = receipts
+            .into_iter()
+            .filter_map(|(sid, times)| {
+                let exit = exits.get(&sid);
+                let after: Vec<OffsetDateTime> = times
+                    .into_iter()
+                    .filter(|time| exit.is_none_or(|exit| time > exit))
+                    .collect();
+                let first = *after.iter().min()?;
+                let last = *after.iter().max()?;
+                Some((
+                    sid,
+                    (
+                        first.checked_sub(LIVE_SLACK).unwrap_or(first),
+                        last.checked_add(LIVE_SLACK).unwrap_or(last),
+                    ),
+                ))
+            })
+            .collect();
         self.events.usage_events.retain(|keyed| {
             let (Some(sid), Some(time)) = (keyed.event.session_id.as_ref(), keyed.event.timestamp)
             else {
                 return true;
             };
-            exits.get(sid).is_none_or(|exit| time > *exit)
+            let covered = exits.get(sid).is_some_and(|exit| time <= *exit)
+                || spans
+                    .get(sid)
+                    .is_some_and(|(from, to)| (*from..=*to).contains(&time));
+            !covered
         });
-        for (sid, exit) in &exits {
-            let live = self
-                .live_calls
-                .get(sid)
-                .and_then(|times| times.iter().copied().filter(|time| time > exit).min());
-            let caught_up = self
-                .catch_up
-                .iter()
-                .filter(|row| row.session == *sid && row.time > *exit)
-                .map(|row| row.time)
-                .min();
-            set_or_clear(&mut self.first_live, sid, live);
-            set_or_clear(
-                &mut self.first_call,
-                sid,
-                live.into_iter().chain(caught_up).min(),
-            );
+        for sid in exits.keys().chain(spans.keys()) {
+            self.first_call.remove(sid);
+            self.first_live.remove(sid);
         }
-        self.fallback_exits = exits;
     }
 
     /// From a session's first recorded call on, its rows replace its
@@ -237,10 +251,7 @@ impl CallLedger {
         let Some(cutoff) = cutoff else {
             return true;
         };
-        let exit = self.fallback_exits.get(session);
-        event
-            .timestamp
-            .is_some_and(|time| time < cutoff || exit.is_some_and(|exit| time <= *exit))
+        event.timestamp.is_some_and(|time| time < cutoff)
     }
 }
 
@@ -263,21 +274,6 @@ fn drop_keys(events: &mut FileEvents, keys: &HashSet<String>) {
     events
         .usage_events
         .retain(|keyed| keyed.key.as_ref().is_none_or(|key| !keys.contains(key)));
-}
-
-fn set_or_clear(
-    firsts: &mut HashMap<String, OffsetDateTime>,
-    session: &str,
-    time: Option<OffsetDateTime>,
-) {
-    match time {
-        Some(time) => {
-            firsts.insert(session.to_owned(), time);
-        }
-        None => {
-            firsts.remove(session);
-        }
-    }
 }
 
 fn earliest(firsts: &mut HashMap<String, OffsetDateTime>, session: &str, time: OffsetDateTime) {
@@ -398,11 +394,6 @@ pub(super) fn read_call_ledger(
         } else {
             earliest(&mut ledger.first_live, &row.session_id, timestamp);
             earliest(&mut ledger.first_call, &row.session_id, timestamp);
-            ledger
-                .live_calls
-                .entry(row.session_id.clone())
-                .or_default()
-                .push(timestamp);
         }
         let Some(key) = key else {
             continue;
@@ -818,10 +809,68 @@ mod tests {
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
     }
 
+    /// The review's case: the receipt's own row is the unreadable one, so
+    /// the receipt is the only record of that call and must stay, while the
+    /// store-only call before it still counts.
+    #[test]
+    fn a_receipt_whose_row_is_unreadable_still_counts() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T09:00:00.000Z", 300, 30)],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:00:00.500Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
+    /// The store's default stamp drops the fraction, so a call's row can
+    /// read as written before its receipt.
+    #[test]
+    fn a_row_stamped_just_before_its_receipt_is_still_its_copy() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.700Z", "s1", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T09:00:00.000Z", 300, 30),
+                call("s1", "2026-07-27 10:00:00", 100, 10),
+            ],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T09:30:00.000Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
     /// After a fallback session's latest exit, a receipt and the live row
     /// of its call count once.
     #[test]
-    fn after_the_fallback_exit_a_receipt_gives_way_to_its_row() {
+    fn after_the_fallback_exit_a_receipt_and_its_row_count_once() {
         let temp = TempDir::new().expect("test tempdir should be created");
         write_session(
             temp.path(),
@@ -884,6 +933,40 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220]);
+    }
+
+    /// The receipts' span starts after the latest exit, even one that added
+    /// nothing, so a call between that exit and the next receipt with only a
+    /// row of its own still counts.
+    #[test]
+    fn an_exit_that_adds_nothing_bounds_the_receipt_span() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
+                receipt("2026-07-27T13:00:00.000Z", "s1", 2, 200, 20),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 100, 10),
+                call("s1", "2026-07-27T12:00:00.000Z", 300, 30),
+                call("s1", "2026-07-27T13:00:00.500Z", 200, 20),
+                call("s1", "not a time", 50, 5),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 330]);
     }
 
     /// The exit's delta already left out the receipts before it, so a first

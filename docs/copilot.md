@@ -91,13 +91,15 @@ user.
   readable rows alone would lose the unreadable row's usage. Its readable
   rows up to its latest exit are dropped (that exit's cumulative, with the
   receipts before it, already covers them), even when the exit added
-  nothing; rows after it still count, so calls since the last clean exit
-  aren't lost, and there its receipts give way to its rows as in any other
-  session. Only an exit with usable counters is a snapshot here: a receipt
-  covers just its own call. A session without any exit keeps all its
-  readable rows. A row that can't be tied to a session at all applies the
-  same fallback to every session with an exit. An unreadable row dated
-  after the latest exit can't be counted anywhere.
+  nothing. Only an exit with usable counters is a snapshot here: a receipt
+  covers just its own call. After the exit the session keeps its receipts,
+  since one may be the only record of the unreadable row, and its rows
+  from 60 s before its first receipt there to 60 s after its last are
+  dropped as their copies; its other rows still count, so calls since the
+  last clean exit aren't lost. A session with neither an exit nor receipts
+  keeps all its readable rows. A row that can't be tied to a session at all
+  applies the same fallback to every session. An unreadable row dated after
+  the latest exit and outside that span can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 
