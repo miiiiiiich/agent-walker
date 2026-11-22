@@ -101,7 +101,7 @@ pub(super) fn parse_session_messages(
             continue;
         }
         let usage = token_usage(&value);
-        if usage.token_volume() > 0 {
+        if usage.token_volume() > 0 && !claude_code_records_usage(&kind, &value) {
             collection.usage_events.push(UsageEvent {
                 timestamp: Some(timestamp),
                 session_id: Some(session_id.clone()),
@@ -129,6 +129,15 @@ pub(super) fn parse_session_messages(
             }
         }
     }
+}
+
+/// The Claude Agent provider runs the installed Claude Code, whose own
+/// transcript already holds each primary turn with the full model id, so the
+/// Claude tab counts it. Side calls (compaction, generate, titles) run with
+/// `--no-session-persistence` and leave no transcript, so their rows count here.
+fn claude_code_records_usage(kind: &str, value: &Value) -> bool {
+    kind == "assistant"
+        && value.pointer("/model/providerID").and_then(Value::as_str) == Some("claude-agent")
 }
 
 fn push_turn(
@@ -368,6 +377,59 @@ mod tests {
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.tool_events.len(), 1);
         assert_eq!(collection.session_touches.len(), 1);
+    }
+
+    /// Claude Code's transcript counts a Claude Agent turn; its compaction
+    /// leaves no transcript and counts here.
+    #[test]
+    fn claude_agent_turns_keep_activity_and_tools_but_not_usage() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        let via_claude = v2_assistant(1_781_542_363_256, 100, Some("read")).replace(
+            r#""model":{"id":"claude-sonnet-4.6","providerID":"anthropic"}"#,
+            r#""model":{"id":"opus","providerID":"claude-agent"}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &via_claude,
+        );
+        insert_v2(
+            &conn,
+            "msg_c",
+            "s1",
+            "compaction",
+            2,
+            1_781_542_400_000,
+            r#"{"status":"completed","reason":"auto","summary":"s","model":{"id":"opus","providerID":"claude-agent"},"tokens":{"input":5000,"output":200,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1781542400000}}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_b",
+            "s1",
+            "assistant",
+            3,
+            1_781_542_500_000,
+            &v2_assistant(1_781_542_500_000, 300, Some("bash")),
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![300 + 12 + 30 + 4, 5_200]);
+        assert_eq!(collection.tool_events.len(), 2);
+        assert_eq!(collection.duration_events.len(), 2);
+        assert_eq!(collection.session_touches.len(), 3);
     }
 
     fn write_fork_db(dir: &Path, boundary: &str) {

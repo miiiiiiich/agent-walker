@@ -107,6 +107,15 @@ the fork generated itself count under the fork. Nested forks resolve against
 their own parent fork. When the parent or its boundary row is gone, every row
 of the fork is kept: the copies may be the only surviving record.
 
+## Claude Agent provider
+
+OpenCode 2's Claude Agent provider (`model.providerID` `claude-agent`) runs
+the installed Claude Code, which writes its own transcript of every primary
+turn. Those turns already count on the Claude tab with the full model id, so
+their OpenCode `assistant` rows add no usage; their activity, durations and
+tools still count here. Compaction and other side calls run without a Claude
+transcript (`--no-session-persistence`), so their rows keep their usage.
+
 So OpenCode reaches near-parity with Claude / Codex: tokens, cost, model,
 project, tools, sessions, durations, and hourly — all from the local DB.
 
