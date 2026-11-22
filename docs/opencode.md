@@ -136,7 +136,13 @@ the pricing database, so their tokens count but their cost stays unpriced
   the next run.
 - A live DB whose WAL still needs recovery and has no `-shm` present can't be
   opened read-only; that DB is skipped rather than touched.
-- Session title generation adds its usage to the `session_v2` totals only,
-  with no message row, so it isn't counted (a small request once per session).
-  The `session_v2` / `session` aggregates themselves are never read: they are
-  cumulative and can't be dated per turn.
+- Requests made outside the conversation add their usage to the session's
+  totals only, with no message row, so they aren't counted: session titles,
+  and `session.generate` calls (cache-warming pings, `/goal` checks,
+  plugins). Warming pings every few minutes while it is on, so this can be
+  far more than one small request per session. Each request is also a
+  durable `session.usage.recorded` event, but the `event` table keeps such
+  events only when the host turns on event persistence, which the local CLI
+  server doesn't, so the table isn't read. The `session_v2` / `session`
+  aggregates themselves are never read: they are cumulative and can't be
+  dated per turn.
