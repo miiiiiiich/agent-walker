@@ -8,6 +8,7 @@ use std::fmt;
 use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::cost::validate::{MAX_TABLE_ENTRIES, MIN_TIER_PROMPT_TOKENS};
+use crate::model::ServiceTier;
 
 mod multipliers;
 
@@ -45,12 +46,22 @@ pub(in crate::cost) struct Tier {
     pub(in crate::cost) rates: Rates,
 }
 
+/// The rates of one service tier, with its long-context tiers.
 #[derive(Default)]
-pub(in crate::cost) struct Entry {
-    pub(in crate::cost) chat: bool,
+pub(in crate::cost) struct RateKeys {
     pub(in crate::cost) rates: Rates,
     pub(in crate::cost) tiers: Vec<Tier>,
     pub(in crate::cost) too_many_tiers: bool,
+}
+
+#[derive(Default)]
+pub(in crate::cost) struct Entry {
+    pub(in crate::cost) chat: bool,
+    pub(in crate::cost) standard: RateKeys,
+    /// `OpenAI`'s Fast and Ultrafast rates, under the standard key names with
+    /// a `_priority` / `_ultrafast` suffix.
+    pub(in crate::cost) priority: RateKeys,
+    pub(in crate::cost) ultrafast: RateKeys,
     pub(in crate::cost) multipliers: Multipliers,
 }
 
@@ -87,6 +98,19 @@ enum Slot<'k> {
     },
 }
 
+/// The service tier a key prices, and the key without its suffix. The
+/// suffix ends the key, after any long-context label:
+/// `input_cost_per_token_above_272k_tokens_priority`.
+fn service_tier(key: &str) -> (ServiceTier, &str) {
+    if let Some(field) = key.strip_suffix("_priority") {
+        return (ServiceTier::Priority, field);
+    }
+    if let Some(field) = key.strip_suffix("_ultrafast") {
+        return (ServiceTier::Ultrafast, field);
+    }
+    (ServiceTier::Standard, key)
+}
+
 fn slot(key: &str) -> Option<Slot<'_>> {
     for (field, slot) in RATE_FIELDS {
         if key == field {
@@ -118,6 +142,16 @@ fn slot(key: &str) -> Option<Slot<'_>> {
 }
 
 impl Entry {
+    fn keys_mut(&mut self, tier: ServiceTier) -> &mut RateKeys {
+        match tier {
+            ServiceTier::Priority => &mut self.priority,
+            ServiceTier::Ultrafast => &mut self.ultrafast,
+            ServiceTier::Standard | ServiceTier::Fast => &mut self.standard,
+        }
+    }
+}
+
+impl RateKeys {
     fn set_tier(&mut self, slot: usize, label: &str, above_prompt_tokens: u64, rate: Option<f64>) {
         let index = match self.tiers.iter().position(|tier| tier.label == label) {
             Some(index) => index,
@@ -265,7 +299,8 @@ impl<'de> Visitor<'de> for EntryVisitor {
                 entry.multipliers = map.next_value()?;
                 continue;
             }
-            let Some(slot) = slot(&key) else {
+            let (tier, field) = service_tier(&key);
+            let Some(slot) = slot(field) else {
                 map.next_value::<IgnoredAny>()?;
                 continue;
             };
@@ -273,13 +308,14 @@ impl<'de> Visitor<'de> for EntryVisitor {
                 Scalar::Number(rate) => Some(rate),
                 Scalar::ChatMode | Scalar::Other => None,
             };
+            let keys = entry.keys_mut(tier);
             match slot {
-                Slot::Base(slot) => entry.rates[slot] = rate,
+                Slot::Base(slot) => keys.rates[slot] = rate,
                 Slot::Tier {
                     slot,
                     label,
                     above_prompt_tokens,
-                } => entry.set_tier(slot, label, above_prompt_tokens, rate),
+                } => keys.set_tier(slot, label, above_prompt_tokens, rate),
             }
         }
         Ok(Some(entry))
@@ -387,7 +423,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let (id, entry) = &entries[0];
         assert_eq!(id, "gpt-x");
-        assert_eq!(entry.rates, [Some(1e-6), None, None, None, None]);
+        assert_eq!(entry.standard.rates, [Some(1e-6), None, None, None, None]);
     }
 
     #[test]
@@ -403,7 +439,7 @@ mod tests {
         .expect("table parses");
         let rates: Vec<_> = entries
             .iter()
-            .map(|(id, entry)| (id.as_str(), entry.rates[INPUT]))
+            .map(|(id, entry)| (id.as_str(), entry.standard.rates[INPUT]))
             .collect();
         assert_eq!(rates, [("gemini-z", Some(2e-6)), ("gemini-y", Some(1e-6))]);
     }
@@ -425,15 +461,62 @@ mod tests {
         .expect("table parses");
         let (id, entry) = &entries[0];
         assert_eq!(id, "grok-x");
-        assert_eq!(entry.rates, [Some(1.0), None, None, None, Some(2e-6)]);
-        assert_eq!(entry.tiers.len(), 1);
-        let tier = &entry.tiers[0];
+        assert_eq!(
+            entry.standard.rates,
+            [Some(1.0), None, None, None, Some(2e-6)]
+        );
+        assert_eq!(entry.standard.tiers.len(), 1);
+        let tier = &entry.standard.tiers[0];
         assert_eq!(
             (tier.label.as_str(), tier.above_prompt_tokens),
             ("200k", 200_000)
         );
         assert!(tier.has_input);
         assert_eq!(tier.rates, [None, Some(3e-6), None, None, Some(4e-6)]);
+    }
+
+    /// A service-tier suffix ends the key, long-context label included; the
+    /// 12-hour write and the flex and batch keys land nowhere.
+    #[test]
+    fn service_tier_keys_land_in_their_own_slots() {
+        let Table(entries) = read(
+            r#"{"gpt-x": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-5,
+                "input_cost_per_token_priority": 2e-5,
+                "output_cost_per_token_priority": 1e-4,
+                "cache_read_input_token_cost_priority": 2e-6,
+                "cache_creation_input_token_cost_priority": 2.5e-5,
+                "input_cost_per_token_above_272k_tokens_priority": 4e-5,
+                "input_cost_per_token_ultrafast": 6e-5,
+                "cache_read_input_token_cost_above_272k_tokens_ultrafast": 1.2e-5,
+                "cache_creation_input_token_cost_above_12hr_priority": 5e-5,
+                "cache_creation_input_token_cost_above_12hr_above_272k_tokens_priority": 1e-4,
+                "input_cost_per_token_flex": 5e-6,
+                "input_cost_per_token_batches": 5e-6,
+                "input_cost_per_token_above_272k_tokens_flex": 1e-5
+            }}"#,
+        )
+        .expect("table parses");
+        let (_, entry) = &entries[0];
+        assert_eq!(entry.standard.rates, [Some(1e-5), None, None, None, None]);
+        assert_eq!(entry.standard.tiers.len(), 0);
+        assert_eq!(
+            entry.priority.rates,
+            [Some(2e-5), Some(1e-4), Some(2e-6), Some(2.5e-5), None]
+        );
+        assert_eq!(entry.priority.tiers.len(), 1);
+        assert_eq!(entry.priority.tiers[0].above_prompt_tokens, 272_000);
+        assert_eq!(
+            entry.priority.tiers[0].rates,
+            [Some(4e-5), None, None, None, None]
+        );
+        assert_eq!(entry.ultrafast.rates, [Some(6e-5), None, None, None, None]);
+        assert_eq!(
+            entry.ultrafast.tiers[0].rates,
+            [None, None, Some(1.2e-5), None, None]
+        );
+        assert!(!entry.ultrafast.tiers[0].has_input);
     }
 
     #[test]
@@ -448,7 +531,7 @@ mod tests {
         }
         let raw = serde_json::json!({ "m": entry }).to_string();
         let Table(entries) = read(&raw).expect("table parses");
-        assert_eq!(entries[0].1.tiers.len(), MAX_TIERS_PER_ENTRY);
-        assert!(entries[0].1.too_many_tiers);
+        assert_eq!(entries[0].1.standard.tiers.len(), MAX_TIERS_PER_ENTRY);
+        assert!(entries[0].1.standard.too_many_tiers);
     }
 }

@@ -12,15 +12,17 @@ use crate::collector::read::Lines;
 use crate::collector::{
     FileEvents, list_files_matching, merge_into, parse_files_cached, project_from_cwd,
 };
-use crate::model::{Collection, Provider, SessionTouch};
+use crate::model::{Billing, Collection, Provider, SessionTouch};
 use crate::timestamp::parse_rfc3339;
 
+mod billing;
 mod fork;
 mod rollout;
 mod tools;
 mod turns;
 mod usage;
 
+use billing::applied_tier;
 use fork::{Origin, in_fork_burst, is_copied_fork};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
 use tools::collect_tool_event;
@@ -104,6 +106,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut own_thread_id: Option<String> = None;
     let mut origin = Origin::default();
     let mut recorded_usage: HashSet<String> = HashSet::new();
+    let mut billing = Billing::default();
 
     while let Some((line_index, line)) = lines.next(&mut events) {
         let Some(value) = parse_line(line, &mut events) else {
@@ -164,6 +167,12 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                 );
             }
         }
+        // Read before the replay skip: a fork child's own settings row is
+        // stamped inside the fork window, and skipped, its calls would lose
+        // their tier.
+        if let Some(tier) = applied_tier(&value, own_thread_id.as_deref()) {
+            billing.tier = tier;
+        }
         if in_replay_burst {
             continue;
         }
@@ -182,6 +191,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             project: current_project.as_deref(),
             origin: &origin,
             line_index,
+            billing,
         };
         collect_usage_record(
             &value,

@@ -4,7 +4,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::collector::{FileEvents, KeyedRateLimitSample, KeyedUsageEvent};
-use crate::model::{RateLimitSample, TokenUsage, UsageEvent};
+use crate::model::{Billing, RateLimitSample, TokenUsage, UsageEvent};
 
 use super::fork::Origin;
 use super::{string_path, u64_field};
@@ -17,6 +17,7 @@ pub(super) struct UsageContext<'a> {
     pub(super) project: Option<&'a str>,
     pub(super) origin: &'a Origin,
     pub(super) line_index: usize,
+    pub(super) billing: Billing,
 }
 
 impl UsageContext<'_> {
@@ -31,7 +32,7 @@ impl UsageContext<'_> {
             project: self.project.map(ToOwned::to_owned),
             usage,
             granularity: crate::model::UsageGranularity::Call,
-            billing: crate::model::Billing::default(),
+            billing: self.billing,
         }
     }
 }

@@ -1,8 +1,23 @@
 //! The rates of the options a call was billed with (`model::Billing`).
-use super::ModelPricing;
+use super::{ModelPricing, RateCard};
 use crate::model::{Billing, ServiceTier};
 
 impl ModelPricing {
+    /// A service tier the table lists no rates for prices at the standard
+    /// ones.
+    pub(super) fn card(&self, tier: ServiceTier) -> RateCard {
+        let standard = RateCard {
+            base: self.base,
+            long_context: self.long_context,
+        };
+        let listed = match tier {
+            ServiceTier::Priority => self.priority,
+            ServiceTier::Ultrafast => self.ultrafast,
+            ServiceTier::Standard | ServiceTier::Fast => None,
+        };
+        listed.unwrap_or(standard)
+    }
+
     /// One factor on the whole request: both multipliers scale every rate,
     /// long-context ones included, and stack (`docs/claude.md`).
     pub(super) fn multiplier(&self, billing: Billing) -> f64 {
@@ -110,6 +125,112 @@ mod tests {
         close(FAST, 2.0);
         close(US, 1.1);
         close(FAST_US, 2.2);
+    }
+
+    fn openai_table() -> serde_json::Value {
+        serde_json::json!({
+            "gpt-6-astra": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-5,
+                "output_cost_per_token": 5e-5,
+                "cache_read_input_token_cost": 1e-6,
+                "input_cost_per_token_above_272k_tokens": 2e-5,
+                "output_cost_per_token_above_272k_tokens": 7.5e-5,
+                "cache_read_input_token_cost_above_272k_tokens": 2e-6,
+                "input_cost_per_token_priority": 2e-5,
+                "output_cost_per_token_priority": 1e-4,
+                "cache_read_input_token_cost_priority": 2e-6,
+                "input_cost_per_token_above_272k_tokens_priority": 4e-5,
+                "output_cost_per_token_above_272k_tokens_priority": 1.5e-4,
+                "cache_read_input_token_cost_above_272k_tokens_priority": 4e-6,
+                "input_cost_per_token_ultrafast": 6e-5,
+                "cache_read_input_token_cost_ultrafast": 6e-6
+            },
+            "gpt-standard-only": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token_priority": 9e-6
+            },
+            "gpt-poisoned-tier": {
+                "mode": "chat",
+                "input_cost_per_token": 1e-6,
+                "input_cost_per_token_priority": 2e-6,
+                "output_cost_per_token_priority": 0.5
+            }
+        })
+    }
+
+    const PRIORITY: Billing = Billing {
+        tier: ServiceTier::Priority,
+        us_only: false,
+    };
+    const ULTRAFAST: Billing = Billing {
+        tier: ServiceTier::Ultrafast,
+        us_only: false,
+    };
+
+    /// A tier's calls pay its own rates, its own long-context rates past the
+    /// threshold, and the standard rate for what the tier does not list.
+    #[test]
+    fn service_tiers_price_at_their_own_rates() {
+        let snapshot = stored(&openai_table());
+        let short = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cache_read_input_tokens: 100_000,
+            ..TokenUsage::default()
+        };
+        let priced =
+            |billing: Billing, usage: &TokenUsage| cost(&snapshot, "gpt-6-astra", usage, billing);
+        let close = |left: f64, right: f64| (left - right).abs() < 1e-12;
+        assert!(close(
+            priced(Billing::default(), &short),
+            1_000.0 * 1e-5 + 1_000.0 * 5e-5 + 100_000.0 * 1e-6
+        ));
+        assert!(close(
+            priced(PRIORITY, &short),
+            1_000.0 * 2e-5 + 1_000.0 * 1e-4 + 100_000.0 * 2e-6
+        ));
+        assert!(close(
+            priced(ULTRAFAST, &short),
+            1_000.0 * 6e-5 + 1_000.0 * 5e-5 + 100_000.0 * 6e-6
+        ));
+        let long = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 1_000,
+            cache_read_input_tokens: 300_000,
+            ..TokenUsage::default()
+        };
+        assert!(close(
+            priced(PRIORITY, &long),
+            1_000.0 * 4e-5 + 1_000.0 * 1.5e-4 + 300_000.0 * 4e-6
+        ));
+        let pricing = snapshot.resolve("gpt-6-astra").expect("model priced");
+        let aggregate =
+            super::super::priced(&pricing, &long, UsageGranularity::Aggregate, PRIORITY);
+        assert!(close(
+            aggregate,
+            1_000.0 * 2e-5 + 1_000.0 * 1e-4 + 300_000.0 * 2e-6
+        ));
+    }
+
+    /// No input rate of its own, or a rate out of bounds, is no tier: the
+    /// calls pay the standard rates.
+    #[test]
+    fn a_missing_or_refused_service_tier_prices_at_standard_rates() {
+        let snapshot = stored(&openai_table());
+        let usage = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        for model in ["gpt-standard-only", "gpt-poisoned-tier"] {
+            let standard = cost(&snapshot, model, &usage, Billing::default());
+            for billing in [PRIORITY, ULTRAFAST] {
+                let priced = cost(&snapshot, model, &usage, billing);
+                assert!((priced - standard).abs() < 1e-12, "{model} {billing:?}");
+            }
+        }
     }
 
     /// The US multiplier applies on top of the long-context rates, and a

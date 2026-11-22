@@ -65,6 +65,20 @@ pub(super) fn retain_in_bounds(models: &mut HashMap<String, ModelPricing>) {
         {
             pricing.long_context = None;
         }
+        for card in [&mut pricing.priority, &mut pricing.ultrafast] {
+            if let Some(rates) = card {
+                if rates
+                    .long_context
+                    .as_ref()
+                    .is_some_and(|tier| !tier_in_bounds(tier))
+                {
+                    rates.long_context = None;
+                }
+                if !rates_in_bounds(&rates.base) {
+                    *card = None;
+                }
+            }
+        }
         for multiplier in [&mut pricing.fast, &mut pricing.us] {
             if multiplier.is_some_and(|multiplier| !multiplier_in_bounds(multiplier)) {
                 *multiplier = None;
@@ -199,6 +213,33 @@ mod tests {
         for dropped in ["zero", "discount", "negative", "huge"] {
             assert_eq!(multipliers(dropped), (None, None), "{dropped}");
         }
+    }
+
+    /// A stored service tier meets the same bounds: a bad base rate drops
+    /// the tier, a bad long-context rate only that tier's threshold.
+    #[test]
+    fn a_stored_snapshot_keeps_only_service_tiers_in_bounds() {
+        let tier = |input: f64, long_input: f64| {
+            format!(
+                r#"{{"base":{{"input":{input},"output":1e-5}},"long_context":{{"above_prompt_tokens":272000,"rates":{{"input":{long_input},"output":1e-5}}}}}}"#
+            )
+        };
+        let raw = format!(
+            r#"{{"_fetched":"2026-11-22","_format":5,"models":{{
+                "m":{{"input":1e-6,"output":0.0,"priority":{kept},"ultrafast":{bad_base}}},
+                "n":{{"input":1e-6,"output":0.0,"priority":{bad_long}}}
+            }}}}"#,
+            kept = tier(2e-6, 4e-6),
+            bad_base = tier(-1.0, 4e-6),
+            bad_long = tier(2e-6, 0.5),
+        );
+        let snapshot = parse_snapshot_json(&raw).expect("both models stay");
+        let m = snapshot.models["m"];
+        assert!(m.priority.and_then(|card| card.long_context).is_some());
+        assert!(m.ultrafast.is_none());
+        let n = snapshot.models["n"].priority.expect("the tier stays");
+        assert!(n.long_context.is_none());
+        assert!((n.base.input - 2e-6).abs() < f64::EPSILON);
     }
 
     /// Fields a stored model does not use are skipped unbuilt, and a stored

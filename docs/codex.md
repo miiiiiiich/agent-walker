@@ -106,11 +106,11 @@ So the Total view adds up consistently with Claude. Two real differences
 
 ## Cost
 
-Same cache-aware formula as Claude. GPT models price cache reads at ≈0.1× input;
-cache writes use LiteLLM's cache-creation rate for the model. Where LiteLLM
-lists no cache-write rate (or lists 0), writes price at the model's input rate:
-they are prompt tokens moved out of `input`, and a $0 rate would make them
-free. Rates come from LiteLLM, and a model id resolves to its key by the same
+Same cache-aware formula as Claude. Cache-read rates come from LiteLLM for each
+model (0.05×–0.1× input on current GPT models); cache writes use LiteLLM's
+cache-creation rate for the model. Where LiteLLM lists no cache-write rate (or
+lists 0), writes price at the model's input rate: they are prompt tokens moved
+out of `input`, and a $0 rate would make them free. Rates come from LiteLLM, and a model id resolves to its key by the same
 rule as Claude: a newer version LiteLLM does not list yet is unpriced (—), not
 priced as an older one. Sessions that log only the provider name, and
 `codex-auto-review`, are priced as the current Codex default model
@@ -124,6 +124,17 @@ LiteLLM threshold pays the tier rates on all of its tokens. OpenAI bills
 "prompts with more than 272K input tokens" at 2× input and cache rates and
 1.5× output for the full request; LiteLLM's `_above_272k_tokens` keys carry
 those rates. A write rate the tier leaves out follows the tier's input rate.
+
+Fast and Ultrafast calls pay their service tier's rates. Codex records a
+thread's tier in its `thread_settings_applied` events (`service_tier`:
+`priority` is Codex's Fast, and `ultrafast`), and each call takes the tier its
+thread last applied. It then pays LiteLLM's `_priority` or `_ultrafast` rates
+for its model, long-context ones included
+(`input_cost_per_token_above_272k_tokens_priority`); a rate the tier does not
+list keeps the standard value. A model LiteLLM lists no rates for in that
+tier, and any other tier (`default`, `flex`), prices at the standard rates. A
+settings event that names another thread does not change the tier; older
+events name no thread and count for the rollout's own.
 
 ## Why this won't match Codex's own usage views
 

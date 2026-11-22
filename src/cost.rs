@@ -22,7 +22,7 @@ static LOADED: OnceLock<RwLock<Option<Snapshot>>> = OnceLock::new();
 /// parses, and trusted for the rest of the day it would misprice until the
 /// next day's fetch, so a mismatch refetches and keeps the file only as the
 /// offline fallback.
-const SNAPSHOT_FORMAT: u32 = 4;
+const SNAPSHOT_FORMAT: u32 = 5;
 
 /// Codex logs only the provider (`openai`, `codex`) for some sessions, and
 /// `codex-auto-review` has no `LiteLLM` key; all of them price as the model
@@ -48,6 +48,12 @@ struct ModelPricing {
     base: Pricing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     long_context: Option<LongContext>,
+    /// `OpenAI`'s Fast (`priority`) and Ultrafast rates; `None` where the
+    /// table lists none, and those calls price at the standard rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<RateCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ultrafast: Option<RateCard>,
     /// What Anthropic's fast mode and US-only inference multiply the rates
     /// by; `None` where the table lists none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +78,10 @@ struct StoredModel {
     #[serde(default)]
     long_context: Option<LongContext>,
     #[serde(default)]
+    priority: Option<RateCard>,
+    #[serde(default)]
+    ultrafast: Option<RateCard>,
+    #[serde(default)]
     fast: Option<f64>,
     #[serde(default)]
     us: Option<f64>,
@@ -88,6 +98,8 @@ impl From<StoredModel> for ModelPricing {
                 cache_write_1h: stored.cache_write_1h,
             },
             long_context: stored.long_context,
+            priority: stored.priority,
+            ultrafast: stored.ultrafast,
             fast: stored.fast,
             us: stored.us,
         }
@@ -102,7 +114,15 @@ struct LongContext {
     rates: Pricing,
 }
 
-impl ModelPricing {
+/// The rates of one service tier.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct RateCard {
+    base: Pricing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    long_context: Option<LongContext>,
+}
+
+impl RateCard {
     fn rates_for(&self, usage: &TokenUsage) -> Pricing {
         match self.long_context {
             Some(tier) if prompt_tokens(usage) > tier.above_prompt_tokens => tier.rates,
@@ -279,9 +299,10 @@ fn priced(
     granularity: UsageGranularity,
     billing: Billing,
 ) -> f64 {
+    let card = pricing.card(billing.tier);
     let rates = match granularity {
-        UsageGranularity::Call => pricing.rates_for(usage),
-        UsageGranularity::Aggregate => pricing.base,
+        UsageGranularity::Call => card.rates_for(usage),
+        UsageGranularity::Aggregate => card.base,
     };
     cost_at(&rates, usage) * pricing.multiplier(billing)
 }
@@ -383,6 +404,8 @@ pub(crate) mod tests {
         let flat = |base: Pricing| ModelPricing {
             base,
             long_context: None,
+            priority: None,
+            ultrafast: None,
             fast: None,
             us: None,
         };
@@ -418,6 +441,8 @@ pub(crate) mod tests {
                             above_prompt_tokens: 100_000,
                             rates: per_mtok(0.5, 2.5, 0.625, 1.0),
                         }),
+                        priority: None,
+                        ultrafast: None,
                         fast: None,
                         us: None,
                     },
@@ -436,6 +461,8 @@ pub(crate) mod tests {
                             above_prompt_tokens: 272_000,
                             rates: openai(4.0, 15.0, 0.2),
                         }),
+                        priority: None,
+                        ultrafast: None,
                         fast: None,
                         us: None,
                     },
@@ -476,6 +503,8 @@ pub(crate) mod tests {
                         cache_write_1h: 6e-6,
                     },
                     long_context: None,
+                    priority: None,
+                    ultrafast: None,
                     fast: None,
                     us: None,
                 },
