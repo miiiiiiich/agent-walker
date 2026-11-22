@@ -81,6 +81,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::copilot::collect;
+    use crate::collector::copilot::receipts::tests::receipt;
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
 
     fn write_segment(root: &std::path::Path, session: &str, number: u64, lines: &str) {
@@ -147,6 +148,42 @@ mod tests {
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.stats.lines_seen, 9);
         assert_eq!(collection.stats.parse_errors, 0);
+    }
+
+    /// Receipts in the archive are covered by the marked exit in the head,
+    /// so the exit adds only what no receipt carried.
+    #[test]
+    fn receipts_in_the_archive_are_covered_by_the_heads_exit() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                link("l-1", "events.1.jsonl"),
+                receipt("2026-07-27T12:00:00.000Z", "s1", 3, 300, 30),
+                shutdown("e-1", "2026-07-27T13:00:00.000Z", 1_600, 160).replacen(
+                    r#""data":{"#,
+                    r#""data":{"usageAccountingWatermarks":{"s1":3},"#,
+                    1
+                ),
+            ),
+        );
+
+        write_segment(
+            temp.path(),
+            "s1",
+            1,
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                receipt("2026-07-27T10:01:00.000Z", "s1", 2, 200, 20),
+            ),
+        );
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 1_760);
+        assert_eq!(collection.usage_events.len(), 4);
     }
 
     #[test]
