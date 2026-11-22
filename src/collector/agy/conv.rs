@@ -1,10 +1,12 @@
 //! With no public schema, read the wire format directly and pull only the needed fields.
-//! The field map was cross-checked against the `tokscale` project.
+//! Field numbers follow the usage message in the protobuf descriptor embedded in
+//! the agy binary. Its `#1` is the model enum, not a token count: reading it as
+//! system-prompt tokens added the enum value to every row's input.
 //! Because the numbers are unofficial and could shift on an Antigravity update,
 //! every row is self-verified against the precomputed output total `#3` (fields:
-//! `#3` output total, `#9` text, `#10` thinking, `#11` response id): it must
-//! equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped and
-//! counted as a parse error. A row that omits `#3` can't be verified, so it's
+//! `#3` output total, `#9` thinking, `#10` response text, `#11` response id): it
+//! must equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped
+//! and counted as a parse error. A row that omits `#3` can't be verified, so it's
 //! skipped too, but quietly (some healthy rows omit it — not an error).
 
 use std::collections::HashMap;
@@ -251,11 +253,11 @@ fn parse_gen(
     // and combine with saturating arithmetic so totals never wrap negative.
     let v = |field: u64| varint_field(usage, field).unwrap_or(0);
     let to_u64 = |x: u64| x.min(i64::MAX as u64);
-    let system = to_u64(v(1));
-    let new_input = to_u64(v(2));
+    let input = to_u64(v(2));
+    let cache_write = to_u64(v(4));
     let cache_read = to_u64(v(5));
-    let output_text = to_u64(v(9));
-    let thinking = to_u64(v(10));
+    let thinking = to_u64(v(9));
+    let output_text = to_u64(v(10));
 
     match varint_field(usage, 3) {
         Some(total) if to_u64(total) == output_text.saturating_add(thinking) => {}
@@ -263,8 +265,7 @@ fn parse_gen(
         None => return ParseGen::Empty,
     }
 
-    let input = system.saturating_add(new_input);
-    if input == 0 && output_text == 0 && cache_read == 0 && thinking == 0 {
+    if input == 0 && output_text == 0 && cache_read == 0 && cache_write == 0 && thinking == 0 {
         return ParseGen::Empty;
     }
 
@@ -308,6 +309,7 @@ fn parse_gen(
         // as the OpenCode collector); reasoning is kept separately for display.
         output_tokens: output_text.saturating_add(thinking),
         reasoning_output_tokens: thinking,
+        cache_creation_input_tokens: cache_write,
         cache_read_input_tokens: cache_read,
         ..TokenUsage::default()
     };
@@ -411,25 +413,25 @@ pub(super) mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn gen_blob(
-        system: u64,
+        model_enum: u64,
         input: u64,
         cache: u64,
-        output: u64,
+        text: u64,
         think: u64,
         total: Option<u64>,
         resp_id: &str,
     ) -> Vec<u8> {
         let mut usage = Vec::new();
-        usage.extend(varint(1, system));
+        usage.extend(varint(1, model_enum));
         usage.extend(varint(2, input));
         if let Some(total) = total {
             usage.extend(varint(3, total));
         }
         usage.extend(varint(5, cache));
-        usage.extend(varint(9, output));
-        usage.extend(varint(10, think));
+        usage.extend(varint(9, think));
+        usage.extend(varint(10, text));
         usage.extend(lenf(11, resp_id.as_bytes()));
-        let mut chat = Vec::new();
+        let mut chat = varint(3, model_enum);
         chat.extend(lenf(4, &usage));
         chat.extend(lenf(19, b"gemini-3-flash"));
         lenf(1, &chat)
@@ -464,11 +466,38 @@ pub(super) mod tests {
             ..conversation(1_700_000_000_000)
         };
         let e = event_of(parse_gen(&blob, 0, &conversation, UtcOffset::UTC));
-        assert_eq!(e.usage.input_tokens, 1632); // 1132 + 500
+        assert_eq!(e.usage.input_tokens, 500);
         assert_eq!(e.usage.cache_read_input_tokens, 16000);
+        assert_eq!(e.usage.cache_creation_input_tokens, 0);
         assert_eq!(e.usage.output_tokens, 340); // 300 + 40 (thinking folded in)
         assert_eq!(e.usage.reasoning_output_tokens, 40);
         assert_eq!(e.model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn model_enum_alone_is_empty() {
+        let blob = gen_blob(1532, 0, 0, 0, 0, Some(0), "r1");
+        assert!(matches!(parse(&blob), ParseGen::Empty));
+    }
+
+    #[test]
+    fn cache_write_counts_as_cache_creation() {
+        let mut usage = varint(1, 1532);
+        usage.extend(varint(2, 100));
+        usage.extend(varint(3, 10));
+        usage.extend(varint(4, 7000));
+        usage.extend(varint(10, 10));
+        usage.extend(lenf(11, b"r1"));
+        let e = event_of(parse(&lenf(1, &lenf(4, &usage))));
+        assert_eq!(e.usage.input_tokens, 100);
+        assert_eq!(e.usage.cache_creation_input_tokens, 7000);
+        assert_eq!(e.usage.token_volume(), 7110);
+
+        let mut only_write = varint(3, 0);
+        only_write.extend(varint(4, 7000));
+        only_write.extend(lenf(11, b"r2"));
+        let e = event_of(parse(&lenf(1, &lenf(4, &only_write))));
+        assert_eq!(e.usage.cache_creation_input_tokens, 7000);
     }
 
     #[test]
@@ -533,7 +562,7 @@ pub(super) mod tests {
         selected: Option<&str>,
     ) -> Vec<u8> {
         let mut usage = Vec::new();
-        usage.extend(varint(1, 1000));
+        usage.extend(varint(1, 1532));
         usage.extend(varint(2, 200));
         usage.extend(varint(3, 70));
         usage.extend(varint(5, 4000));
@@ -575,11 +604,11 @@ pub(super) mod tests {
             Some(1_790_000_000)
         );
         assert_eq!(e.model.as_deref(), Some("gemini-3.8-flash"));
-        assert_eq!(e.usage.input_tokens, 1200);
+        assert_eq!(e.usage.input_tokens, 200);
         assert_eq!(e.usage.output_tokens, 70);
-        assert_eq!(e.usage.reasoning_output_tokens, 20);
+        assert_eq!(e.usage.reasoning_output_tokens, 50);
         assert_eq!(e.usage.cache_read_input_tokens, 4000);
-        assert_eq!(e.usage.token_volume(), 5270);
+        assert_eq!(e.usage.token_volume(), 4270);
     }
 
     #[test]
@@ -726,7 +755,7 @@ pub(super) mod tests {
         }
         let gen_row = |rid: &str| served_only_gen_blob("gemini-3.8-flash", rid, None);
         // A row with no response id can only be matched by conversation + row index.
-        let unkeyed = gen_blob(10, 0, 0, 5, 0, Some(5), "");
+        let unkeyed = gen_blob(1532, 10, 0, 5, 0, Some(5), "");
         // The app's copy of c1 has moved one generation further than the CLI's.
         write_conversation(
             &stores[0].join("conversations").join("c1.db"),
@@ -748,7 +777,7 @@ pub(super) mod tests {
         assert_eq!(stats.parse_errors, 0);
         assert_eq!(events.len(), 5, "c1 rows once each, plus r3 and r4");
         let input: u64 = events.iter().map(|e| e.usage.input_tokens).sum();
-        assert_eq!(input, 10 + 4 * 1200);
+        assert_eq!(input, 10 + 4 * 200);
     }
 
     #[test]

@@ -58,9 +58,10 @@ user.
 
 ## What's captured
 
-- ✅ **Tokens** — per generation: input (system prompt + new input), cache-read,
-  output (text), and thinking/reasoning. Thinking is folded into output so it
-  counts toward the total (same convention as OpenCode).
+- ✅ **Tokens** — per generation: input (the prompt tokens not read from
+  cache), cache-read, cache-write, output (response text), and
+  thinking/reasoning. Thinking is folded into output so it counts toward the
+  total (same convention as OpenCode).
 - ✅ **Model** — e.g. `Gemini 3.5 Flash (High)` or `gemini-3.8-flash` (see
   [Cost](#cost)).
 - ✅ **Project** — the workspace path recorded in the conversation.
@@ -80,12 +81,25 @@ user.
 
 `gen_metadata` rows are Antigravity's internal **protobuf with no field names**,
 and there's no public schema. agent-walker reads the wire format directly and
-pulls the few fields it needs by number (cross-checked against the `tokscale`
-project, which maps them identically). Because the numbers are unofficial and
-could shift on an Antigravity update, **every row is checked against the stored
-output total** (`#3`): it must equal text + thinking (`#9` + `#10`). A row that
-fails is skipped and counted as a parse error rather than contributing garbage
-tokens.
+pulls the few fields it needs by number. What each number means comes from the
+protobuf descriptor compiled into the agy binary, read as data. In the usage
+message (`#1.#4`):
+
+| Field | Meaning | Read as |
+|---|---|---|
+| `#1` | model enum | not read (it is not a token count) |
+| `#2` | input tokens | input |
+| `#3` | output total | the self-check below |
+| `#4` | cache-write tokens | cache-write |
+| `#5` | cache-read tokens | cache-read |
+| `#9` | thinking output | reasoning, folded into output |
+| `#10` | response output | output |
+| `#11` | response id | the dedupe key |
+
+Because the numbers are unofficial and could shift on an Antigravity update,
+**every row is checked against the stored output total** (`#3`): it must equal
+thinking + response (`#9` + `#10`). A row that fails is skipped and counted as
+a parse error rather than contributing garbage tokens.
 
 What that check does and doesn't guarantee, stated honestly. Protobuf
 identifies fields by an explicit tag number on the wire, not by position, so
@@ -95,12 +109,17 @@ therefore not a positional guard; it's a **mutual-consistency** check on the
 three output fields:
 
 - It catches a **re-meaning of the output fields**: if Antigravity reassigns the
-  output total (`#3`) or its parts (`#9` text, `#10` thinking) to different tag
-  numbers, our reads stop agreeing, the equality breaks, and the row is dropped.
-- It does **not** verify the input-side fields (system `#1`, new input `#2`,
+  output total (`#3`) or its parts (`#9` thinking, `#10` response) to different
+  tag numbers, our reads stop agreeing, the equality breaks, and the row is
+  dropped.
+- It can't tell `#9` from `#10`: the sum is the same either way, so a swap of
+  the two parts passes. Output and cost stay right; only the reasoning share
+  would be wrong.
+- It does **not** verify the input-side fields (input `#2`, cache write `#4`,
   cache read `#5`): there's no stored input total to check them against, so a
-  reassignment of those tags would be read as wrong numbers and pass the output
-  check undetected. That has never been observed, but it's the residual risk.
+  misread input field passes the output check undetected. Reading the model enum
+  `#1` as system-prompt tokens is such a misread; only the descriptor rules it
+  out.
 
 So a re-meaning of the *output* fields degrades to "no/less data"; the gap is a
 silent re-meaning of an *input* field, which no row-level invariant can catch
