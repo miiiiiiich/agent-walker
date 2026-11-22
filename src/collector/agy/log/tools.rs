@@ -60,7 +60,7 @@ fn base_name(name: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
-    const RESPONDING: &str = "Responding to tool confirmation: convID=c1, stepIdx=7, approved=true, sandboxOverride=false, scope=PERMISSION_SCOPE_UNSPECIFIED, ";
+    const RESPONDING: &str = "Responding to tool confirmation: convID=c1, stepIdx=1, approved=true, sandboxOverride=false, scope=PERMISSION_SCOPE_UNSPECIFIED, ";
 
     fn confirmed(grants: &str) -> Option<String> {
         confirmed_tool(&format!("{RESPONDING}{grants}"))
@@ -114,7 +114,7 @@ mod tests {
         );
         assert_eq!(
             confirmed_tool(
-                "Responding to tool confirmation: convID=c1, stepIdx=7, approved=false, persistGrants=[command(rm)], denyGrants=[]"
+                "Responding to tool confirmation: convID=c1, stepIdx=1, approved=false, persistGrants=[command(rm)], denyGrants=[]"
             ),
             None
         );
@@ -127,12 +127,12 @@ mod tests {
     #[test]
     fn auto_approval_names_its_tool() {
         assert_eq!(
-            auto_approved_tool(r#"auto mode: auto-approving file write "Edit" at step 84"#)
+            auto_approved_tool(r#"auto mode: auto-approving file write "Edit" at step 2"#)
                 .as_deref(),
             Some("Edit")
         );
         assert_eq!(
-            auto_approved_tool(r#"auto mode: auto-approving pending file write "Write" at step 9"#)
+            auto_approved_tool(r#"auto mode: auto-approving pending file write "Write" at step 3"#)
                 .as_deref(),
             Some("Write")
         );

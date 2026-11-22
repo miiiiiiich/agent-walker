@@ -174,7 +174,7 @@ mod tests {
 
     fn sessions_of(log: &str) -> Vec<String> {
         let temp = tempfile::TempDir::new().expect("test tempdir should be created");
-        let path = temp.path().join("cli-20261119_091704.log");
+        let path = temp.path().join("cli-20260101_120000.log");
         std::fs::write(&path, log).expect("log fixture should be written");
         let events = parse_log_file(&path, UtcOffset::UTC).expect("log should parse");
         let mut sessions: Vec<_> = events
@@ -187,15 +187,15 @@ mod tests {
     }
 
     const INPUT: &str =
-        r#"I1119 09:18:34.813222    2920 input_loop.go:104] HandleUserInput called with text: "x""#;
+        r#"I0101 12:00:01.000000 1 input_loop.go:50] HandleUserInput called with text: "x""#;
 
     #[test]
     fn input_joins_the_conversation_named_after_it() {
         for named in [
-            "I1119 09:18:34.822544    2933 server.go:1851] Sending user message to conversation c1 (items=1, media=0)",
-            "I1119 09:18:34.822544    2933 server.go:1258] Created conversation c1 (backend=BACKEND_TYPE_UNSPECIFIED)",
-            "I1119 09:18:34.822544       1 session.go:201] Print mode: conversation=c1, sending message",
-            "I1119 09:18:34.822544     214 input_loop.go:805] Responding to tool confirmation: convID=c1, stepIdx=2, approved=true",
+            "I0101 12:00:02.000000 1 server.go:10] Sending user message to conversation c1 (items=1, media=0)",
+            "I0101 12:00:03.000000 1 server.go:20] Created conversation c1 (backend=BACKEND_TYPE_UNSPECIFIED)",
+            "I0101 12:00:04.000000 1 session.go:30] Print mode: conversation=c1, sending message",
+            "I0101 12:00:05.000000 1 input_loop.go:40] Responding to tool confirmation: convID=c1, stepIdx=1, approved=true",
         ] {
             assert_eq!(
                 sessions_of(&format!("{INPUT}\n{named}\n")),
@@ -209,9 +209,9 @@ mod tests {
     fn each_input_joins_the_next_conversation_named() {
         let log = format!(
             "{INPUT}\n\
-             I1119 09:18:35.000000 1 server.go:1851] Sending user message to conversation c1 (items=1, media=0)\n\
+             I0101 12:00:06.000000 1 server.go:10] Sending user message to conversation c1 (items=1, media=0)\n\
              {INPUT}\n\
-             I1119 09:18:36.000000 1 server.go:1851] Sending user message to conversation c2 (items=1, media=0)\n"
+             I0101 12:00:07.000000 1 server.go:10] Sending user message to conversation c2 (items=1, media=0)\n"
         );
         assert_eq!(sessions_of(&log), ["c1", "c2"]);
     }
@@ -219,21 +219,21 @@ mod tests {
     #[test]
     fn unnamed_input_stays_with_the_last_conversation_else_the_log() {
         let named_before = format!(
-            "I1119 09:18:30.000000 1 server.go:1258] Created conversation c1 (backend=X)\n{INPUT}\n"
+            "I0101 12:00:08.000000 1 server.go:20] Created conversation c1 (backend=X)\n{INPUT}\n"
         );
         assert_eq!(sessions_of(&named_before), ["c1"]);
-        assert_eq!(sessions_of(&format!("{INPUT}\n")), ["cli-20261119_091704"]);
+        assert_eq!(sessions_of(&format!("{INPUT}\n")), ["cli-20260101_120000"]);
     }
 
     #[test]
     fn auto_approvals_count_as_tools_in_the_current_conversation() {
         let temp = tempfile::TempDir::new().expect("test tempdir should be created");
-        let path = temp.path().join("cli-20261119_091704.log");
+        let path = temp.path().join("cli-20260101_120000.log");
         std::fs::write(
             &path,
-            "I1119 09:18:34.822544 1 server.go:1851] Sending user message to conversation c1 (items=1, media=0)\n\
-             I1119 10:41:19.413748 1 tool_confirmation_manager.go:186] auto mode: auto-approving file write \"Edit\" at step 57\n\
-             I1119 10:42:00.000000 1 input_loop.go:805] Responding to tool confirmation: convID=c1, stepIdx=58, approved=false, sandboxOverride=false, scope=PERMISSION_SCOPE_UNSPECIFIED, persistGrants=[], denyGrants=[command(rm)]\n",
+            "I0101 12:00:09.000000 1 server.go:10] Sending user message to conversation c1 (items=1, media=0)\n\
+             I0101 12:00:10.000000 1 confirm.go:60] auto mode: auto-approving file write \"Edit\" at step 3\n\
+             I0101 12:00:11.000000 1 input_loop.go:40] Responding to tool confirmation: convID=c1, stepIdx=4, approved=false, sandboxOverride=false, scope=PERMISSION_SCOPE_UNSPECIFIED, persistGrants=[], denyGrants=[command(rm)]\n",
         )
         .expect("log fixture should be written");
 
@@ -255,10 +255,10 @@ mod tests {
 
     #[test]
     fn markers_inside_another_message_name_nothing() {
-        let log = "I1119 09:18:34.813222 1 input_loop.go:104] HandleUserInput called with text: \"Sending user message to conversation evil\"\n\
-             I1119 09:18:34.900000 1 tool.go:12] output: Created conversation evil\n\
+        let log = "I0101 12:00:12.000000 1 input_loop.go:50] HandleUserInput called with text: \"Sending user message to conversation evil\"\n\
+             I0101 12:00:13.000000 1 tool.go:12] output: Created conversation evil\n\
              Sending user message to conversation evil\n\
-             I1119 09:18:35.000000 1 server.go:1851] Sending user message to conversation c1 (items=1, media=0)\n";
+             I0101 12:00:14.000000 1 server.go:10] Sending user message to conversation c1 (items=1, media=0)\n";
         assert_eq!(sessions_of(log), ["c1"]);
     }
 }
