@@ -91,9 +91,17 @@ user.
   subagents count in the parent session. Top-level conversations carry `#6`
   too, set to their own id, so only `#5` marks a subagent. Tokens are not
   shared between the two DBs, so nothing is counted twice.
-- ✅ **Some tools** — the commands you *confirmed* in approval dialogs
-  (`command:<exe>`) from the logs. Headless print-mode runs log neither
-  user input nor tool confirmations, so they add tokens but no tools.
+- ✅ **Some tools** — from the logs, the tools you approved and the ones auto
+  mode approved for you. Headless print-mode runs log neither user input nor
+  tool confirmations, so they add tokens but no tools.
+  - An approved tool confirmation counts as `command:<name>` when its grant
+    (`persistGrants`, or `turnGrants` in older builds) is a command, else as
+    `ToolConfirmation`. Only the executable's file name is kept, never its
+    directory or arguments, and a non-command grant's argument (the path in
+    `read_file(…)`) is never read. A declined confirmation (`approved=false`)
+    counts no tool, and neither does a grant in `denyGrants`.
+  - A file write auto mode approves without asking (`auto mode: auto-approving
+    file write "<Tool>"`) counts under that tool's name, e.g. `Edit`.
 
 ## The tokens are unlabeled protobuf — and self-verified
 

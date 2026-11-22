@@ -9,6 +9,10 @@ use crate::collector::{FileEvents, KeyedToolEvent};
 use crate::model::{SessionTouch, SourceKind, ToolEvent};
 use crate::timestamp::plausible;
 
+use tools::{auto_approved_tool, confirmed_tool};
+
+mod tools;
+
 /// Lines naming a conversation; the user inputs logged before one belong to it.
 const CONVERSATION_MARKERS: [&str; 4] = [
     "Sending user message to conversation ",
@@ -60,27 +64,36 @@ pub(in crate::collector::agy) fn parse_log_file(
             conversation_id = Some(id);
         }
 
-        if message.starts_with("Responding to tool confirmation") {
-            let session_id = conversation_id
-                .clone()
-                .or_else(|| fallback_session_id(path));
-            if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
-                events.session_touches.push(SessionTouch {
-                    timestamp,
-                    session_id: session_id.clone(),
-                });
-                events.tool_events.push(KeyedToolEvent {
-                    key: None,
-                    event: ToolEvent {
-                        timestamp: Some(timestamp),
-                        session_id: Some(session_id),
-                        tool_name: command_grant(message)
-                            .unwrap_or_else(|| "ToolConfirmation".to_owned()),
-                        subagent_type: None,
-                        source_kind: SourceKind::Main,
-                    },
-                });
-            }
+        let confirmation = message.starts_with("Responding to tool confirmation");
+        let tool = if confirmation {
+            confirmed_tool(message)
+        } else {
+            auto_approved_tool(message)
+        };
+        if !confirmation && tool.is_none() {
+            continue;
+        }
+        let session_id = conversation_id
+            .clone()
+            .or_else(|| fallback_session_id(path));
+        let (Some(timestamp), Some(session_id)) = (timestamp, session_id) else {
+            continue;
+        };
+        events.session_touches.push(SessionTouch {
+            timestamp,
+            session_id: session_id.clone(),
+        });
+        if let Some(tool_name) = tool {
+            events.tool_events.push(KeyedToolEvent {
+                key: None,
+                event: ToolEvent {
+                    timestamp: Some(timestamp),
+                    session_id: Some(session_id),
+                    tool_name,
+                    subagent_type: None,
+                    source_kind: SourceKind::Main,
+                },
+            });
         }
     }
 
@@ -150,18 +163,6 @@ fn leading_id(rest: &str) -> Option<String> {
     }
 }
 
-fn command_grant(line: &str) -> Option<String> {
-    let command_start = line.find("command(")? + "command(".len();
-    let rest = line.get(command_start..)?;
-    let command = rest.get(0..rest.find(')')?)?.trim();
-    let executable = ident(command.split_whitespace().next()?)?;
-    if executable.is_empty() {
-        None
-    } else {
-        Some(format!("command:{executable}"))
-    }
-}
-
 fn fallback_session_id(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|name| name.to_str())
@@ -224,6 +225,34 @@ mod tests {
         );
         assert_eq!(sessions_of(&named_before), ["c1"]);
         assert_eq!(sessions_of(&format!("{INPUT}\n")), ["cli-20261119_091704"]);
+    }
+
+    #[test]
+    fn auto_approvals_count_as_tools_in_the_current_conversation() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let path = temp.path().join("cli-20261119_091704.log");
+        std::fs::write(
+            &path,
+            "I1119 09:18:34.822544 1 server.go:1851] Sending user message to conversation c1 (items=1, media=0)\n\
+             I1119 10:41:19.413748 1 tool_confirmation_manager.go:186] auto mode: auto-approving file write \"Edit\" at step 57\n\
+             I1119 10:42:00.000000 1 input_loop.go:805] Responding to tool confirmation: convID=c1, stepIdx=58, approved=false, sandboxOverride=false, scope=PERMISSION_SCOPE_UNSPECIFIED, persistGrants=[], denyGrants=[command(rm)]\n",
+        )
+        .expect("log fixture should be written");
+
+        let events = parse_log_file(&path, UtcOffset::UTC).expect("log should parse");
+
+        let tools: Vec<_> = events
+            .tool_events
+            .iter()
+            .map(|tool| {
+                (
+                    tool.event.tool_name.as_str(),
+                    tool.event.session_id.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(tools, [("Edit", Some("c1"))]);
+        assert_eq!(events.session_touches.len(), 2);
     }
 
     #[test]
