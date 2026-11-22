@@ -121,9 +121,13 @@ So the Total view adds up consistently with Claude. Two real differences
   second after the instant are skipped, so the parent's usage is counted once
   even when the parent rollout is not in the scan. Rows that name this thread
   as their owner — its own `session_meta` and `token_usage_record`s with its
-  `thread_id` — are kept whatever their timestamp. Codex's rollout migration
-  rewrote older children with a single `session_meta`; the child's own
-  `forked_from_id` still marks them. A fork with `history_base` references
+  `thread_id` — are kept whatever their timestamp, and so are rows whose
+  `ordinal` is at or past `subagent_history_start_ordinal`, where Codex marks
+  the start of the child's own history. The mark only exempts rows from the
+  window: Codex's rollout migration rewrote some children with the mark past
+  their last row, which would make every row a copy. The migration also left
+  older children a single `session_meta`; the child's own `forked_from_id`
+  still marks them. A fork with `history_base` references
   the parent's rollout instead of copying it. Spawned children never copy
   `token_usage_record` rows.
 - **Not on disk.** Background (async) compaction requests are charged to

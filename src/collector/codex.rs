@@ -24,7 +24,7 @@ mod turns;
 mod usage;
 
 use billing::applied_tier;
-use fork::{Origin, in_fork_burst, is_copied_fork};
+use fork::{Origin, in_fork_burst, is_copied_fork, starts_own_history};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
 use tools::{ToolState, collect_tool_event};
 use turns::{
@@ -114,6 +114,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let mut current_project = None;
     let mut session_meta_count = 0usize;
     let mut fork_instant: Option<OffsetDateTime> = None;
+    let mut own_history_start: Option<u64> = None;
     let mut own_thread_id: Option<String> = None;
     let mut origin = Origin::default();
     let mut recorded_usage: HashSet<String> = HashSet::new();
@@ -130,6 +131,8 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             session_meta_count += 1;
             if session_meta_count == 1 {
                 own_thread_id = string_path(&value, &["payload", "id"]);
+                own_history_start =
+                    u64_path(&value, &["payload", "subagent_history_start_ordinal"]);
                 origin = Origin::from_session_meta(&value);
                 session_id = origin
                     .session
@@ -166,6 +169,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             && string_path(&value, &["payload", "thread_id"]) == own_thread_id;
         let in_replay_burst = !own_session_meta
             && !own_record
+            && !starts_own_history(&value, own_history_start)
             && fork_instant
                 .zip(timestamp)
                 .is_some_and(|(fork, ts)| in_fork_burst(fork, ts));

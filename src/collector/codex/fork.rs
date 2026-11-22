@@ -25,6 +25,16 @@ pub(super) fn in_fork_burst(fork: OffsetDateTime, at: OffsetDateTime) -> bool {
     at.unix_timestamp() >= fork.unix_timestamp() && at - fork < Duration::SECOND
 }
 
+/// A row at or past `subagent_history_start_ordinal` is the child's own,
+/// even stamped inside the fork window. The mark only exempts rows from the
+/// window, never replaces it: Codex's rollout migration rewrote some children
+/// with the mark past their last row, which would make every row a copy.
+pub(super) fn starts_own_history(row: &Value, own_history_start: Option<u64>) -> bool {
+    own_history_start
+        .zip(row.get("ordinal").and_then(Value::as_u64))
+        .is_some_and(|(start, ordinal)| ordinal >= start)
+}
+
 /// Read from the first `session_meta` only: a fork child's second one is the
 /// parent's copy and would make the child a main session.
 #[derive(Default)]
@@ -623,6 +633,67 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), 130 + 66);
+    }
+
+    /// Codex stamps each row with its ordinal; `subagent_history_start_ordinal`
+    /// is the first of the child's own. Its rows there count even inside the
+    /// fork second, the copies before it do not. A mark past the last row (a
+    /// migrated child) leaves the window in charge.
+    #[test]
+    fn history_start_ordinal_keeps_the_childs_own_rows_in_the_fork_window() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let numbered = |lines: Vec<String>| -> Vec<String> {
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, line)| line.replacen('{', &format!(r#"{{"ordinal":{ordinal},"#), 1))
+                .collect()
+        };
+        let spawn = r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1}}}"#;
+        let turn_context = |ts: &str, turn: &str, effort: &str| {
+            format!(
+                r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"model":"gpt-5.5","effort":"{effort}","approval_policy":"never","turn_id":"{turn}"}}}}"#
+            )
+        };
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &numbered(vec![
+                meta_line(
+                    "2026-06-01T01:00:00Z",
+                    "c1",
+                    spawn,
+                    r#","forked_from_id":"p1","subagent_history_start_ordinal":3"#,
+                ),
+                meta_line("2026-06-01T01:00:00Z", "p1", r#""cli""#, ""),
+                turn_context("2026-06-01T01:00:00Z", "t1", "high"),
+                turn_context("2026-06-01T01:00:00.200Z", "t9", "xhigh"),
+                token_count_line("2026-06-01T01:00:00.300Z", &usage_json(90, 10, 40), 380),
+            ]),
+        );
+        write_lines(
+            &temp.path().join("rollout-m1.jsonl"),
+            &numbered(vec![
+                meta_line(
+                    "2026-06-01T02:00:00Z",
+                    "m1",
+                    spawn,
+                    r#","forked_from_id":"p1","subagent_history_start_ordinal":99"#,
+                ),
+                token_count_line("2026-06-01T02:00:00Z", &usage_json(100, 40, 10), 110),
+                token_count_line("2026-06-01T02:00:30Z", &usage_json(60, 0, 6), 176),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let efforts: Vec<&str> = collection
+            .effort_events
+            .iter()
+            .map(|event| event.effort.as_str())
+            .collect();
+        assert_eq!(efforts, vec!["xhigh"]);
+        assert_eq!(collection.permission_events.len(), 1);
         assert_eq!(total_volume(&collection), 130 + 66);
     }
 
