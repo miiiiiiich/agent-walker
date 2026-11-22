@@ -97,6 +97,8 @@ legacy `part.state` shape is unchanged.
   write an assistant message's content as `session_part` rows instead, leaving
   `content` empty; a message with such rows takes its tools from its rows of
   `type` `tool` only, never from both, the way OpenCode itself reads it.
+  Those rows are read after every message, so tool payloads that use up the
+  store's 1 GiB read budget cost tools, not the messages' usage and turns.
 - **Sessions / activity / hourly** from message timestamps (`time.created`).
 
 ## Forks

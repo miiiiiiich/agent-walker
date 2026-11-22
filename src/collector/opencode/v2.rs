@@ -20,6 +20,13 @@ struct SessionMeta {
     copied_through_seq: Option<i64>,
 }
 
+/// An assistant message whose tools are read after every message's usage.
+struct ToolsDue {
+    message: String,
+    session_id: String,
+    inline: Vec<PartTool>,
+}
+
 pub(super) fn parse_session_messages(
     conn: &Store,
     floor_ms: i64,
@@ -41,7 +48,6 @@ pub(super) fn parse_session_messages(
         return;
     };
     let sessions = session_meta(conn);
-    let parts = split_parts(conn, floor_ms, collection);
     let Ok(rows) = stmt.query_map(params![floor_ms], |row| {
         conn.charge(row, 6)?;
         Ok((
@@ -56,6 +62,7 @@ pub(super) fn parse_session_messages(
         return;
     };
 
+    let mut tools_due: Vec<ToolsDue> = Vec::new();
     for row in rows {
         collection.stats.lines_seen += 1;
         let Ok((id, Some(session_id), kind, seq, time_created, data)) = row else {
@@ -106,18 +113,22 @@ pub(super) fn parse_session_messages(
         if kind == "assistant" {
             push_turn(&value, created_ms, &session_id, local_offset, collection);
             if let Entry::Vacant(slot) = tools_from.entry(id) {
-                let split = parts.tools_of(slot.key());
-                push_tools(
-                    &value,
-                    split,
-                    created_ms,
-                    &session_id,
-                    local_offset,
-                    collection,
-                );
+                tools_due.push(ToolsDue {
+                    message: slot.key().clone(),
+                    session_id,
+                    inline: inline_tools(&value, created_ms),
+                });
                 slot.insert(Generation::V2);
             }
         }
+    }
+
+    // Tool parts after the messages: read first, payloads that spent the
+    // store's read budget left every message without its usage.
+    let parts = split_parts(conn, floor_ms, collection);
+    for due in &tools_due {
+        let tools = parts.tools_of(&due.message).unwrap_or(&due.inline);
+        push_tools(tools, &due.session_id, local_offset, collection);
     }
 }
 
@@ -185,44 +196,36 @@ fn push_turn(
     }
 }
 
-fn push_tools(
-    value: &Value,
-    split: Option<&[PartTool]>,
-    created_ms: i64,
-    session_id: &str,
-    local_offset: UtcOffset,
-    collection: &mut Collection,
-) {
-    if let Some(split) = split {
-        for tool in split {
-            collection.tool_events.push(ToolEvent {
-                timestamp: ms_to_offset(tool.start_ms, local_offset),
-                session_id: Some(session_id.to_owned()),
-                tool_name: tool.name.clone(),
-                subagent_type: None,
-                source_kind: SourceKind::Main,
-            });
-        }
-        return;
-    }
-    let tools = value
+fn inline_tools(value: &Value, created_ms: i64) -> Vec<PartTool> {
+    value
         .get("content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"));
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"))
+        .filter_map(|tool| {
+            Some(PartTool {
+                name: tool.get("name")?.as_str().and_then(ident)?.to_owned(),
+                start_ms: tool
+                    .pointer("/time/created")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(created_ms),
+            })
+        })
+        .collect()
+}
+
+fn push_tools(
+    tools: &[PartTool],
+    session_id: &str,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+) {
     for tool in tools {
-        let Some(name) = tool.get("name").and_then(Value::as_str).and_then(ident) else {
-            continue;
-        };
-        let start_ms = tool
-            .pointer("/time/created")
-            .and_then(Value::as_i64)
-            .unwrap_or(created_ms);
         collection.tool_events.push(ToolEvent {
-            timestamp: ms_to_offset(start_ms, local_offset),
+            timestamp: ms_to_offset(tool.start_ms, local_offset),
             session_id: Some(session_id.to_owned()),
-            tool_name: name.to_owned(),
+            tool_name: tool.name.clone(),
             subagent_type: None,
             source_kind: SourceKind::Main,
         });
@@ -466,6 +469,46 @@ mod tests {
         assert_eq!(collection.tool_events.len(), 2);
         assert_eq!(collection.duration_events.len(), 2);
         assert_eq!(collection.session_touches.len(), 3);
+    }
+
+    /// Tool payloads that spend the store's read budget must not cost the
+    /// messages their usage. An added column's default is returned for
+    /// every older row without being stored, so a small store returns more
+    /// than the budget; a blob default keeps the test from decoding it all.
+    #[test]
+    fn tool_parts_past_the_read_budget_keep_the_usage() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &v2_assistant(1_781_542_363_256, 100, None),
+        );
+        conn.execute_batch(&format!(
+            "CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 65)
+             INSERT INTO session_part SELECT 'msg_a', 's1', n, 'tool', NULL, 1781542363300, 1781542363300 FROM r;
+             ALTER TABLE session_part ADD COLUMN data TEXT NOT NULL DEFAULT x'{}';",
+            "00".repeat(16 << 20)
+        ))
+        .expect("create part rows");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(collection.duration_events.len(), 1);
+        assert!(collection.stats.parse_errors > 0);
     }
 
     fn write_fork_db(dir: &Path, boundary: &str) {
