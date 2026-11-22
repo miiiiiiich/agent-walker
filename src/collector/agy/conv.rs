@@ -14,11 +14,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::collector::ident::ident;
 use crate::collector::project_from_cwd;
 use crate::collector::store::{Store, open_store, read_deadline};
 use crate::model::{ScanStats, SourceKind, TokenUsage, UsageEvent};
 use crate::timestamp::{from_unix_millis, to_local};
+
+use label::{selected_models, served_model_label};
+use proto::{message_field, proto_timestamp_ms, string_field, varint_field};
+use trajectory::trajectory_meta;
+
+mod label;
+mod proto;
+mod trajectory;
 
 pub(super) fn collect_usage(
     stores: &[PathBuf],
@@ -318,41 +325,6 @@ fn parse_gen(
     ParseGen::Event(Box::new(Generation { key, source, event }))
 }
 
-/// The label is the selected model minus its last segment (the mode: `-high`,
-/// `-tiered`, …), taken only when the served id is that base or the base plus
-/// one segment (`gemini-3.8-flash-n` under `gemini-3.8-flash-high` →
-/// `gemini-3.8-flash`). Matching the tags themselves (`-n`, `-trial`, …) was
-/// rejected: they are relabelled server-side and a list goes stale on the next
-/// one. An id that lines up with no selection stays as served rather than being
-/// guessed into another model.
-fn served_model_label<'a>(served: &'a str, selected: &[String]) -> &'a str {
-    let selection_base = |base: &str| selected.iter().any(|id| parent_id(id) == Some(base));
-    if selection_base(served) {
-        return served;
-    }
-    match parent_id(served) {
-        Some(base) if selection_base(base) => base,
-        _ => served,
-    }
-}
-
-fn parent_id(id: &str) -> Option<&str> {
-    id.rsplit_once('-').map(|(head, _)| head)
-}
-
-fn selected_models(blobs: &[(i64, Vec<u8>)]) -> Vec<String> {
-    let mut models: Vec<String> = blobs
-        .iter()
-        .filter_map(|(_, blob)| message_field(blob, 3))
-        .filter_map(|config| string_field(config, 28))
-        .filter(|id| !id.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    models.sort_unstable();
-    models.dedup();
-    models
-}
-
 /// Keyed by response id, not matched by position: some conversations hold
 /// more planner steps than gen rows, so the n-th step is not the n-th row.
 fn step_times_by_response(store: &Store) -> HashMap<String, i64> {
@@ -387,45 +359,6 @@ fn step_times_by_response(store: &Store) -> HashMap<String, i64> {
     times
 }
 
-fn trajectory_meta(store: &Store) -> (i64, Option<String>) {
-    if !store.has_table("trajectory_metadata_blob", &["data"]) {
-        return (0, None);
-    }
-    let blob: Option<Vec<u8>> = store
-        .query_row(
-            "SELECT data FROM trajectory_metadata_blob LIMIT 1",
-            [],
-            |row| {
-                store.charge(row, 1)?;
-                row.get(0)
-            },
-        )
-        .ok();
-    let Some(blob) = blob else {
-        return (0, None);
-    };
-    let ts = message_field(&blob, 2)
-        .and_then(proto_timestamp_ms)
-        .filter(|&ms| plausible_ms(ms))
-        .unwrap_or(0);
-    // A path, held to the path bound by `project_from_cwd`, not the id bound.
-    let project = message_field(&blob, 1)
-        .and_then(|folder| message_field(folder, 1))
-        .and_then(|uri| std::str::from_utf8(uri).ok())
-        .map(file_uri_to_path);
-    (ts, project)
-}
-
-fn file_uri_to_path(uri: &str) -> String {
-    let path = uri.trim_start_matches("file://");
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' && bytes[1].is_ascii_alphabetic() {
-        path[1..].to_owned()
-    } else {
-        path.to_owned()
-    }
-}
-
 fn systemtime_to_ms(time: SystemTime) -> Option<i64> {
     let nanos = time.duration_since(UNIX_EPOCH).ok()?.as_millis();
     i64::try_from(nanos).ok()
@@ -437,100 +370,8 @@ fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
 
 /// A stamp past the plausible range is treated like a missing one, so the
 /// row falls back to the next source instead of going undated.
-fn plausible_ms(ms: i64) -> bool {
+pub(in crate::collector::agy) fn plausible_ms(ms: i64) -> bool {
     ms > 0 && from_unix_millis(ms).is_some()
-}
-
-fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
-    let seconds = i64::try_from(varint_field(ts, 1)?).ok()?;
-    let nanos = i64::try_from(varint_field(ts, 2).unwrap_or(0)).ok()?;
-    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
-}
-
-enum Wire<'a> {
-    Varint(u64),
-    Len(&'a [u8]),
-}
-
-struct ProtoReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> ProtoReader<'a> {
-    fn read_varint(&mut self) -> Option<u64> {
-        let mut result = 0u64;
-        let mut shift = 0u32;
-        loop {
-            let byte = *self.buf.get(self.pos)?;
-            self.pos += 1;
-            result |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return Some(result);
-            }
-            shift += 7;
-            if shift >= 64 {
-                return None;
-            }
-        }
-    }
-
-    fn next_field(&mut self) -> Option<(u64, Wire<'a>)> {
-        if self.pos >= self.buf.len() {
-            return None;
-        }
-        let tag = self.read_varint()?;
-        let wire = match tag & 0x7 {
-            0 => Wire::Varint(self.read_varint()?),
-            1 => {
-                self.pos = self.pos.checked_add(8).filter(|&p| p <= self.buf.len())?;
-                return Some((tag >> 3, Wire::Varint(0))); // fixed64, value unused
-            }
-            2 => {
-                let len = usize::try_from(self.read_varint()?).ok()?;
-                let end = self.pos.checked_add(len).filter(|&p| p <= self.buf.len())?;
-                let bytes = &self.buf[self.pos..end];
-                self.pos = end;
-                Wire::Len(bytes)
-            }
-            5 => {
-                self.pos = self.pos.checked_add(4).filter(|&p| p <= self.buf.len())?;
-                return Some((tag >> 3, Wire::Varint(0))); // fixed32, value unused
-            }
-            _ => return None,
-        };
-        Some((tag >> 3, wire))
-    }
-}
-
-fn message_field(buf: &[u8], field: u64) -> Option<&[u8]> {
-    let mut reader = ProtoReader { buf, pos: 0 };
-    while let Some((found, wire)) = reader.next_field() {
-        if found == field
-            && let Wire::Len(bytes) = wire
-        {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-fn varint_field(buf: &[u8], field: u64) -> Option<u64> {
-    let mut reader = ProtoReader { buf, pos: 0 };
-    while let Some((found, wire)) = reader.next_field() {
-        if found == field
-            && let Wire::Varint(value) = wire
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn string_field(buf: &[u8], field: u64) -> Option<&str> {
-    message_field(buf, field)
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(ident)
 }
 
 #[cfg(test)]
@@ -677,15 +518,6 @@ pub(super) mod tests {
         assert!(matches!(parse(&blob), ParseGen::Empty));
     }
 
-    #[test]
-    fn windows_file_uri_drops_the_drive_slash() {
-        assert_eq!(
-            file_uri_to_path("file:///C:/Users/me/repo"),
-            "C:/Users/me/repo"
-        );
-        assert_eq!(file_uri_to_path("file:///Users/me/repo"), "/Users/me/repo");
-    }
-
     fn timestamp(ms: i64) -> Vec<u8> {
         let secs = u64::try_from(ms / 1000).expect("test timestamp should be positive");
         let mut ts = varint(1, secs);
@@ -727,49 +559,6 @@ pub(super) mod tests {
         let mut metadata = lenf(1, &timestamp(created_ms));
         metadata.extend(lenf(9, &lenf(11, resp_id.as_bytes())));
         metadata
-    }
-
-    #[test]
-    fn routing_tag_resolves_to_the_selected_model() {
-        let selected = vec![
-            "gemini-3.8-flash-high".to_owned(),
-            "gemini-4-argon-medium".to_owned(),
-        ];
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-n", &selected),
-            "gemini-3.8-flash"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash", &selected),
-            "gemini-3.8-flash"
-        );
-        assert_eq!(
-            served_model_label("gemini-4-argon-trial", &selected),
-            "gemini-4-argon"
-        );
-        // The app serves under the selected id itself, mode segment included.
-        let app = vec!["gemini-3.8-flash-tiered".to_owned()];
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-tiered", &app),
-            "gemini-3.8-flash"
-        );
-    }
-
-    #[test]
-    fn served_id_unrelated_to_the_selection_stays_as_served() {
-        let selected = vec!["gemini-3.8-flash-high".to_owned()];
-        assert_eq!(
-            served_model_label("gemini-default", &selected),
-            "gemini-default"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-lite-n", &selected),
-            "gemini-3.8-flash-lite-n"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-n", &[]),
-            "gemini-3.8-flash-n"
-        );
     }
 
     #[test]
