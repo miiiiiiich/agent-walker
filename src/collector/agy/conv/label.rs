@@ -4,11 +4,22 @@ use super::proto::{message_field, string_field};
 /// (`gemini-4-neon`). Rows on a `-tiered` selection carry no display name, so
 /// labelling the rest by it raw split one model into two labels. The steps are
 /// the pricing lookup's (lowercase, cut a `[deploy]` or `(tier)` suffix,
-/// hyphenate spaces), so a label is the key it prices under. Only the space
-/// becomes `-`: hyphenating a tab or a line break turned `Gemini\tprivate-repo`
-/// into `gemini-private-repo`, which the shared-output sanitizer passes. Any
-/// other whitespace stays, so the sanitizer still collapses the label.
-pub(in crate::collector::agy) fn display_name_label(display: &str) -> String {
+/// hyphenate spaces), so a label is the key it prices under.
+///
+/// A name holding a control character or whitespace other than the space is
+/// not used, checked before anything is cut: hyphenating a tab turned
+/// `Gemini\tprivate-repo` into `gemini-private-repo`, and cutting the tier off
+/// `Gemini private-repo\t(High)` left a trailing tab the shared-output
+/// sanitizer trims, so both reached the share card. Such a name, and one with
+/// nothing left, is `None`, and the row is labelled from its served id as if
+/// it had no display name.
+pub(in crate::collector::agy) fn display_name_label(display: &str) -> Option<String> {
+    if display
+        .chars()
+        .any(|ch| ch.is_control() || (ch.is_whitespace() && ch != ' '))
+    {
+        return None;
+    }
     let lower = display.to_ascii_lowercase();
     let no_deploy = lower
         .split_once('[')
@@ -16,11 +27,12 @@ pub(in crate::collector::agy) fn display_name_label(display: &str) -> String {
     let no_tier = no_deploy
         .split_once('(')
         .map_or(no_deploy, |(head, _)| head);
-    no_tier
+    let label = no_tier
         .split(' ')
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    (!label.is_empty()).then_some(label)
 }
 
 /// The label is the selected model minus its last segment (the mode: `-high`,
@@ -67,39 +79,44 @@ mod tests {
 
     #[test]
     fn display_name_takes_the_pricing_id_form() {
-        assert_eq!(display_name_label("Gemini 4 Neon (High)"), "gemini-4-neon");
+        let label = |display: &str| display_name_label(display);
         assert_eq!(
-            display_name_label("Gemini 3.8 Flash (Low)"),
-            "gemini-3.8-flash"
+            label("Gemini 4 Neon (High)").as_deref(),
+            Some("gemini-4-neon")
         );
-        assert_eq!(display_name_label(" Gemini 4  Argon "), "gemini-4-argon");
-        assert_eq!(display_name_label("gemini-4-argon"), "gemini-4-argon");
-        assert_eq!(display_name_label("Gemini 4 Neon [eu]"), "gemini-4-neon");
-        assert_eq!(display_name_label("(High)"), "");
-        // Non-ASCII whitespace is kept for the shared-output sanitizer to reject.
         assert_eq!(
-            display_name_label("Gemini\u{2028}Neon"),
-            "gemini\u{2028}neon"
+            label("Gemini 3.8 Flash (Low)").as_deref(),
+            Some("gemini-3.8-flash")
         );
+        assert_eq!(
+            label(" Gemini 4  Argon ").as_deref(),
+            Some("gemini-4-argon")
+        );
+        assert_eq!(label("gemini-4-argon").as_deref(), Some("gemini-4-argon"));
+        assert_eq!(
+            label("Gemini 4 Neon [eu]").as_deref(),
+            Some("gemini-4-neon")
+        );
+        assert_eq!(label("(High)"), None);
+        // Neither is what the sanitizer lets through, so neither labels a row.
+        assert_eq!(label("Gemini 4 Neon\u{a0}(High)"), None);
+        assert_eq!(label("Gemini\u{2028}Neon"), None);
     }
 
-    /// A tab or line break is not turned into a hyphen: the label keeps it,
-    /// so the share card shows `Other` instead of a smuggled name.
+    /// A tab or line break anywhere, the cut suffix included, keeps the name
+    /// off the row, so the share card can't show a smuggled one.
     #[test]
-    fn whitespace_other_than_a_space_still_collapses_on_the_card() {
+    fn a_name_with_other_whitespace_or_a_control_character_is_not_used() {
         for display in [
             "Gemini\tprivate-repo",
             "Gemini\nprivate-repo",
             "Gemini\rprivate-repo",
             "Gemini\u{c}private-repo",
+            "Gemini private-repo\t(High)",
+            "Gemini private-repo\n[eu]",
+            "Gemini private-repo (\u{1b}High)",
         ] {
-            let label = display_name_label(display);
-            assert_ne!(label, "gemini-private-repo", "{display:?}");
-            assert_eq!(
-                crate::format::short_model_name(&label),
-                "Other",
-                "{display:?}"
-            );
+            assert_eq!(display_name_label(display), None, "{display:?}");
         }
     }
 

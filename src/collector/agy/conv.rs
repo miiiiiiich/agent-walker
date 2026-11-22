@@ -323,8 +323,7 @@ fn parse_gen(
     // fall back to #19, reconciled with the selected model so a routing tag
     // doesn't split one model into several unpriced labels.
     let model = string_field(chat_model, 21)
-        .map(display_name_label)
-        .filter(|label| !label.is_empty())
+        .and_then(display_name_label)
         .or_else(|| {
             string_field(chat_model, 19)
                 .filter(|served| !served.trim().is_empty())
@@ -571,15 +570,17 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn blank_display_name_falls_back_to_the_served_id() {
-        let mut usage = varint(3, 10);
-        usage.extend(varint(10, 10));
-        usage.extend(lenf(11, b"r1"));
-        let mut chat = lenf(4, &usage);
-        chat.extend(lenf(19, b"gemini-4-argon"));
-        chat.extend(lenf(21, b" (Medium)"));
-        let e = event_of(parse(&lenf(1, &chat)));
-        assert_eq!(e.model.as_deref(), Some("gemini-4-argon"));
+    fn blank_or_unusable_display_name_falls_back_to_the_served_id() {
+        for display in [&b" (Medium)"[..], b"Gemini private-repo\t(High)"] {
+            let mut usage = varint(3, 10);
+            usage.extend(varint(10, 10));
+            usage.extend(lenf(11, b"r1"));
+            let mut chat = lenf(4, &usage);
+            chat.extend(lenf(19, b"gemini-4-argon"));
+            chat.extend(lenf(21, display));
+            let e = event_of(parse(&lenf(1, &chat)));
+            assert_eq!(e.model.as_deref(), Some("gemini-4-argon"));
+        }
     }
 
     #[test]
