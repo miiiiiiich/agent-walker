@@ -175,8 +175,13 @@ would share its start time, misplacing long conversations by hour and day.
 
 ## Cost
 
-Cost is estimated from the LiteLLM table, the same as every other agent. The
-gen blob carries two model labels: an internal id (`#1.#19`, e.g.
+Cost is estimated from the LiteLLM table, the same as every other agent.
+Every generation, however old, is priced at the rates in the table agent-walker
+loaded for the run, not at the rates in force when it ran. A rate change — a
+Gemini price increase, say — therefore applies to all history, and the same
+window reports a different cost once the table updates.
+
+The gen blob carries two model labels: an internal id (`#1.#19`, e.g.
 `gemini-3-flash-a` — a version-mismatched codename) and a display name
 (`#1.#21`, e.g. `Gemini 4 Neon (High)`). Every row is labelled in the **pricing
 id form** (`gemini-4-neon`) whichever of the two it carries, so one model shows
