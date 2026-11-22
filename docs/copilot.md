@@ -82,12 +82,15 @@ user.
   session's rows can't be read (a `created_at` that doesn't parse, a value of
   the wrong type), that session keeps its snapshots: superseding them from the
   readable rows alone would lose the unreadable row's usage. Its readable
-  rows up to its latest snapshot are dropped (the snapshots already cover
-  them); rows after it still count, so calls since the last clean exit
-  aren't lost. A session without any snapshot keeps all its readable rows. A
-  row that can't be tied to a session at all applies the same fallback to
-  every session with snapshots. An unreadable row dated after the latest
-  snapshot can't be counted anywhere.
+  rows up to its latest exit are dropped (that exit's cumulative, with the
+  receipts before it, already covers them), even when the exit added
+  nothing; rows after it still count, so calls since the last clean exit
+  aren't lost, and there its receipts give way to its rows as in any other
+  session. Only an exit with usable counters is a snapshot here: a receipt
+  covers just its own call. A session without any exit keeps all its
+  readable rows. A row that can't be tied to a session at all applies the
+  same fallback to every session with an exit. An unreadable row dated
+  after the latest exit can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 

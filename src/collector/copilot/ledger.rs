@@ -21,11 +21,16 @@ const CATCH_UP_PREFIX: &str = "usage-record:";
 /// rows are caught up from get the same cut.
 const LIVE_SLACK: Duration = Duration::seconds(60);
 
+#[derive(Default)]
 pub(super) struct CallLedger {
     pub(super) events: FileEvents,
     first_call: HashMap<String, OffsetDateTime>,
     first_live: HashMap<String, OffsetDateTime>,
+    live_calls: HashMap<String, Vec<OffsetDateTime>>,
     catch_up: Vec<CaughtUp>,
+    /// A falling-back session's latest exit. Its log usage up to it stays:
+    /// the exit's delta already left out the receipts before it.
+    fallback_exits: HashMap<String, OffsetDateTime>,
     /// Sessions with at least one row that couldn't be read.
     incomplete: HashSet<String>,
     /// A row that couldn't even be tied to a session.
@@ -104,9 +109,12 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of its readable rows only those after
-    /// its latest snapshot stay: the snapshots cover everything up to it,
-    /// and dropping the later rows would lose every call since that exit.
-    /// A session without snapshots keeps all its readable rows.
+    /// its latest exit stay: the snapshots cover everything up to it, and
+    /// dropping the later rows would lose every call since that exit. After
+    /// it the session is read like a complete one. A session without an
+    /// exit keeps all its readable rows. Only exits count, even one whose
+    /// delta is zero: a receipt covers its own call, and taken as a snapshot
+    /// it dropped every store-only call before it.
     pub(super) fn fall_back_where_incomplete(
         &mut self,
         per_file: &[(PathBuf, Option<FileEvents>)],
@@ -114,39 +122,49 @@ impl CallLedger {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
-        let mut covered_until: HashMap<&String, OffsetDateTime> = HashMap::new();
+        let mut exits: HashMap<String, OffsetDateTime> = HashMap::new();
         for keyed in per_file
             .iter()
             .filter_map(|(_, events)| events.as_ref())
             .flat_map(|events| &events.usage_events)
+            .filter(|keyed| keyed.event.granularity == UsageGranularity::Aggregate)
         {
             if let (Some(sid), Some(time)) =
                 (keyed.event.session_id.as_ref(), keyed.event.timestamp)
+                && (self.unattributed || self.incomplete.contains(sid))
             {
-                covered_until
-                    .entry(sid)
-                    .and_modify(|until| *until = (*until).max(time))
+                exits
+                    .entry(sid.clone())
+                    .and_modify(|exit| *exit = (*exit).max(time))
                     .or_insert(time);
             }
         }
-        let falls_back_until = |sid: &String| {
-            if self.unattributed || self.incomplete.contains(sid) {
-                covered_until.get(sid).copied()
-            } else {
-                None
-            }
-        };
         self.events.usage_events.retain(|keyed| {
             let (Some(sid), Some(time)) = (keyed.event.session_id.as_ref(), keyed.event.timestamp)
             else {
                 return true;
             };
-            falls_back_until(sid).is_none_or(|until| time > until)
+            exits.get(sid).is_none_or(|exit| time > *exit)
         });
-        self.first_call
-            .retain(|sid, _| falls_back_until(sid).is_none());
-        self.first_live
-            .retain(|sid, _| falls_back_until(sid).is_none());
+        for (sid, exit) in &exits {
+            let live = self
+                .live_calls
+                .get(sid)
+                .and_then(|times| times.iter().copied().filter(|time| time > exit).min());
+            let caught_up = self
+                .catch_up
+                .iter()
+                .filter(|row| row.session == *sid && row.time > *exit)
+                .map(|row| row.time)
+                .min();
+            set_or_clear(&mut self.first_live, sid, live);
+            set_or_clear(
+                &mut self.first_call,
+                sid,
+                live.into_iter().chain(caught_up).min(),
+            );
+        }
+        self.fallback_exits = exits;
     }
 
     /// From a session's first recorded call on, its rows replace its
@@ -176,7 +194,11 @@ impl CallLedger {
                 let Some(cutoff) = cutoff else {
                     return true;
                 };
-                let before_store = keyed.event.timestamp.is_some_and(|time| time < cutoff);
+                let exit = self.fallback_exits.get(sid);
+                let before_store = keyed
+                    .event
+                    .timestamp
+                    .is_some_and(|time| time < cutoff || exit.is_some_and(|exit| time <= *exit));
                 if !before_store && let Some(key) = &keyed.key {
                     superseded.insert(key.clone());
                 }
@@ -202,6 +224,21 @@ fn drop_keys(events: &mut FileEvents, keys: &HashSet<String>) {
     events
         .usage_events
         .retain(|keyed| keyed.key.as_ref().is_none_or(|key| !keys.contains(key)));
+}
+
+fn set_or_clear(
+    firsts: &mut HashMap<String, OffsetDateTime>,
+    session: &str,
+    time: Option<OffsetDateTime>,
+) {
+    match time {
+        Some(time) => {
+            firsts.insert(session.to_owned(), time);
+        }
+        None => {
+            firsts.remove(session);
+        }
+    }
 }
 
 fn earliest(firsts: &mut HashMap<String, OffsetDateTime>, session: &str, time: OffsetDateTime) {
@@ -282,14 +319,7 @@ pub(super) fn read_call_ledger(
         })
         .ok()?;
 
-    let mut ledger = CallLedger {
-        events: FileEvents::default(),
-        first_call: HashMap::new(),
-        first_live: HashMap::new(),
-        catch_up: Vec::new(),
-        incomplete: HashSet::new(),
-        unattributed: false,
-    };
+    let mut ledger = CallLedger::default();
     let mut caught_up: Vec<CaughtUp> = Vec::new();
     for row in rows {
         ledger.events.lines_seen += 1;
@@ -329,6 +359,11 @@ pub(super) fn read_call_ledger(
         } else {
             earliest(&mut ledger.first_live, &row.session_id, timestamp);
             earliest(&mut ledger.first_call, &row.session_id, timestamp);
+            ledger
+                .live_calls
+                .entry(row.session_id.clone())
+                .or_default()
+                .push(timestamp);
         }
         let Some(key) = key else {
             continue;
@@ -414,7 +449,7 @@ mod tests {
 
     use super::*;
     use crate::collector::copilot::collect;
-    use crate::collector::copilot::receipts::tests::receipt;
+    use crate::collector::copilot::receipts::tests::{marked, receipt};
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
 
     struct Call<'a> {
@@ -704,6 +739,143 @@ mod tests {
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(session_volumes(&collection, "s1"), vec![300, 50]);
         assert_eq!(session_volumes(&collection, "s2"), vec![50]);
+    }
+
+    fn sorted_volumes(collection: &Collection, session: &str) -> Vec<u64> {
+        let mut volumes = session_volumes(collection, session);
+        volumes.sort_unstable();
+        volumes
+    }
+
+    /// A receipt covers only its own call: without an exit there is no
+    /// snapshot to fall back to, so an incomplete session's store-only call
+    /// before the receipt still counts, and the receipt gives way to its
+    /// live row as in a complete session.
+    #[test]
+    fn a_receipt_is_not_a_snapshot_for_the_fallback() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T09:00:00.000Z", 300, 30),
+                call("s1", "2026-07-27T10:00:00.500Z", 100, 10),
+            ],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T09:30:00.000Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
+    /// After a fallback session's latest exit, a receipt and the live row
+    /// of its call count once.
+    #[test]
+    fn after_the_fallback_exit_a_receipt_gives_way_to_its_row() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 1_100, 110),
+                    r#"{"s1":1}"#
+                ),
+                receipt("2026-07-27T12:00:00.000Z", "s1", 2, 200, 20),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 100, 10),
+                call("s1", "2026-07-27T12:00:00.500Z", 200, 20),
+            ],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:30:00.000Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220, 1_100]);
+    }
+
+    /// An exit whose receipts carried its whole cumulative adds nothing, yet
+    /// still covers the rows up to it; the receipt whose row is unreadable
+    /// is the only record of that call.
+    #[test]
+    fn an_exit_that_adds_nothing_still_drives_the_fallback() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                receipt("2026-07-27T10:30:00.000Z", "s1", 2, 200, 20),
+                marked(
+                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 300, 30),
+                    r#"{"s1":2}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:30:00.500Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 220]);
+    }
+
+    /// The exit's delta already left out the receipts before it, so a first
+    /// live row soon after the exit must not drop them.
+    #[test]
+    fn receipts_up_to_the_fallback_exit_stay() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T10:59:30.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T11:00:00.000Z", 1_100, 110),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T11:00:15.000Z", 300, 30)],
+        );
+        insert_raw_row(
+            temp.path(),
+            "'s1', 'gpt-5-mini', 'not a number', 20, '2026-07-27T10:59:30.500Z'",
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330, 1_100]);
     }
 
     /// Gives rows (by insertion order, from 1) the store's `event_id`.

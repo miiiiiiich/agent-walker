@@ -154,7 +154,7 @@ pub(super) mod tests {
         )
     }
 
-    fn marked(line: &str, marks: &str) -> String {
+    pub(in crate::collector::copilot) fn marked(line: &str, marks: &str) -> String {
         line.replacen(
             r#""data":{"#,
             &format!(r#""data":{{"usageAccountingWatermarks":{marks},"#),

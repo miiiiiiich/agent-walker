@@ -60,6 +60,14 @@ pub fn collect(
         ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
     }
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events
+            .usage_events
+            .retain(|keyed| keyed.event.usage.token_volume() > 0);
+    }
     merge_into(&mut collection, per_file);
     collection
 }
@@ -325,6 +333,8 @@ fn collect_shutdown_usage(
     else {
         return;
     };
+    let mut validated = false;
+    let mut counted = false;
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
             continue;
@@ -339,6 +349,7 @@ fn collect_shutdown_usage(
         {
             continue;
         }
+        validated = true;
         let current = RawCounters {
             input: u64_field(usage, "inputTokens"),
             output: u64_field(usage, "outputTokens"),
@@ -366,6 +377,7 @@ fn collect_shutdown_usage(
         if usage.token_volume() == 0 {
             continue;
         }
+        counted = true;
         let key = match (line.event_id, line.session_id) {
             (Some(id), _) => Some(format!("copilot:{id}:{model}")),
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
@@ -373,19 +385,36 @@ fn collect_shutdown_usage(
         };
         events.usage_events.push(KeyedUsageEvent {
             key,
-            event: UsageEvent {
-                timestamp: line.timestamp,
-                session_id: line.session_id.cloned(),
-                model: Some(model.clone()),
-                source_kind: SourceKind::Main,
-                attribution_agent: None,
-                attribution_skill: None,
-                project: project.map(ToOwned::to_owned),
-                usage,
-                granularity: crate::model::UsageGranularity::Aggregate,
-                billing: crate::model::Billing::default(),
-            },
+            event: exit_usage(line, Some(model), project, usage),
         });
+    }
+    // An exit that adds nothing still marks how far its cumulative reaches,
+    // which the store fallback cuts at; the empty event goes before merging.
+    if validated && !counted && line.session_id.is_some() {
+        events.usage_events.push(KeyedUsageEvent {
+            key: None,
+            event: exit_usage(line, None, project, TokenUsage::default()),
+        });
+    }
+}
+
+fn exit_usage(
+    line: &Line,
+    model: Option<&String>,
+    project: Option<&str>,
+    usage: TokenUsage,
+) -> UsageEvent {
+    UsageEvent {
+        timestamp: line.timestamp,
+        session_id: line.session_id.cloned(),
+        model: model.cloned(),
+        source_kind: SourceKind::Main,
+        attribution_agent: None,
+        attribution_skill: None,
+        project: project.map(ToOwned::to_owned),
+        usage,
+        granularity: crate::model::UsageGranularity::Aggregate,
+        billing: crate::model::Billing::default(),
     }
 }
 
