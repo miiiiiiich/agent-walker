@@ -80,10 +80,10 @@ their own. The log does not say which calls these are.
   the session's transcript: `max(0, total − transcript)`. The transcript side
   is the session's main and subagent files with advisor calls, each
   `message.id` once within the session, the copy kept as described under
-  Deduplication below. A field the transcript is ahead on
-  (a total that started after some of the session's calls) adds nothing. A
-  model keyed with a context suffix, `claude-opus-5[1m]`, is its plain model,
-  under which its calls are logged.
+  Deduplication below. A field the transcript is ahead on (a total that
+  started after some of the session's calls) adds nothing. A model keyed
+  with a context suffix, `claude-opus-5[1m]`, is its plain model, under which
+  its calls are logged.
 - **Several processes.** A resumed session can be run by more than one
   process, each with its own `startTime`. A process that carries the previous
   total forward continues it, and the last total is compared with all the
@@ -91,10 +91,11 @@ their own. The log does not say which calls these are.
   each run's last total is compared with the calls made before it was
   written. A carried total never loses a counter, so a new process whose
   total is below the previous one for any model and field, or lacks one of
-  its models, has started again, even if its total is larger overall. When calls follow the last total, their process has recorded no
-  total yet; the total is compared with the calls before it, and the later
-  calls add nothing until their process writes one. If two main files hold
-  totals for the same session, only the one written last is used.
+  its models, has started again, even if its total is larger overall. When
+  calls follow the last total, their process has recorded no total yet; the
+  total is compared with the calls before it, and the later calls add nothing
+  until their process writes one. If two main files hold totals for the same
+  session, only the one written last is used.
 - **Forks.** A session forked from another starts from the other's total
   (with its `startTime`) and copies only part of its calls. The other
   session's last total written before the fork's first call of its own is
