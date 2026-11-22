@@ -22,6 +22,9 @@ pub struct FileEvents {
     pub permission_events: Vec<KeyedPermissionEvent>,
     pub interrupt_events: Vec<KeyedInterruptEvent>,
     pub pace_events: Vec<KeyedPaceEvent>,
+    /// Read across files after parsing, so it is kept apart from the events.
+    #[serde(default)]
+    pub claude_cost_state: super::claude::CostStateLog,
     pub lines_seen: usize,
     pub parse_errors: usize,
 }

@@ -59,11 +59,52 @@ projects and the codename's volume, like any other call. They count toward
 none of the activity: sessions, active days, streak, hourly profile, turns,
 working time, PARALLEL AGENTS, tools and modes. In the CONTEXT section they
 fall in the `other` row, and in the JSON export their usage rows have
-`"source": "background"`.
+`"source": "background"`. The observer's own cost-state totals (below) are
+added the same way.
 
-Usage and tool calls come only from the transcript's `user` and `assistant`
-rows. The request-log rows (`api-request`, `api-request-blob`,
-`api-request-shape`) replay the conversation being sent, so they are skipped.
+Tool calls come only from the transcript's `user` and `assistant` rows, and
+so does usage, apart from the calls only the `cost-state` rows record (below).
+The request-log rows (`api-request`, `api-request-blob`, `api-request-shape`)
+replay the conversation being sent, so they are skipped.
+
+## Calls only the cost-state records
+
+Claude Code writes `{"type":"cost-state"}` rows into a session's main
+transcript: the running total of the process, per model, of input, output,
+cache writes (split into 5-minute and 1-hour) and cache reads. The rows carry
+no timestamp. The total also counts calls that never get an `assistant` row of
+their own. The log does not say which calls these are.
+
+- **What is added.** Per session, model and field, the part of the total over
+  the session's transcript: `max(0, total − transcript)`. The transcript side
+  is the session's main and subagent files with advisor calls, each
+  `message.id` once within the session. A field the transcript is ahead on
+  (a total that started after some of the session's calls) adds nothing. A
+  model keyed with a context suffix, `claude-opus-5[1m]`, is its plain model,
+  under which its calls are logged.
+- **Several processes.** A resumed session can be run by more than one
+  process, each with its own `startTime`. A process that carries the previous
+  total forward continues it, and the last total is compared with all the
+  calls. A process whose total starts again from zero begins a new run, and
+  each run's last total is compared with the calls made before it was
+  written. When calls follow the last total, their process has recorded no
+  total yet; the total is compared with the calls before it, and the later
+  calls add nothing until their process writes one. If two main files hold
+  totals for the same session, only the one written last is used.
+- **Where it lands.** The added usage is spread over the local hours the
+  session made calls in, in proportion to its transcript tokens in each hour,
+  and each part is dated at the session's last call in that hour. It adds no
+  session, active day, turn or working time, the hourly profile follows the
+  session's own hours, and the share of a long session from before the window
+  stays outside it. A session with no dated call adds nothing.
+- **How it counts.** Each part is a summed row: priced at base rates, never a
+  long-context tier, and at standard speed and geography, which the total
+  does not record. It counts as one call in its model's row, falls in the
+  CONTEXT section's `other` row, and goes to the project of the call it is
+  dated at.
+- So that a long session is compared whole, its subagent files are read even
+  when they are older than the files the window would otherwise read; the
+  rows in them are older than any window.
 
 ## How tokens are counted (important)
 
@@ -92,8 +133,8 @@ The **CONTEXT** section reports the cached share over the fixed 30-day window
 near 95% for most people; what distinguishes users is where the *rest* goes,
 so the section breaks the input-equivalent volume down by context-size band,
 expired resumes, cold starts, ordinary uncached input, and an `other` row for
-volume that is not attributable to a call (subagent rows, providers whose
-logs record aggregates) — see `src/analyzer/context.rs` for the definitions.
+volume that is not attributable to a call (subagent rows, the calls only the
+cost-state records, providers whose logs record aggregates) — see `src/analyzer/context.rs` for the definitions.
 
 ## Deduplication
 

@@ -1,9 +1,10 @@
+mod cost_state;
 mod line;
 mod turns;
 
 use std::collections::HashSet;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -15,9 +16,10 @@ use crate::collector::read::{Lines, open_regular};
 use crate::collector::{
     FileEvents, KeyedPaceEvent, list_files, merge_into, parse_files_cached, project_from_cwd,
 };
-use crate::model::{Collection, PaceEvent, Provider, SourceKind};
+use crate::model::{Collection, PaceEvent, Provider, ScanStats, SourceKind};
 use crate::timestamp::parse_rfc3339;
 
+pub use cost_state::CostStateLog;
 use line::{is_interrupt_marker, parse_line};
 use turns::{TurnState, is_human_turn};
 
@@ -37,7 +39,10 @@ pub fn collect(
         return collection;
     }
 
-    let files = list_files(root, "jsonl", mtime_floor, &mut collection.stats);
+    let mut files = list_files(root, "jsonl", mtime_floor, &mut collection.stats);
+    if mtime_floor.is_some() {
+        add_session_dirs(&mut files, &mut collection.stats);
+    }
     let per_file = parse_files_cached(
         use_cache.then_some("claude"),
         &files,
@@ -51,8 +56,31 @@ pub fn collect(
             })
         },
     );
+    // Totals are per session across its files, so they are compared with
+    // the transcript after every file is read, before the copies collapse.
+    let uncounted = cost_state::uncounted_calls(&per_file, local_offset);
     merge_into(&mut collection, per_file);
+    collection.usage_events.extend(uncounted);
+    collection.stats.usage_events = collection.usage_events.len();
     collection
+}
+
+/// A session's cost-state covers every call it made, so a long session's
+/// subagent files are read with its transcript even where the mtime floor
+/// would prune them: left out, their calls read as uncounted. They hold only
+/// rows older than the floor, which no window reaches.
+fn add_session_dirs(files: &mut Vec<PathBuf>, stats: &mut ScanStats) {
+    let session_dirs: Vec<PathBuf> = files
+        .iter()
+        .filter(|path| path_source_kind(path) == SourceKind::Main)
+        .map(|path| path.with_extension(""))
+        .filter(|dir| dir.is_dir())
+        .collect();
+    for dir in session_dirs {
+        files.extend(list_files(&dir, "jsonl", None, stats));
+    }
+    files.sort();
+    files.dedup();
 }
 
 fn is_background_path(path: &Path) -> bool {
@@ -74,6 +102,7 @@ fn usage_only(events: FileEvents) -> FileEvents {
     }
     FileEvents {
         usage_events,
+        claude_cost_state: events.claude_cost_state,
         lines_seen: events.lines_seen,
         parse_errors: events.parse_errors,
         ..FileEvents::default()
@@ -122,11 +151,16 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
     // reopen (its replayed answer then finds nothing pending and is inert).
     let mut seen_prompts: HashSet<String> = HashSet::new();
     let mut seen_questions: HashSet<String> = HashSet::new();
+    let mut cost_state = CostStateLog::default();
 
     while let Some((line_index, line)) = lines.next(&mut events) {
         let Some(value) = parse_json_line(line, &mut events) else {
             continue;
         };
+        if source_kind == SourceKind::Main && cost_state.observe(&value) {
+            continue;
+        }
+        let usage_before = events.usage_events.len();
         if project.is_none()
             && let Some(cwd) = value
                 .get("cwd")
@@ -212,8 +246,15 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
             project.as_deref().or(fallback_project.as_deref()),
             &mut events,
         );
+        if source_kind == SourceKind::Main {
+            cost_state.note(
+                parse_timestamp(value.get("timestamp")),
+                events.usage_events.len() > usage_before,
+            );
+        }
     }
 
+    events.claude_cost_state = cost_state;
     turn.flush(&mut events);
     events.compress_touches(local_offset);
     Some(events)
