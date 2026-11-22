@@ -7,6 +7,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use rayon::prelude::*;
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -44,16 +45,7 @@ pub fn collect(
         return collection;
     }
 
-    let mut per_file = if files.is_empty() {
-        Vec::new()
-    } else {
-        parse_files_cached(
-            use_cache.then_some("copilot"),
-            &files,
-            local_offset,
-            |path| parse_file(path, local_offset),
-        )
-    };
+    let mut per_file = parse_heads(files, use_cache, local_offset);
     if let Some(mut ledger) = ledger {
         ledger.yield_catch_up_to_receipts(&per_file);
         ledger.fall_back_where_incomplete(&per_file);
@@ -118,6 +110,35 @@ fn event_files(
     }
     files.sort();
     files
+}
+
+/// The cache stamps only the file it is keyed by, so a head that links back
+/// is parsed every run: served from the cache, it kept the history it had
+/// when first parsed, and a predecessor restored later was never read.
+fn parse_heads(
+    files: Vec<PathBuf>,
+    use_cache: bool,
+    local_offset: UtcOffset,
+) -> Vec<(PathBuf, Option<FileEvents>)> {
+    let (linked, plain): (Vec<PathBuf>, Vec<PathBuf>) = files
+        .into_iter()
+        .partition(|head| segments::links_back(head));
+    let mut parsed = if plain.is_empty() {
+        Vec::new()
+    } else {
+        parse_files_cached(
+            use_cache.then_some("copilot"),
+            &plain,
+            local_offset,
+            |path| parse_file(path, local_offset),
+        )
+    };
+    parsed.par_extend(linked.into_par_iter().map(|head| {
+        let events = parse_file(&head, local_offset);
+        (head, events)
+    }));
+    parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
+    parsed
 }
 
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {

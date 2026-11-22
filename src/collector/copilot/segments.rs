@@ -46,6 +46,12 @@ pub(super) fn journal(head: &Path, events: &mut FileEvents) -> Option<Vec<PathBu
     Some(chain)
 }
 
+/// Whether `head` names a numbered predecessor, followed or not: its parse
+/// then reads files besides `head`.
+pub(super) fn links_back(head: &Path) -> bool {
+    matches!(predecessor(head), Ok(Some(_)))
+}
+
 /// The numbered file `path`'s first record links back to, if any.
 fn predecessor(path: &Path) -> io::Result<Option<(u64, String)>> {
     let file = open_regular(path)?;
@@ -79,6 +85,7 @@ mod tests {
     use tempfile::TempDir;
     use time::UtcOffset;
 
+    use super::links_back;
     use crate::collector::copilot::collect;
     use crate::collector::copilot::receipts::tests::receipt;
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
@@ -296,6 +303,37 @@ mod tests {
         assert_eq!(volume("other"), 5_500);
         assert_eq!(volume("s1"), 1_650);
         assert_eq!(volume("s2"), 3_300);
+    }
+
+    /// A head that names a predecessor links back even while the
+    /// predecessor is missing, since it may appear later; a link that is
+    /// never followed leaves the head on its own.
+    #[test]
+    fn a_head_links_back_whether_or_not_its_predecessor_is_there() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exit = shutdown("e-2", "2026-07-27T12:00:00.000Z", 1_500, 150);
+        write_session(
+            temp.path(),
+            "missing",
+            &format!("{}\n{exit}\n", link("l-1", "events.1.jsonl")),
+        );
+        write_session(
+            temp.path(),
+            "outward",
+            &format!("{}\n{exit}\n", link("l-1", "../other/events.jsonl")),
+        );
+        write_session(temp.path(), "plain", &format!("{exit}\n"));
+        let head = |session: &str| {
+            temp.path()
+                .join("session-state")
+                .join(session)
+                .join("events.jsonl")
+        };
+
+        assert!(links_back(&head("missing")));
+        assert!(!links_back(&head("outward")));
+        assert!(!links_back(&head("plain")));
+        assert!(!links_back(&head("absent")));
     }
 
     #[test]

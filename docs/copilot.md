@@ -15,7 +15,10 @@ retired `gh copilot` extension):
   each exit still counts once. The replay checkpoint a new head opens with
   (records marked `checkpoint`) copies what the archive already holds and is
   skipped, apart from the session's start. A missing predecessor ends the
-  chain there; an unreadable one also counts as a parse error.
+  chain there; an unreadable one also counts as a parse error. A head that
+  links back is parsed again on every run rather than taken from the parse
+  cache, which checks only the head's size and modification time, so a
+  predecessor that appears or changes later is still read.
 - `session-store.db` — the CLI's SQLite session store. Its
   `assistant_usage_events` table holds one row per model call (CLI 1.0.69 and
   later). The DB is opened **read-only**, like the OpenCode store.
