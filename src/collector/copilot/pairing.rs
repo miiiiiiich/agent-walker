@@ -41,11 +41,13 @@ struct Receipt<'a> {
 /// schema, and local rows add up to the exits field for field; that a
 /// receipt's counts equal its row's is not verified on disk. Matching by
 /// time alone took rows of other calls; whichever of two identical calls a
-/// receipt takes, the counts come out the same.
+/// receipt takes, the counts come out the same. `exempt` names the sessions
+/// `distrusted` leaves alone.
 pub(super) fn pair_receipts(
     per_file: &[(PathBuf, Option<FileEvents>)],
     rows: &FileEvents,
     caught_up: &HashSet<&str>,
+    exempt: &dyn Fn(&str) -> bool,
 ) -> Vec<Copies> {
     let mut receipts = receipts(per_file);
     if receipts.is_empty() {
@@ -73,11 +75,24 @@ pub(super) fn pair_receipts(
             calls.entry(call).or_default().rows.push((time, key));
         }
     }
-    for list in calls.values_mut() {
+    let mut live_spans: HashMap<&str, (OffsetDateTime, OffsetDateTime)> = HashMap::new();
+    for ((caught_up, session, _, _), list) in &mut calls {
         list.rows.sort_unstable();
+        if let (false, Some((first, _)), Some((last, _))) =
+            (*caught_up, list.rows.first(), list.rows.last())
+        {
+            live_spans
+                .entry(session)
+                .and_modify(|(from, to)| {
+                    *from = (*from).min(*first);
+                    *to = (*to).max(*last);
+                })
+                .or_insert((*first, *last));
+        }
     }
 
     let mut found = Vec::new();
+    let mut trust: HashMap<&str, Trust> = HashMap::new();
     for receipt in &receipts {
         let from = receipt.time.checked_sub(PAIR_SLACK).unwrap_or(receipt.time);
         let to = receipt.time.checked_add(PAIR_SLACK).unwrap_or(receipt.time);
@@ -94,9 +109,16 @@ pub(super) fn pair_receipts(
                 live = Some((time, session));
             }
         }
+        let home = live.map_or(receipt.source.unwrap_or(receipt.logs[0]), |(_, at)| at);
         let live = live
             .and_then(|(_, session)| calls.get_mut(&receipt.call(false, session))?.take())
             .is_some();
+        let record = trust.entry(home).or_default();
+        if live {
+            record.paired = true;
+        } else {
+            record.unpaired.push((receipt.time, receipt.key));
+        }
         let mut sessions: Vec<&str> = receipt.source.into_iter().collect();
         for &session in &receipt.logs {
             if !sessions.contains(&session) {
@@ -119,7 +141,45 @@ pub(super) fn pair_receipts(
             });
         }
     }
+    found.extend(distrusted(&trust, &live_spans, exempt));
     found
+}
+
+/// Per session that made calls: whether any of its receipts paired with a
+/// live row, and those that didn't.
+#[derive(Default)]
+struct Trust<'a> {
+    paired: bool,
+    unpaired: Vec<(OffsetDateTime, &'a str)>,
+}
+
+/// A session whose receipts sit among its live rows yet never pair with one
+/// shows a key that doesn't hold there, such as a count the CLI writes
+/// differently, and every call would count twice. Its live rows then stand
+/// for the receipts dated within their span; receipts outside it still
+/// count. An `exempt` session is left alone: an unpaired receipt there may
+/// be the call of its unreadable row, or one its exit already deducted.
+fn distrusted<'a>(
+    trust: &'a HashMap<&str, Trust>,
+    live_spans: &'a HashMap<&str, (OffsetDateTime, OffsetDateTime)>,
+    exempt: &'a dyn Fn(&str) -> bool,
+) -> impl Iterator<Item = Copies> + 'a {
+    trust
+        .iter()
+        .filter(|(session, record)| !record.paired && !exempt(session))
+        .filter_map(|(session, record)| Some((live_spans.get(session)?, record)))
+        .flat_map(|(&(first, last), record)| {
+            let from = first.checked_sub(PAIR_SLACK).unwrap_or(first);
+            let to = last.checked_add(PAIR_SLACK).unwrap_or(last);
+            record
+                .unpaired
+                .iter()
+                .filter(move |(time, _)| (from..=to).contains(time))
+                .map(|(_, key)| Copies {
+                    receipt: Some((*key).to_owned()),
+                    caught_up: Vec::new(),
+                })
+        })
 }
 
 fn receipts(per_file: &[(PathBuf, Option<FileEvents>)]) -> Vec<Receipt<'_>> {

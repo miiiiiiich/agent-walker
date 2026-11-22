@@ -86,7 +86,12 @@ user.
   to the exit totals field for field; that a receipt's counts equal its
   row's is not verified on disk. A live row stands for the call; caught-up
   rows are copies and give way. A receipt or a row left without a partner
-  counts on its own.
+  counts on its own, except that when not one of a session's receipts
+  pairs with the live rows around them, the pairing is taken not to hold
+  there and those live rows stand for the receipts within their span (61 s
+  either side), so a field the CLI writes differently can't count every
+  call twice; a session with an unreadable row, or one falling back to its
+  exits, is left as paired.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a

@@ -130,7 +130,9 @@ impl CallLedger {
             .collect();
         let mut receipts: HashSet<String> = HashSet::new();
         let mut rows: HashSet<String> = HashSet::new();
-        for copies in pair_receipts(per_file, &self.events, &caught_up) {
+        let exempt =
+            |session: &str| self.incomplete.contains(session) || self.fallback.contains(session);
+        for copies in pair_receipts(per_file, &self.events, &caught_up, &exempt) {
             rows.extend(copies.caught_up);
             receipts.extend(copies.receipt);
         }
@@ -1308,7 +1310,7 @@ mod tests {
             "fork-a",
             &format!(
                 "{}\n",
-                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10)
+                receipt("2026-07-27T09:00:00.000Z", "parent", 1, 100, 10)
             ),
         );
         write_session(
@@ -1316,15 +1318,15 @@ mod tests {
             "fork-b",
             &format!(
                 "{}\n",
-                receipt("2026-07-27T12:00:00.000Z", "parent", 3, 300, 30)
+                receipt("2026-07-27T11:00:00.000Z", "parent", 3, 300, 30)
             ),
         );
         write_store(
             temp.path(),
             &[
-                call("parent", "2026-07-27T10:00:00.000Z", 100, 10),
-                call("parent", "2026-07-27T11:00:00.000Z", 200, 20),
-                call("parent", "2026-07-27T12:00:00.000Z", 300, 30),
+                call("parent", "2026-07-27T09:00:00.000Z", 100, 10),
+                call("parent", "2026-07-27T10:00:00.000Z", 200, 20),
+                call("parent", "2026-07-27T11:00:00.000Z", 300, 30),
             ],
         );
         set_event_ids(
@@ -1351,13 +1353,13 @@ mod tests {
             "fork",
             &format!(
                 "{}\n{}\n",
-                receipt("2026-07-27T10:00:00.700Z", "parent", 1, 100, 10),
+                receipt("2026-07-27T09:00:00.500Z", "parent", 1, 100, 10),
                 receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
             ),
         );
         write_store(
             temp.path(),
-            &[call("parent", "2026-07-27 10:00:00", 100, 10)],
+            &[call("parent", "2026-07-27 09:00:00", 100, 10)],
         );
         set_event_ids(temp.path(), &[(1, "usage-record:a")]);
 
@@ -1436,6 +1438,84 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The review's case: model A's receipt, whose row is the unreadable
+    /// one, and model B's row 15 s before it are two calls.
+    #[test]
+    fn a_receipt_whose_row_is_unreadable_keeps_another_models_row_beside_it() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[Call {
+                model: "claude-haiku-4.5",
+                ..call("s1", "2026-07-27T09:59:45.000Z", 300, 30)
+            }],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T10:00:00.500Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![110, 330]);
+    }
+
+    /// The review's case: an exit with valid zero counters for A and B's
+    /// `outputTokens` missing keeps B's readable call.
+    #[test]
+    fn an_exit_missing_a_models_counters_keeps_that_models_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let exit = r#"{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}},"claude-haiku-4.5":{"usage":{"inputTokens":45,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}"#;
+        write_session(temp.path(), "s1", &format!("{exit}\n"));
+        write_store(
+            temp.path(),
+            &[Call {
+                model: "claude-haiku-4.5",
+                ..call("s1", "2026-07-27T10:00:00.000Z", 45, 5)
+            }],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T10:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![50]);
+    }
+
+    /// Receipts that never pair with a single live row they sit among mean
+    /// the pairing key doesn't hold for the session; the live rows stand for
+    /// those calls rather than count beside them. A receipt outside the
+    /// rows' span still counts.
+    #[test]
+    fn receipts_that_never_pair_with_the_rows_around_them_give_way() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 10),
+                receipt("2026-07-27T10:30:00.000Z", "s1", 2, 200, 20),
+                receipt("2026-07-27T12:00:00.000Z", "s1", 3, 300, 30),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 101, 10),
+                call("s1", "2026-07-27T10:30:00.500Z", 201, 20),
+            ],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(sorted_volumes(&collection, "s1"), vec![111, 221, 330]);
     }
 
     #[test]
