@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use time::{Date, OffsetDateTime, UtcOffset};
@@ -8,6 +8,7 @@ use crate::model::{Billing, SourceKind, TokenUsage, UsageEvent, UsageGranularity
 use crate::timestamp::to_local;
 
 use super::CostStateRow;
+use super::fork::discount_forks;
 use super::transcript::{Call, transcripts};
 
 /// A local date and hour.
@@ -29,11 +30,13 @@ pub(in crate::collector::claude) fn uncounted_calls(
     per_file: &[(PathBuf, Option<FileEvents>)],
     local_offset: UtcOffset,
 ) -> Vec<UsageEvent> {
-    let logs = log_per_session(per_file);
+    let mut logs = log_per_session(per_file);
     if logs.is_empty() {
         return Vec::new();
     }
-    let mut transcripts = transcripts(per_file, &logs);
+    let sessions: HashSet<&str> = logs.keys().copied().collect();
+    let mut transcripts = transcripts(per_file, &sessions);
+    discount_forks(&mut logs, &mut transcripts);
     let mut buckets: BTreeMap<(String, String, Slot), Bucket> = BTreeMap::new();
     for (session, rows) in logs {
         let Some(calls) = transcripts.remove(session) else {
@@ -61,9 +64,7 @@ pub(in crate::collector::claude) fn uncounted_calls(
 /// Every session's rows from one file. A session whose rows are in more than
 /// one file keeps the file that wrote last: the totals are cumulative, and
 /// adding two files' would count their shared part twice.
-fn log_per_session(
-    per_file: &[(PathBuf, Option<FileEvents>)],
-) -> HashMap<&str, Vec<&CostStateRow>> {
+fn log_per_session(per_file: &[(PathBuf, Option<FileEvents>)]) -> HashMap<&str, Vec<CostStateRow>> {
     let mut logs: HashMap<&str, Vec<&CostStateRow>> = HashMap::new();
     for (_, events) in per_file {
         let Some(events) = events else {
@@ -90,16 +91,18 @@ fn log_per_session(
             }
         }
     }
-    logs
+    logs.into_iter()
+        .map(|(session, rows)| (session, rows.into_iter().cloned().collect()))
+        .collect()
 }
 
 /// The rows that close each run of a session's totals. A process that
 /// resumes a session either carries the previous total forward or starts again
 /// from zero; only a restart begins a new run. Splitting at every process
 /// counted a carried-over total once per process.
-fn runs<'a>(rows: &[&'a CostStateRow]) -> Vec<&'a CostStateRow> {
+fn runs(rows: &[CostStateRow]) -> Vec<&CostStateRow> {
     let mut runs: Vec<&CostStateRow> = Vec::new();
-    for (index, &row) in rows.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
         let restarted = index > 0
             && row.start_time != rows[index - 1].start_time
             && row.volume() < rows[index - 1].volume();

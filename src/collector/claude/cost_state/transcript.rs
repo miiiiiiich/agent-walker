@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use time::OffsetDateTime;
@@ -6,10 +6,12 @@ use time::OffsetDateTime;
 use crate::collector::FileEvents;
 use crate::model::{SourceKind, TokenUsage};
 
-use super::{CostStateRow, transcript_model};
+use super::transcript_model;
 
 /// A transcript call of a session that has a cost-state.
-pub(super) struct Call {
+pub(super) struct Call<'a> {
+    /// The `message.id` key, shared by every copy of the call.
+    pub(super) key: Option<&'a str>,
     pub(super) timestamp: Option<OffsetDateTime>,
     pub(super) model: String,
     pub(super) usage: TokenUsage,
@@ -22,9 +24,9 @@ pub(super) struct Call {
 /// keeps a copy shared by two sessions in only one of them, which would read
 /// as uncounted in the other.
 pub(super) fn transcripts<'a>(
-    per_file: &[(PathBuf, Option<FileEvents>)],
-    logs: &HashMap<&'a str, Vec<&CostStateRow>>,
-) -> HashMap<&'a str, Vec<Call>> {
+    per_file: &'a [(PathBuf, Option<FileEvents>)],
+    sessions: &HashSet<&'a str>,
+) -> HashMap<&'a str, Vec<Call<'a>>> {
     let mut calls: HashMap<&str, Vec<Call>> = HashMap::new();
     let mut seen: HashMap<(&str, &str), usize> = HashMap::new();
     for (_, events) in per_file {
@@ -33,14 +35,11 @@ pub(super) fn transcripts<'a>(
         };
         for keyed in &events.usage_events {
             let event = &keyed.event;
-            let Some((&session, _)) = event
-                .session_id
-                .as_deref()
-                .and_then(|id| logs.get_key_value(id))
-            else {
+            let Some(&session) = event.session_id.as_deref().and_then(|id| sessions.get(id)) else {
                 continue;
             };
             let call = Call {
+                key: keyed.key.as_deref(),
                 timestamp: event.timestamp,
                 model: transcript_model(event.model.as_deref().unwrap_or("unknown")).to_owned(),
                 usage: event.usage.clone(),
@@ -48,7 +47,7 @@ pub(super) fn transcripts<'a>(
                 source_kind: event.source_kind,
             };
             let session_calls = calls.entry(session).or_default();
-            let Some(key) = keyed.key.as_deref() else {
+            let Some(key) = call.key else {
                 session_calls.push(call);
                 continue;
             };

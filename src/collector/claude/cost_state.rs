@@ -2,6 +2,7 @@
 //! It also counts calls that never get an `assistant` row of their own, so
 //! the part over a session's transcript is usage the transcript misses.
 
+mod fork;
 mod spread;
 #[cfg(test)]
 mod tests;

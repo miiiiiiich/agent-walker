@@ -91,6 +91,13 @@ their own. The log does not say which calls these are.
   total yet; the total is compared with the calls before it, and the later
   calls add nothing until their process writes one. If two main files hold
   totals for the same session, only the one written last is used.
+- **Forks.** A session forked from another starts from the other's total
+  (with its `startTime`) and copies only part of its calls. The other
+  session's last total written before the fork's first call of its own is
+  taken off the fork's totals, and the copied calls that total covers are left
+  out of the fork's side, so the other session's uncounted part is not added
+  twice. Sessions that only share a `startTime`, with no call in common, keep
+  separate totals and are compared as they are.
 - **Where it lands.** The added usage is spread over the local hours the
   session made calls in, in proportion to its transcript tokens in each hour,
   and each part is dated at the session's last call in that hour. It adds no

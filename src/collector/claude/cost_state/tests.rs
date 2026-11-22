@@ -368,6 +368,90 @@ fn subagent_advisor_and_shared_calls_count_on_the_transcript_side() {
     assert!(added(&collection).is_empty());
 }
 
+/// A fork restores its parent's total and counts on from it, copying only
+/// some of the parent's calls: the parent's part is not counted again.
+#[test]
+fn a_forks_carried_total_is_not_counted_again() {
+    let temp = TempDir::new().expect("tempdir");
+    write(
+        temp.path(),
+        "parent.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m0", "claude-opus-5", 0, 400),
+            assistant("2026-06-05T09:10:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+            cost_state("pa", 7, &[("claude-opus-5", 0, 2, 0, 530, 0, 0)]),
+        ],
+    );
+    write(
+        temp.path(),
+        "fork.jsonl",
+        &[
+            assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
+            cost_state("fk", 7, &[("claude-opus-5", 0, 3, 0, 530 + 50 + 20, 0, 0)]),
+        ],
+    );
+    write(
+        temp.path(),
+        "alongside.jsonl",
+        &[
+            assistant("2026-06-06T10:00:00Z", "al", "n1", "claude-opus-5", 0, 100),
+            cost_state("al", 7, &[("claude-opus-5", 0, 1, 0, 110, 0, 0)]),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    let reads = |session: &str| {
+        added(&collection)
+            .iter()
+            .filter(|event| event.session_id.as_deref() == Some(session))
+            .map(|event| event.usage.cache_read_input_tokens)
+            .sum::<u64>()
+    };
+    assert_eq!((reads("pa"), reads("fk"), reads("al")), (30, 20, 10));
+}
+
+/// A copy of a call the parent made after its last total is not in the
+/// carried part: it stays on the fork's side, or it would count twice.
+#[test]
+fn a_forks_copy_of_a_call_after_the_parents_total_stays_counted_once() {
+    let temp = TempDir::new().expect("tempdir");
+    write(
+        temp.path(),
+        "parent.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "pa", "m0", "claude-opus-5", 0, 400),
+            cost_state("pa", 7, &[("claude-opus-5", 0, 1, 0, 430, 0, 0)]),
+            assistant("2026-06-05T09:10:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+        ],
+    );
+    write(
+        temp.path(),
+        "fork.jsonl",
+        &[
+            assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+            assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
+            cost_state(
+                "fk",
+                7,
+                &[("claude-opus-5", 0, 3, 0, 430 + 100 + 50 + 20, 0, 0)],
+            ),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    let reads = |session: &str| {
+        added(&collection)
+            .iter()
+            .filter(|event| event.session_id.as_deref() == Some(session))
+            .map(|event| event.usage.cache_read_input_tokens)
+            .sum::<u64>()
+    };
+    assert_eq!((reads("pa"), reads("fk")), (30, 20));
+}
+
 /// Totals are cumulative: of two files holding one session's totals, only
 /// the one written last is used.
 #[test]
