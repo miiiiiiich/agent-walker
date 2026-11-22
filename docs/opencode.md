@@ -73,7 +73,9 @@ legacy `part.state` shape is unchanged.
   (legacy) or of `session_message` rows of type `assistant` (OpenCode 2), both
   `tokens.input` / `output` / `reasoning` / `cache.read` / `cache.write`.
   OpenCode 2 records a compaction request's usage only on its `compaction`
-  row, so those rows count too. Mapped to the same schema as Claude / Codex:
+  row, so those rows count too. A row with no tokens at all (an aborted or
+  failed turn) is not counted as a call, as with Claude / Codex; its activity,
+  duration and tools still count. Mapped to the same schema as Claude / Codex:
 
   ```
   tokens = input + output + cache_read + cache_creation(=cache.write)

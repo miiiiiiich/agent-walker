@@ -100,24 +100,27 @@ pub(super) fn parse_session_messages(
         if !has_usage {
             continue;
         }
-        collection.usage_events.push(UsageEvent {
-            timestamp: Some(timestamp),
-            session_id: Some(session_id.clone()),
-            model: value
-                .pointer("/model/id")
-                .and_then(Value::as_str)
-                .and_then(ident)
-                .map(ToOwned::to_owned),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: meta
-                .and_then(|meta| meta.directory.as_deref())
-                .filter(|dir| !dir.is_empty())
-                .and_then(project_from_cwd),
-            usage: token_usage(&value),
-            granularity: crate::model::UsageGranularity::Call,
-        });
+        let usage = token_usage(&value);
+        if usage.token_volume() > 0 {
+            collection.usage_events.push(UsageEvent {
+                timestamp: Some(timestamp),
+                session_id: Some(session_id.clone()),
+                model: value
+                    .pointer("/model/id")
+                    .and_then(Value::as_str)
+                    .and_then(ident)
+                    .map(ToOwned::to_owned),
+                source_kind: SourceKind::Main,
+                attribution_agent: None,
+                attribution_skill: None,
+                project: meta
+                    .and_then(|meta| meta.directory.as_deref())
+                    .filter(|dir| !dir.is_empty())
+                    .and_then(project_from_cwd),
+                usage,
+                granularity: crate::model::UsageGranularity::Call,
+            });
+        }
         if kind == "assistant" {
             push_turn(&value, created_ms, &session_id, local_offset, collection);
             if let Entry::Vacant(slot) = tools_from.entry(id) {
@@ -332,6 +335,39 @@ mod tests {
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 1_000);
         assert_eq!(collection.session_touches.len(), 4);
+    }
+
+    #[test]
+    fn assistant_without_tokens_keeps_its_turn_and_tools_but_is_not_a_call() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        let aborted = v2_assistant(1_781_542_363_256, 0, Some("bash")).replace(
+            r#""output":10,"reasoning":2,"cache":{"read":30,"write":4}"#,
+            r#""output":0,"reasoning":0,"cache":{"read":0,"write":0}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &aborted,
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.usage_events.is_empty());
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.session_touches.len(), 1);
     }
 
     fn write_fork_db(dir: &Path, boundary: &str) {
