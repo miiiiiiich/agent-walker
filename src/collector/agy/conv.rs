@@ -21,7 +21,7 @@ use crate::collector::store::{Store, open_store, read_deadline};
 use crate::model::{ScanStats, SourceKind, TokenUsage, UsageEvent};
 use crate::timestamp::{from_unix_millis, to_local};
 
-use label::{selected_models, served_model_label};
+use label::{display_name_label, selected_models, served_model_label};
 use proto::{message_field, proto_timestamp_ms, string_field, varint_field};
 use trajectory::trajectory_meta;
 
@@ -288,20 +288,19 @@ fn parse_gen(
         .unwrap_or(conversation.fallback);
     let timestamp = ms_to_offset(timestamp_ms, local_offset);
 
-    // Prefer the display name (#21, e.g. "Gemini 3.5 Flash (High)") — it's the
-    // product-accurate label and prices correctly (the internal id #19 is a
-    // cryptic, version-mismatched codename like "gemini-3-flash-a"). Rows
-    // without it fall back to #19, reconciled with the selected model so a
-    // routing tag doesn't split one model into several unpriced labels.
-    let is_non_empty = |text: &&str| !text.trim().is_empty();
+    // Prefer the display name (#21, e.g. "Gemini 3.5 Flash (High)") — it names
+    // the selection, while the internal id #19 can be a cryptic,
+    // version-mismatched codename like "gemini-3-flash-a". Rows without it
+    // fall back to #19, reconciled with the selected model so a routing tag
+    // doesn't split one model into several unpriced labels.
     let model = string_field(chat_model, 21)
-        .filter(is_non_empty)
+        .map(display_name_label)
+        .filter(|label| !label.is_empty())
         .or_else(|| {
             string_field(chat_model, 19)
-                .filter(is_non_empty)
-                .map(|served| served_model_label(served, &conversation.selected_models))
-        })
-        .map(ToOwned::to_owned);
+                .filter(|served| !served.trim().is_empty())
+                .map(|served| served_model_label(served, &conversation.selected_models).to_owned())
+        });
 
     let usage = TokenUsage {
         input_tokens: input,
@@ -513,7 +512,45 @@ pub(super) mod tests {
         chat.extend(lenf(21, b"Gemini 3.5 Flash (High)"));
         let blob = lenf(1, &chat);
         let e = event_of(parse(&blob));
-        assert_eq!(e.model.as_deref(), Some("Gemini 3.5 Flash (High)"));
+        assert_eq!(e.model.as_deref(), Some("gemini-3.5-flash"));
+    }
+
+    #[test]
+    fn rows_with_and_without_a_display_name_share_one_label() {
+        let mut with_name = served_only_gen_blob("gemini-3.8-flash-tiered", "r1", None);
+        // Rebuild the generation with a display name beside the served id.
+        let chat = message_field(&with_name, 1).expect("generation").to_vec();
+        let mut named = chat.clone();
+        named.extend(lenf(21, b"Gemini 3.8 Flash (Low)"));
+        with_name = lenf(1, &named);
+        let without_name = served_only_gen_blob("gemini-3.8-flash-tiered", "r2", None);
+        let conversation = Conversation {
+            selected_models: vec!["gemini-3.8-flash-tiered".to_owned()],
+            ..conversation(1)
+        };
+        let labels: Vec<_> = [with_name, without_name]
+            .iter()
+            .map(|blob| event_of(parse_gen(blob, 0, &conversation, UtcOffset::UTC)).model)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("gemini-3.8-flash".to_owned()),
+                Some("gemini-3.8-flash".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_display_name_falls_back_to_the_served_id() {
+        let mut usage = varint(3, 10);
+        usage.extend(varint(10, 10));
+        usage.extend(lenf(11, b"r1"));
+        let mut chat = lenf(4, &usage);
+        chat.extend(lenf(19, b"gemini-4-argon"));
+        chat.extend(lenf(21, b" (Medium)"));
+        let e = event_of(parse(&lenf(1, &chat)));
+        assert_eq!(e.model.as_deref(), Some("gemini-4-argon"));
     }
 
     #[test]

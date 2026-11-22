@@ -1,5 +1,26 @@
 use super::proto::{message_field, string_field};
 
+/// The display name (`Gemini 4 Neon (High)`) in the pricing id form
+/// (`gemini-4-neon`). Rows on a `-tiered` selection carry no display name, so
+/// labelling the rest by it raw split one model into two labels. The steps are
+/// the pricing lookup's (lowercase, cut a `[deploy]` or `(tier)` suffix,
+/// hyphenate spaces), so a label is the key it prices under. Only ASCII
+/// whitespace becomes `-`: any other stays, and the shared-output sanitizer
+/// still collapses the label.
+pub(in crate::collector::agy) fn display_name_label(display: &str) -> String {
+    let lower = display.to_ascii_lowercase();
+    let no_deploy = lower
+        .split_once('[')
+        .map_or(lower.as_str(), |(head, _)| head);
+    let no_tier = no_deploy
+        .split_once('(')
+        .map_or(no_deploy, |(head, _)| head);
+    no_tier
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// The label is the selected model minus its last segment (the mode: `-high`,
 /// `-tiered`, …), taken only when the served id is that base or the base plus
 /// one segment (`gemini-3.8-flash-n` under `gemini-3.8-flash-high` →
@@ -41,6 +62,24 @@ pub(in crate::collector::agy) fn selected_models(blobs: &[(i64, Vec<u8>)]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_name_takes_the_pricing_id_form() {
+        assert_eq!(display_name_label("Gemini 4 Neon (High)"), "gemini-4-neon");
+        assert_eq!(
+            display_name_label("Gemini 3.8 Flash (Low)"),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(display_name_label(" Gemini 4  Argon "), "gemini-4-argon");
+        assert_eq!(display_name_label("gemini-4-argon"), "gemini-4-argon");
+        assert_eq!(display_name_label("Gemini 4 Neon [eu]"), "gemini-4-neon");
+        assert_eq!(display_name_label("(High)"), "");
+        // Non-ASCII whitespace is kept for the shared-output sanitizer to reject.
+        assert_eq!(
+            display_name_label("Gemini\u{2028}Neon"),
+            "gemini\u{2028}neon"
+        );
+    }
 
     #[test]
     fn routing_tag_resolves_to_the_selected_model() {

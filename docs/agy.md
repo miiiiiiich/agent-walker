@@ -62,8 +62,8 @@ user.
   cache), cache-read, cache-write, output (response text), and
   thinking/reasoning. Thinking is folded into output so it counts toward the
   total (same convention as OpenCode).
-- ✅ **Model** — e.g. `Gemini 3.5 Flash (High)` or `gemini-3.8-flash` (see
-  [Cost](#cost)).
+- ✅ **Model** — always in the pricing id form, e.g. `gemini-4-neon` or
+  `gemini-3.8-flash` (see [Cost](#cost)).
 - ✅ **Project** — the workspace path recorded in the conversation.
 - ✅ **Sessions / activity** — session timestamps come from every dated
   generation, every `history.jsonl` line, and each logged user input or tool
@@ -152,14 +152,18 @@ would share its start time, misplacing long conversations by hour and day.
 Cost is estimated from the LiteLLM table, the same as every other agent. The
 gen blob carries two model labels: an internal id (`#1.#19`, e.g.
 `gemini-3-flash-a` — a version-mismatched codename) and a display name
-(`#1.#21`, e.g. `Gemini 3.5 Flash (High)`). The collector uses the **display
-name** — it's the product-accurate label, and after normalization (drop the
-`(tier)`, hyphenate spaces) it maps straight to LiteLLM's bare id
-(`gemini-3.5-flash`). The display name named the user's selection: rows served
-under different internal ids (`gemini-3-flash-a`, `gemini-default`) carried the
-same display name.
+(`#1.#21`, e.g. `Gemini 4 Neon (High)`). Every row is labelled in the **pricing
+id form** (`gemini-4-neon`) whichever of the two it carries, so one model shows
+under one label and that label is the key it prices under.
 
-Newer agy builds (and the app) no longer write `#1.#21`. The internal id then
+The collector prefers the **display name**: it names the user's selection —
+rows served under different internal ids (`gemini-3-flash-a`, `gemini-default`)
+carried the same display name. It is normalized the way the pricing lookup
+normalizes names: lowercase, drop a `(tier)` suffix, hyphenate spaces
+(`Gemini 4 Neon (High)` → `gemini-4-neon`).
+
+Some agy builds don't write `#1.#21`, and rows on a `-tiered` selection (the
+app, and subagents) still lack it in builds that do. The internal id then
 names the served model, sometimes plus a server-side routing tag
 (`gemini-3.8-flash-n`, `gemini-4-argon-trial`), and the tag gets relabelled
 over time: the same selection with the same model enum (`#1.#3`, also spelled
