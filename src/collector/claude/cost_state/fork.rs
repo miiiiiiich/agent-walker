@@ -60,22 +60,25 @@ pub(super) fn discount_forks<'a>(
                     if fork_keys.is_disjoint(other_keys) {
                         return None;
                     }
-                    let first_own = fork_calls
-                        .iter()
-                        .filter(|call| call.key.is_none_or(|key| !other_keys.contains(key)))
-                        .filter_map(|call| call.timestamp)
-                        .min()?;
+                    let own = || {
+                        fork_calls
+                            .iter()
+                            .filter(|call| call.key.is_none_or(|key| !other_keys.contains(key)))
+                    };
+                    let first_own = own().filter_map(|call| call.timestamp).min()?;
+                    let inheritable = inheritable(restored, own());
                     // Taken when the stamp before it precedes the fork's
                     // first call, though it may be written a little later:
                     // a later total is larger, so the doubt subtracts more.
-                    // The fork's first total holds what it restored, so one
-                    // with more of any counter is not it: a sibling whose
-                    // own calls were all a subagent's tied with the parent
-                    // below and won on its larger total.
+                    // The fork's first total holds what it restored plus its
+                    // own calls before it, so a total with more of any
+                    // counter than the rest is not it: a sibling whose own
+                    // calls were all a subagent's tied with the parent below
+                    // and won on its larger total.
                     let base = logs.get(other)?.iter().rfind(|row| {
                         row.start_time == Some(start)
                             && row.before.is_none_or(|before| before < first_own)
-                            && within(row, restored)
+                            && within(row, &inheritable)
                     })?;
                     Some((other, base))
                 })
@@ -135,11 +138,27 @@ fn holding(rows: &[CostStateRow], restarts: &[bool], start: i64) -> Vec<usize> {
     held
 }
 
-fn within(base: &CostStateRow, restored: &CostStateRow) -> bool {
+/// The fork's first total less its own calls that total covers.
+fn inheritable<'c, 'a: 'c>(
+    restored: &CostStateRow,
+    own: impl Iterator<Item = &'c Call<'a>>,
+) -> BTreeMap<String, TokenUsage> {
+    let mut left = restored.models.clone();
+    for call in own {
+        if call.timestamp.is_some_and(|at| restored.covers(at))
+            && let Some(usage) = left.get_mut(call.model())
+        {
+            subtract(usage, &call.usage);
+        }
+    }
+    left
+}
+
+fn within(base: &CostStateRow, inheritable: &BTreeMap<String, TokenUsage>) -> bool {
     let zero = TokenUsage::default();
     base.models
         .iter()
-        .all(|(model, usage)| at_least(restored.models.get(model).unwrap_or(&zero), usage))
+        .all(|(model, usage)| at_least(inheritable.get(model).unwrap_or(&zero), usage))
 }
 
 /// The calls `other` made after the last one it shares with the fork, up to

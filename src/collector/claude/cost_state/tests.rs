@@ -586,54 +586,60 @@ fn a_sibling_fork_is_not_taken_for_the_parent() {
 }
 
 /// A sibling whose own calls were all a subagent's leaves no main call to
-/// tell it by, but its total is more than the later fork started from.
+/// tell it by, but its total is more than the later fork could have
+/// restored: the fork's first total less the fork's own calls before it,
+/// whether or not that first total is below the sibling's.
 #[test]
 fn a_sibling_grown_by_a_subagent_is_not_taken_for_the_parent() {
     let temp = TempDir::new().expect("tempdir");
-    write(
-        temp.path(),
-        "parent.jsonl",
-        &[
-            assistant("2026-06-05T09:00:00Z", "pa", "m1", "claude-opus-5", 0, 100),
-            cost_state("pa", 3, &[("claude-opus-5", 0, 1, 0, 149, 0, 0)]),
-        ],
-    );
-    write(
-        temp.path(),
-        "sibling.jsonl",
-        &[
-            assistant("2026-06-06T09:00:00Z", "sb", "m1", "claude-opus-5", 0, 100),
-            cost_state("sb", 3, &[("claude-opus-5", 0, 2, 0, 178, 0, 0)]),
-        ],
-    );
-    write(
-        &temp.path().join("sibling").join("subagents"),
-        "agent-a1.jsonl",
-        &[assistant(
-            "2026-06-06T09:05:00Z",
-            "sb",
-            "s1",
-            "claude-opus-5",
-            0,
-            29,
-        )],
-    );
-    write(
-        temp.path(),
-        "fork.jsonl",
-        &[
-            assistant("2026-06-07T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
-            assistant("2026-06-07T09:05:00Z", "fk", "f1", "claude-opus-5", 0, 9),
-            cost_state("fk", 3, &[("claude-opus-5", 0, 2, 0, 149 + 9 + 10, 0, 0)]),
-        ],
-    );
+    let scenario = |dir: &Path, own: u64, total: u64| {
+        write(
+            dir,
+            "parent.jsonl",
+            &[
+                assistant("2026-06-05T09:00:00Z", "pa", "m1", "claude-opus-5", 0, 100),
+                cost_state("pa", 3, &[("claude-opus-5", 0, 1, 0, 149, 0, 0)]),
+            ],
+        );
+        write(
+            dir,
+            "sibling.jsonl",
+            &[
+                assistant("2026-06-06T09:00:00Z", "sb", "m1", "claude-opus-5", 0, 100),
+                cost_state("sb", 3, &[("claude-opus-5", 0, 2, 0, 178, 0, 0)]),
+            ],
+        );
+        write(
+            &dir.join("sibling").join("subagents"),
+            "agent-a1.jsonl",
+            &[assistant(
+                "2026-06-06T09:05:00Z",
+                "sb",
+                "s1",
+                "claude-opus-5",
+                0,
+                29,
+            )],
+        );
+        write(
+            dir,
+            "fork.jsonl",
+            &[
+                assistant("2026-06-07T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
+                assistant("2026-06-07T09:05:00Z", "fk", "f1", "claude-opus-5", 0, own),
+                cost_state("fk", 3, &[("claude-opus-5", 0, 2, 0, total, 0, 0)]),
+            ],
+        );
+    };
+    scenario(&temp.path().join("below"), 9, 149 + 9 + 10);
+    scenario(&temp.path().join("above"), 39, 149 + 39 + 5);
 
-    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+    let reads = |name: &str| {
+        let collection = collect(&temp.path().join(name), None, false, UtcOffset::UTC);
+        ["pa", "sb", "fk"].map(|session| reads_of(&collection, session))
+    };
 
-    assert_eq!(
-        ["pa", "sb", "fk"].map(|session| reads_of(&collection, session)),
-        [49, 0, 10]
-    );
+    assert_eq!((reads("below"), reads("above")), ([49, 0, 10], [49, 0, 5]));
 }
 
 /// A fork of a fork is compared with the fork it was made from, the nearest

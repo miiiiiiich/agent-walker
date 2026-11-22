@@ -104,17 +104,18 @@ their own. The log does not say which calls these are.
   out of the fork's side, so the other session's uncounted part is not added
   twice. A later process that carries the fork's total on holds that part
   too, and loses it the same way; one that starts again from zero does not.
-  The fork's first total holds what it restored, so a total with more of any
-  model's counter than that is not the one taken off, and a session with no
-  other total that fits is not taken for the other session. When several
-  sessions qualify, an earlier fork of the same session can be among them:
-  it holds that session's total plus its own calls, made after the calls it
-  shares with the later fork. So the session taken is the one with the
-  fewest main-transcript calls, covered by its total, made after the last
-  call it shares with the fork; then the one with the largest total (the
-  nearest in a chain of forks); then the lowest session id. Sessions that
-  only share a `startTime`, with no call in common, keep separate totals and
-  are compared as they are.
+  The fork's first total holds what it restored plus the fork's own calls
+  before it, so a total with more of any model's counter than the first total
+  less those calls is not the one taken off, and a session with no other
+  total that fits is not taken for the other session. When several sessions
+  qualify, an earlier fork of the same session can be among them: it holds
+  that session's total plus its own calls, made after the calls it shares
+  with the later fork. So the session taken is the one with the fewest
+  main-transcript calls, covered by its total, made after the last call it
+  shares with the fork; then the one with the largest total (the nearest in
+  a chain of forks); then the lowest session id. Sessions that only share a
+  `startTime`, with no call in common, keep separate totals and are compared
+  as they are.
 - **Where it lands.** The added usage is spread over the local hours the
   session made calls in, in proportion to its transcript tokens in each hour,
   and each part is dated at the session's last call in that hour. It adds no
