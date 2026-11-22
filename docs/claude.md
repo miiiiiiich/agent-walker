@@ -10,7 +10,8 @@ while a FIFO or device counts as an unreadable file. A line longer than 64 MiB,
 or one holding more than 262,144 JSON array elements and object entries, is
 skipped as a parse error. A timestamp before 1970 or from year 3000 on is
 treated as missing. An id or name longer than 1,024 bytes, or a path longer
-than 4,096, is treated as missing.
+than 4,096, is treated as missing. A `cost-state` row (below) naming more than
+64 models is skipped as a parse error.
 
 ## History retention (keep more than 30 days)
 

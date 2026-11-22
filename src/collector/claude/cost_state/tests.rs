@@ -636,6 +636,48 @@ fn the_cache_write_split_stays_within_each_rows_writes() {
     }));
 }
 
+/// A total is spread per model over every hour its session ran, so a row
+/// naming more models than any process uses is a parse error, not a total.
+#[test]
+fn a_total_naming_too_many_models_is_a_parse_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let names = |count: usize| (0..count).map(|i| format!("model-{i}")).collect::<Vec<_>>();
+    let row = |session: &str, names: &[String]| {
+        let models: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), 1, 0, 0, 0, 0, 0))
+            .collect();
+        cost_state(session, 1, &models)
+    };
+    write(
+        temp.path(),
+        "s1.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "s1", "m1", "model-0", 1, 1),
+            row("s1", &names(64)),
+        ],
+    );
+    write(
+        temp.path(),
+        "s2.jsonl",
+        &[
+            assistant("2026-06-05T09:00:00Z", "s2", "m2", "model-0", 1, 1),
+            row("s2", &names(65)),
+        ],
+    );
+
+    let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+    assert_eq!(collection.stats.parse_errors, 1);
+    let sessions = |session: &str| {
+        added(&collection)
+            .iter()
+            .filter(|event| event.session_id.as_deref() == Some(session))
+            .count()
+    };
+    assert_eq!((sessions("s1"), sessions("s2")), (63, 0));
+}
+
 /// The observer's own totals count like its calls: usage, never activity.
 #[test]
 fn a_background_sessions_excess_stays_background() {

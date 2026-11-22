@@ -157,7 +157,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
         let Some(value) = parse_json_line(line, &mut events) else {
             continue;
         };
-        if source_kind == SourceKind::Main && cost_state.observe(&value) {
+        if source_kind == SourceKind::Main && cost_state.observe(&value, &mut events) {
             continue;
         }
         let usage_before = events.usage_events.len();

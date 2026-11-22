@@ -14,12 +14,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::collector::FileEvents;
 use crate::collector::ident::ident;
 use crate::model::TokenUsage;
 
 use super::{session_id_field, u64_field};
 
 pub(in crate::collector::claude) use spread::uncounted_calls;
+
+/// Each model of a total is spread over every hour its session ran: a row
+/// naming thousands of models, which the line limits allow, would expand
+/// into millions of rows. Only Claude Code writes these rows, so this is a
+/// cheap bound, not a defense against a crafted store.
+const MAX_MODELS: usize = 64;
 
 /// A main transcript's `cost-state` rows, in file order.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,7 +67,11 @@ impl CostStateRow {
 
 impl CostStateLog {
     /// Records the row if it is a `cost-state` row, and says whether it was.
-    pub(in crate::collector::claude) fn observe(&mut self, value: &Value) -> bool {
+    pub(in crate::collector::claude) fn observe(
+        &mut self,
+        value: &Value,
+        events: &mut FileEvents,
+    ) -> bool {
         if value.get("type").and_then(Value::as_str) != Some("cost-state") {
             return false;
         }
@@ -70,6 +81,10 @@ impl CostStateLog {
         let Some(model_usage) = value.get("modelUsage").and_then(Value::as_object) else {
             return true;
         };
+        if model_usage.len() > MAX_MODELS {
+            events.parse_errors += 1;
+            return true;
+        }
         let mut models: BTreeMap<String, TokenUsage> = BTreeMap::new();
         for (model, counters) in model_usage {
             let Some(model) = ident(model) else {
