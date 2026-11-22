@@ -367,6 +367,19 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
         usage.cache_creation_ephemeral_5m_input_tokens =
             u64_field(cache_creation, "ephemeral_5m_input_tokens");
     }
+    // An advisor turn's top-level split is the first iteration's alone while
+    // its total sums every iteration, so a later 1h write priced at the 5m
+    // rate (ccusage#2084).
+    let split = usage
+        .cache_creation_ephemeral_5m_input_tokens
+        .saturating_add(usage.cache_creation_ephemeral_1h_input_tokens);
+    if split < cache_creation_input_tokens
+        && let Some((short, long)) = message_iterations_split(value)
+        && (split + 1..=cache_creation_input_tokens).contains(&short.saturating_add(long))
+    {
+        usage.cache_creation_ephemeral_5m_input_tokens = short;
+        usage.cache_creation_ephemeral_1h_input_tokens = long;
+    }
 
     if let Some(server_tool_use) = value.get("server_tool_use").and_then(Value::as_object) {
         for (key, child) in server_tool_use {
@@ -377,6 +390,25 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     }
 
     Some(usage)
+}
+
+/// The 5m/1h split summed over the `message` iterations, when there are
+/// several; one iteration's split is already the top level's.
+fn message_iterations_split(value: &Value) -> Option<(u64, u64)> {
+    let iterations = value.get("iterations")?.as_array()?;
+    let mut count = 0_usize;
+    let (mut short, mut long) = (0_u64, 0_u64);
+    for iteration in iterations {
+        if string_field(iteration, "type").as_deref() != Some("message") {
+            continue;
+        }
+        count += 1;
+        if let Some(cache_creation) = iteration.get("cache_creation") {
+            short = short.saturating_add(u64_field(cache_creation, "ephemeral_5m_input_tokens"));
+            long = long.saturating_add(u64_field(cache_creation, "ephemeral_1h_input_tokens"));
+        }
+    }
+    (count >= 2).then_some((short, long))
 }
 
 #[cfg(test)]
@@ -445,6 +477,36 @@ mod tests {
             .find(|event| event.model.as_deref() == Some("claude-sonnet-5"))
             .expect("main turn should be counted once");
         assert_eq!(main.usage.token_volume(), 22 + 12 + 220);
+    }
+
+    /// An advisor turn's top level carries only the first iteration's cache
+    /// write split; a 1h write in the last iteration must not read as 5m.
+    #[test]
+    fn advisor_turn_cache_write_split_sums_the_message_iterations() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":4,"output_tokens":6,"cache_creation_input_tokens":300,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0},"iterations":[{"type":"message","input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0}},{"type":"advisor_message","model":"claude-fable-5-2","input_tokens":7,"output_tokens":1,"cache_creation_input_tokens":40,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":0}},{"type":"message","input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":200,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":200}}]},"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let usage = |model: &str| {
+            &collection
+                .usage_events
+                .iter()
+                .find(|event| event.model.as_deref() == Some(model))
+                .expect("event present")
+                .usage
+        };
+        let main = usage("claude-opus-5-5");
+        assert_eq!(main.cache_creation_input_tokens, 300);
+        assert_eq!(main.cache_creation_ephemeral_5m_input_tokens, 100);
+        assert_eq!(main.cache_creation_ephemeral_1h_input_tokens, 200);
+        let advisor = usage("claude-fable-5-2");
+        assert_eq!(advisor.cache_creation_ephemeral_5m_input_tokens, 40);
+        assert_eq!(advisor.cache_creation_ephemeral_1h_input_tokens, 0);
     }
 
     /// Fast mode and US-only inference come from the call's own usage; the

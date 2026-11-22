@@ -114,6 +114,12 @@ Per-model rates come from the LiteLLM pricing database, cache rates included:
 on current Claude models a cache read costs 0.025×–0.1× the input rate, and a
 cache write 1.25× (5-minute cache) or 2× (1-hour cache).
 
+Which cache a write went to comes from `usage.cache_creation`; a write it does
+not split is priced at the 5-minute rate. On an advisor turn that split covers
+only the reply's first `message` iteration while the write total covers all of
+them, so the split is taken as the sum of the `message` iterations' splits
+instead.
+
 **A model prices only at its own rates.** A logged model id uses the LiteLLM
 key it equals, or the key it extends by `-latest` or by a date (`-20251001`,
 `-2026-10-01`). Any other id shows as unpriced (—) until LiteLLM lists it,
