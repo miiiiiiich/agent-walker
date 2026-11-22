@@ -52,6 +52,15 @@ set this early. (Codex CLI keeps its sessions indefinitely; no setting needed.)
   cancelled before the first reply, is not a turn. A manual `/compact` is the
   exception: the summary is model work, so it counts once as a turn.
 
+**Background helpers.** A transcript under a directory whose name contains
+`claude-mem-observer` belongs to the claude-mem plugin's observer, which keeps
+sessions open in the background. Its calls count toward tokens, cost, models,
+projects and the codename's volume, like any other call. They count toward
+none of the activity: sessions, active days, streak, hourly profile, turns,
+working time, PARALLEL AGENTS, tools and modes. In the CONTEXT section they
+fall in the `other` row, and in the JSON export their usage rows have
+`"source": "background"`.
+
 Usage and tool calls come only from the transcript's `user` and `assistant`
 rows. The request-log rows (`api-request`, `api-request-blob`,
 `api-request-shape`) replay the conversation being sent, so they are skipped.

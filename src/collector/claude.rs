@@ -21,9 +21,10 @@ use crate::timestamp::parse_rfc3339;
 use line::{is_interrupt_marker, parse_line};
 use turns::{TurnState, is_human_turn};
 
-/// Background/observer harnesses (e.g. the claude-mem observer) keep
-/// always-on sessions that would inflate session and active-day stats.
-const NOISE_DIR_MARKERS: [&str; 1] = ["claude-mem-observer"];
+/// Background harnesses (the claude-mem observer) keep always-on sessions.
+/// Their calls are billed like any other, so dropping the files lost their
+/// tokens and cost; kept whole, they inflated sessions and active days.
+const BACKGROUND_DIR_MARKERS: [&str; 1] = ["claude-mem-observer"];
 
 pub fn collect(
     root: &Path,
@@ -36,27 +37,47 @@ pub fn collect(
         return collection;
     }
 
-    let files: Vec<_> = list_files(root, "jsonl", mtime_floor, &mut collection.stats)
-        .into_iter()
-        .filter(|path| !is_noise_path(path))
-        .collect();
+    let files = list_files(root, "jsonl", mtime_floor, &mut collection.stats);
     let per_file = parse_files_cached(
         use_cache.then_some("claude"),
         &files,
         local_offset,
-        |path| parse_file(path, root, local_offset),
+        |path| {
+            let events = parse_file(path, root, local_offset)?;
+            Some(if is_background_path(path) {
+                usage_only(events)
+            } else {
+                events
+            })
+        },
     );
     merge_into(&mut collection, per_file);
     collection
 }
 
-fn is_noise_path(path: &Path) -> bool {
+fn is_background_path(path: &Path) -> bool {
     path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|name| NOISE_DIR_MARKERS.iter().any(|marker| name.contains(marker)))
+        component.as_os_str().to_str().is_some_and(|name| {
+            BACKGROUND_DIR_MARKERS
+                .iter()
+                .any(|marker| name.contains(marker))
+        })
     })
+}
+
+/// A background helper's file keeps only its calls, marked so the analyzers
+/// count their tokens and cost but no activity.
+fn usage_only(events: FileEvents) -> FileEvents {
+    let mut usage_events = events.usage_events;
+    for keyed in &mut usage_events {
+        keyed.event.source_kind = SourceKind::Background;
+    }
+    FileEvents {
+        usage_events,
+        lines_seen: events.lines_seen,
+        parse_errors: events.parse_errors,
+        ..FileEvents::default()
+    }
 }
 
 /// Fallback project label from the sanitized directory name. Claude Code
@@ -292,6 +313,65 @@ mod tests {
             collection.tool_events[0].subagent_type.as_deref(),
             Some("Explore")
         );
+    }
+
+    /// The claude-mem observer's calls are billed, so they count as tokens
+    /// and cost; its always-on sessions are not the person's activity.
+    #[test]
+    fn background_helper_counts_usage_but_no_activity() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let project = temp.path().join("project");
+        let observer = temp.path().join("-home-claude-mem-observer-sessions");
+        fs::create_dir_all(&project).expect("test dirs should be created");
+        fs::create_dir_all(&observer).expect("test dirs should be created");
+        fs::write(
+            project.join("s1.jsonl"),
+            [
+                r#"{"timestamp":"2026-06-07T10:00:00Z","sessionId":"s1","type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#,
+                r#"{"timestamp":"2026-06-07T10:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("main fixture should be written");
+        fs::write(
+            observer.join("obs.jsonl"),
+            [
+                r#"{"timestamp":"2026-06-05T03:00:00Z","sessionId":"obs","type":"user","uuid":"o1","message":{"role":"user","content":"observe"}}"#,
+                r#"{"timestamp":"2026-06-05T03:01:00Z","sessionId":"obs","type":"assistant","message":{"id":"m2","model":"claude-haiku-4-5","usage":{"input_tokens":100,"output_tokens":50},"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("observer fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 2);
+        let background = collection
+            .usage_events
+            .iter()
+            .find(|event| event.source_kind == SourceKind::Background)
+            .expect("observer call should be counted");
+        assert_eq!(background.usage.token_volume(), 150);
+        assert!(
+            collection
+                .session_touches
+                .iter()
+                .all(|touch| touch.session_id == "s1")
+        );
+        assert!(collection.tool_events.is_empty());
+        assert_eq!(collection.duration_events.len(), 1);
+
+        let now = time::macros::datetime!(2026-06-08 12:00 UTC);
+        let summary = crate::analyzer::summarize(&collection, now, 7, UtcOffset::UTC);
+        assert_eq!(summary.total_usage.token_volume(), 165);
+        assert_eq!(summary.sessions, 1);
+        assert_eq!(summary.active_days, 1);
+        assert_eq!(summary.recent_window_active_days, 1);
+        assert_eq!(summary.recent_window_volume, 165);
+        assert_eq!(summary.hourly_usage[3], 0);
+        assert_eq!(summary.hourly_usage[10], 15);
+        let working = summary.active_time.expect("working time");
+        assert_eq!(working.context_tokens, 10);
     }
 
     #[test]

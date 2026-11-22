@@ -49,18 +49,19 @@ impl Aggregates {
         }
 
         self.total_usage.add_assign(&event.usage);
-        if event.usage.token_volume() > 0 {
-            self.active_dates.insert(date);
-        }
         if let Some(daily) = self.daily_usage.get_mut(&date) {
             daily.add_assign(&event.usage);
         }
-        let hour = usize::from(timestamp.hour());
-        self.hourly_usage[hour] =
-            self.hourly_usage[hour].saturating_add(event.usage.token_volume());
-
-        if let Some(session_id) = &event.session_id {
-            self.period_sessions.insert(session_id.clone());
+        if event.source_kind != SourceKind::Background {
+            if event.usage.token_volume() > 0 {
+                self.active_dates.insert(date);
+            }
+            let hour = usize::from(timestamp.hour());
+            self.hourly_usage[hour] =
+                self.hourly_usage[hour].saturating_add(event.usage.token_volume());
+            if let Some(session_id) = &event.session_id {
+                self.period_sessions.insert(session_id.clone());
+            }
         }
 
         let model_name = event.model.clone().unwrap_or_else(|| "unknown".to_owned());

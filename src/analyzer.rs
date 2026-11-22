@@ -178,7 +178,9 @@ pub fn summarize(
             continue;
         }
         recent_window_volume = recent_window_volume.saturating_add(volume);
-        recent_active_days.insert(date);
+        if event.source_kind != crate::model::SourceKind::Background {
+            recent_active_days.insert(date);
+        }
         if let Some(skill) = &event.attribution_skill {
             skill_map
                 .entry(skill.clone())

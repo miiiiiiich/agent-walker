@@ -133,6 +133,7 @@ fn source_name(source: SourceKind) -> &'static str {
     match source {
         SourceKind::Main => "main",
         SourceKind::Subagent => "subagent",
+        SourceKind::Background => "background",
     }
 }
 
