@@ -181,19 +181,14 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
     session.mark_latest_exits(session_id.as_ref());
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
-    events.copilot = Some(JournalSummary {
-        forks: session.fork_times,
-        forked_into: session.forked_into,
-        first_exits: session
+    if session_id.is_some() {
+        session.summary.first_exits = session
             .first_exits
             .into_iter()
             .filter_map(|(model, exit)| Some((model, exit?)))
-            .filter(|_| session_id.is_some())
-            .collect(),
-        cumulatives: session.cumulatives,
-        exit_marks: session.exit_marks,
-        rests: session.rests,
-    });
+            .collect();
+    }
+    events.copilot = Some(session.summary);
     events.compress_touches(local_offset);
     Some(events)
 }
@@ -244,21 +239,15 @@ struct SessionState {
     start: Option<OffsetDateTime>,
     /// The earliest record other than a start, replays aside.
     earliest: Option<OffsetDateTime>,
-    /// Each fork the markers name, and when it was made.
-    fork_times: Vec<(String, OffsetDateTime)>,
-    /// Each fork a parent's own marker names, and when.
-    forked_into: Vec<(String, OffsetDateTime)>,
+    summary: JournalSummary,
     /// The journal's oldest segment is gone, so each model's first exit
     /// read counts everything of that model before it.
     truncated: bool,
     /// Those first exits, once read; none when it had nothing to count.
     first_exits: BTreeMap<String, Option<truncation::FirstExit>>,
-    cumulatives: HashMap<String, RawCounters>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
-    exit_marks: Vec<(String, String, OffsetDateTime)>,
-    rests: HashMap<String, TokenUsage>,
 }
 
 impl SessionState {
@@ -298,7 +287,7 @@ impl SessionState {
     fn mark_latest_exits(&mut self, owner: Option<&String>) {
         let latest = std::mem::take(&mut self.latest_exits);
         if let Some(owner) = owner {
-            self.exit_marks.extend(
+            self.summary.exit_marks.extend(
                 latest
                     .into_iter()
                     .map(|(model, at)| (owner.clone(), model, at)),
@@ -323,9 +312,9 @@ impl SessionState {
             return;
         }
         if let Some(session) = session_id {
-            self.fork_times.push((session.clone(), start));
+            self.summary.forks.push((session.clone(), start));
         }
-        self.exit_marks.retain(|(_, _, at)| *at >= start);
+        self.summary.exit_marks.retain(|(_, _, at)| *at >= start);
         events.usage_events.retain(|keyed| {
             keyed.event.granularity != UsageGranularity::Aggregate
                 || keyed.event.timestamp.is_none_or(|time| time >= start)
@@ -340,7 +329,7 @@ impl SessionState {
         events: &mut FileEvents,
     ) {
         if let (Some(fork), Some(at)) = (forks::forked_into(value), timestamp) {
-            self.forked_into.push((fork, at));
+            self.summary.forked_into.push((fork, at));
         }
         if let Some(marker) = forks::fork_marker(value) {
             self.close_copied_block(&marker, events);
@@ -348,7 +337,7 @@ impl SessionState {
             if let (Some(fork), Some(at)) =
                 (marker.child.or_else(|| session_id.cloned()), timestamp)
             {
-                self.fork_times.push((fork, at));
+                self.summary.forks.push((fork, at));
             }
         }
     }
@@ -445,7 +434,7 @@ impl SessionState {
         let mark = truncation::own_mark(value, line.session_id);
         for (model, counters, key) in exits {
             if let Some(key) = &key {
-                self.cumulatives.insert(key.clone(), counters);
+                self.summary.cumulatives.insert(key.clone(), counters);
             }
             if self.truncated {
                 self.first_exits.entry(model.clone()).or_insert_with(|| {
@@ -547,12 +536,24 @@ impl SessionState {
             if let Some(key) = &key
                 && covered.own.to_usage().token_volume() > 0
             {
-                self.rests
+                self.summary
+                    .rests
                     .insert(key.clone(), delta.minus(covered.own).to_usage());
             }
             events.usage_events.push(KeyedUsageEvent {
                 key,
-                event: exit_usage(line, Some(model), self.project.as_deref(), usage),
+                event: UsageEvent {
+                    timestamp: line.timestamp,
+                    session_id: line.session_id.cloned(),
+                    model: Some(model.clone()),
+                    source_kind: SourceKind::Main,
+                    attribution_agent: None,
+                    attribution_skill: None,
+                    project: self.project.clone(),
+                    usage,
+                    granularity: UsageGranularity::Aggregate,
+                    billing: crate::model::Billing::default(),
+                },
             });
         }
         advanced
@@ -617,26 +618,6 @@ impl RawCounters {
             cache_creation_input_tokens: self.cache_write,
             ..TokenUsage::default()
         }
-    }
-}
-
-fn exit_usage(
-    line: &Line,
-    model: Option<&String>,
-    project: Option<&str>,
-    usage: TokenUsage,
-) -> UsageEvent {
-    UsageEvent {
-        timestamp: line.timestamp,
-        session_id: line.session_id.cloned(),
-        model: model.cloned(),
-        source_kind: SourceKind::Main,
-        attribution_agent: None,
-        attribution_skill: None,
-        project: project.map(ToOwned::to_owned),
-        usage,
-        granularity: crate::model::UsageGranularity::Aggregate,
-        billing: crate::model::Billing::default(),
     }
 }
 
