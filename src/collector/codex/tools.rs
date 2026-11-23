@@ -297,6 +297,33 @@ mod tests {
     use crate::collector::codex::collect;
     use crate::collector::codex::tests::write_lines;
     use crate::collector::json::tests::over_structured_line;
+    use crate::model::Collection;
+
+    const META: &str = r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#;
+
+    fn exec(call: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
+        )
+    }
+
+    fn command_item(id: &str, command: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup",{command}}}}}}}"#
+        )
+    }
+
+    fn zsh(script: &str) -> String {
+        format!(r#""command":["/bin/zsh","-lc","{script}"]"#)
+    }
+
+    fn tool_names(collection: &Collection) -> Vec<&str> {
+        collection
+            .tool_events
+            .iter()
+            .map(|event| event.tool_name.as_str())
+            .collect()
+    }
 
     #[test]
     fn decomposes_exec_command_to_real_command_basename() {
@@ -309,9 +336,7 @@ mod tests {
             )
         };
         let arg = |inner: &str| serde_json::Value::String(inner.to_owned()).to_string();
-        let mut body = String::from(
-            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
-        );
+        let mut body = String::from(META);
         body.push('\n');
         for (call, inner) in [
             ("c1", r#"{"command":["bash","-lc","grep -rn foo src"]}"#),
@@ -331,13 +356,8 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        let names: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|event| event.tool_name.as_str())
-            .collect();
         assert_eq!(
-            names,
+            tool_names(&collection),
             vec![
                 "grep",         // bash -lc "grep -rn foo src"
                 "cargo",        // cargo build
@@ -358,19 +378,13 @@ mod tests {
     #[test]
     fn code_mode_exec_counts_the_shell_commands_it_started() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let exec = |call: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
-            )
-        };
         let command = |id: &str, source: &str, command: &str| {
             format!(
                 r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","started_at_ms":1,"completed_at_ms":2,"item":{{"type":"CommandExecution","id":"{id}","source":"{source}",{command}}}}}}}"#
             )
         };
-        let zsh = |script: &str| format!(r#""command":["/bin/zsh","-lc","{script}"]"#);
         let lines = [
-            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            META.to_owned(),
             command("exec-0", "unified_exec_startup", &zsh("pwd")),
             r#"{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{\"cmd\":\"ls -la\"}"}}"#.to_owned(),
             command("c1", "unified_exec_startup", &zsh("ls -la")),
@@ -390,12 +404,10 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        let names: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|event| event.tool_name.as_str())
-            .collect();
-        assert_eq!(names, vec!["ls", "rg", "cargo", "exec", "cat"]);
+        assert_eq!(
+            tool_names(&collection),
+            vec!["ls", "rg", "cargo", "exec", "cat"]
+        );
     }
 
     /// A command item written again counts once: the first command names the
@@ -404,18 +416,9 @@ mod tests {
     #[test]
     fn a_replayed_command_counts_once() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let exec = |call: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
-            )
-        };
-        let command = |id: &str, script: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup","command":["/bin/zsh","-lc","{script}"]}}}}}}"#
-            )
-        };
+        let command = |id: &str, script: &str| command_item(id, &zsh(script));
         let lines = [
-            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
+            META.to_owned(),
             command("exec-0", "pwd"),
             exec("e1"),
             command("exec-a", "rg foo src"),
@@ -430,12 +433,7 @@ mod tests {
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        let names: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|event| event.tool_name.as_str())
-            .collect();
-        assert_eq!(names, vec!["rg", "cargo", "exec"]);
+        assert_eq!(tool_names(&collection), vec!["rg", "cargo", "exec"]);
     }
 
     /// An item that names no command adds nothing, so a later copy of it that
@@ -443,28 +441,18 @@ mod tests {
     #[test]
     fn a_command_item_without_a_command_does_not_settle_its_id() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let item = |id: &str, command: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup",{command}}}}}}}"#
-            )
-        };
         let lines = [
-            r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned(),
-            r#"{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"e1","name":"exec","input":"run()"}}"#.to_owned(),
-            item("exec-a", r#""command":["/bin/zsh","-lc","ls"]"#),
-            item("exec-c", r#""command":42"#),
-            item("exec-c", r#""command":["/bin/zsh","-lc","rg foo src"]"#),
+            META.to_owned(),
+            exec("e1"),
+            command_item("exec-a", &zsh("ls")),
+            command_item("exec-c", r#""command":42"#),
+            command_item("exec-c", &zsh("rg foo src")),
         ];
         write_lines(&temp.path().join("rollout-s1.jsonl"), &lines);
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-        let names: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|event| event.tool_name.as_str())
-            .collect();
-        assert_eq!(names, vec!["ls", "rg"]);
+        assert_eq!(tool_names(&collection), vec!["ls", "rg"]);
     }
 
     /// An `exec` call written again goes back to its first tool event: a
@@ -472,19 +460,9 @@ mod tests {
     #[test]
     fn a_replayed_exec_call_keeps_its_named_tool() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let exec = |call: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:01Z","type":"response_item","payload":{{"type":"custom_tool_call","call_id":"{call}","name":"exec","input":"run()"}}}}"#
-            )
-        };
-        let command = |id: &str, script: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-01T00:00:02Z","type":"event_msg","payload":{{"type":"item_completed","thread_id":"s1","turn_id":"t1","item":{{"type":"CommandExecution","id":"{id}","source":"unified_exec_startup","command":["/bin/zsh","-lc","{script}"]}}}}}}"#
-            )
-        };
-        let meta = r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#.to_owned();
+        let command = |id: &str, script: &str| command_item(id, &zsh(script));
         let replayed = [
-            meta,
+            META.to_owned(),
             exec("e1"),
             command("exec-a", "rg foo src"),
             exec("e1"),
@@ -501,12 +479,7 @@ mod tests {
 
             let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-            let names: Vec<&str> = collection
-                .tool_events
-                .iter()
-                .map(|event| event.tool_name.as_str())
-                .collect();
-            assert_eq!(names, expected);
+            assert_eq!(tool_names(&collection), expected);
         }
     }
 
