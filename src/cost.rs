@@ -437,6 +437,17 @@ pub(crate) mod tests {
         assert!((real_dot.input - 0.5 / 1e6).abs() < f64::EPSILON);
     }
 
+    fn flat(base: Pricing) -> ModelPricing {
+        ModelPricing {
+            base,
+            long_context: None,
+            priority: None,
+            ultrafast: None,
+            fast: None,
+            us: None,
+        }
+    }
+
     pub(crate) fn install_test_pricing() {
         let per_mtok =
             |input: f64, output: f64, cache_write_5m: f64, cache_write_1h: f64| Pricing {
@@ -446,14 +457,6 @@ pub(crate) mod tests {
                 cache_write_5m: cache_write_5m / 1e6,
                 cache_write_1h: cache_write_1h / 1e6,
             };
-        let flat = |base: Pricing| ModelPricing {
-            base,
-            long_context: None,
-            priority: None,
-            ultrafast: None,
-            fast: None,
-            us: None,
-        };
         let openai = |input: f64, output: f64, cache_read: f64| Pricing {
             input: input / 1e6,
             output: output / 1e6,
@@ -481,15 +484,11 @@ pub(crate) mod tests {
                 (
                     "claude-haiku-5-5".to_owned(),
                     ModelPricing {
-                        base: per_mtok(0.1, 0.5, 0.125, 0.2),
                         long_context: Some(LongContext {
                             above_prompt_tokens: 100_000,
                             rates: per_mtok(0.5, 2.5, 0.625, 1.0),
                         }),
-                        priority: None,
-                        ultrafast: None,
-                        fast: None,
-                        us: None,
+                        ..flat(per_mtok(0.1, 0.5, 0.125, 0.2))
                     },
                 ),
                 (
@@ -501,15 +500,11 @@ pub(crate) mod tests {
                 (
                     "gpt-6.1-sol".to_owned(),
                     ModelPricing {
-                        base: openai(2.0, 10.0, 0.1),
                         long_context: Some(LongContext {
                             above_prompt_tokens: 272_000,
                             rates: openai(4.0, 15.0, 0.2),
                         }),
-                        priority: None,
-                        ultrafast: None,
-                        fast: None,
-                        us: None,
+                        ..flat(openai(2.0, 10.0, 0.1))
                     },
                 ),
                 // Off the real rates, which equal gpt-6.1-sol's: the
@@ -539,20 +534,13 @@ pub(crate) mod tests {
             format: SNAPSHOT_FORMAT,
             models: HashMap::from([(
                 "claude-sonnet-4-5".to_owned(),
-                ModelPricing {
-                    base: Pricing {
-                        input: 3e-6,
-                        output: 1.5e-5,
-                        cache_read: 3e-7,
-                        cache_write_5m: 3.75e-6,
-                        cache_write_1h: 6e-6,
-                    },
-                    long_context: None,
-                    priority: None,
-                    ultrafast: None,
-                    fast: None,
-                    us: None,
-                },
+                flat(Pricing {
+                    input: 3e-6,
+                    output: 1.5e-5,
+                    cache_read: 3e-7,
+                    cache_write_5m: 3.75e-6,
+                    cache_write_1h: 6e-6,
+                }),
             )]),
             resolved: RwLock::default(),
         };
