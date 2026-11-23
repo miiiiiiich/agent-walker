@@ -181,10 +181,10 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
     if let Some(sid) = &session_id {
-        for (model, (at, counters)) in session.first_exits {
+        for (model, exit) in session.first_exits {
             events
                 .usage_events
-                .push(truncation::first_exit(sid, model, at, counters));
+                .push(truncation::first_exit(sid, model, &exit));
         }
     }
     let fork_times = session
@@ -256,8 +256,8 @@ struct SessionState {
     /// The journal's oldest segment is gone, so each model's first exit
     /// read counts everything of that model before it.
     truncated: bool,
-    /// Those first exits' times and cumulatives, once read.
-    first_exits: BTreeMap<String, (OffsetDateTime, RawCounters)>,
+    /// Those first exits, once read.
+    first_exits: BTreeMap<String, truncation::FirstExit>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -443,11 +443,12 @@ impl SessionState {
                 // The latest time, not the last read: a clock moved back dated
                 // a later exit before one covering a row.
                 if let Some(at) = timestamp {
+                    let mark = truncation::own_mark(value, session_id);
                     for (model, counters) in exits {
                         if self.truncated {
                             self.first_exits
                                 .entry(model.clone())
-                                .or_insert((at, counters));
+                                .or_insert(truncation::FirstExit { at, counters, mark });
                         }
                         self.latest_exits
                             .entry(model)

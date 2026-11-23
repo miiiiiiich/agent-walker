@@ -597,6 +597,144 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 200);
     }
 
+    /// The review's case: a fork of the fork, cut before the first fork's
+    /// marker, files the copied receipt under the first fork. The receipt
+    /// still names the parent and a sequence the parent's first exit read
+    /// covers, so it doesn't count again.
+    #[test]
+    fn a_nested_forks_copy_inside_a_truncated_parents_first_exit_doesnt_count() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                receipt("2026-07-27T10:30:00.000Z", "parent", 2, 90, 10),
+                marked(
+                    &shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+                    r#"{"parent":2}"#,
+                ),
+            ]),
+        );
+        let copied = receipt("2026-07-27T10:00:00.000Z", "parent", 1, 90, 10);
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                copied.clone(),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "nested",
+            &lines(&[
+                fork_start("nested", "2026-07-27T10:16:00.000Z"),
+                copied,
+                fork_info(
+                    "m-2",
+                    "2026-07-27T10:16:00.000Z",
+                    "Forked from fork before event m-1 as nested.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// A receipt the exit's watermark holds is inside it, even dated after
+    /// it by a clock that moved back.
+    #[test]
+    fn a_forks_copy_inside_a_truncated_parents_watermark_doesnt_count() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                receipt("2026-07-27T10:30:00.000Z", "parent", 2, 90, 10),
+                marked(
+                    &shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+                    r#"{"parent":2}"#,
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T11:15:00.000Z"),
+                receipt("2026-07-27T11:10:00.000Z", "parent", 1, 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T11:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// The same for a copied exit, which names no session: filed under the
+    /// first fork, it's dated before that fork existed.
+    #[test]
+    fn a_nested_forks_copied_exit_inside_a_truncated_parents_first_exit_doesnt_count() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+            ]),
+        );
+        let copied = shutdown("e-1", "2026-07-27T10:05:00.000Z", 90, 10);
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                copied.clone(),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "nested",
+            &lines(&[
+                fork_start("nested", "2026-07-27T10:16:00.000Z"),
+                copied,
+                fork_info(
+                    "m-2",
+                    "2026-07-27T10:16:00.000Z",
+                    "Forked from fork before event m-1 as nested.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
     /// The same with no receipts: the fork's copy of an exit the missing
     /// segment held is inside the parent's first exit still in view.
     #[test]

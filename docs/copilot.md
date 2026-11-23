@@ -110,8 +110,11 @@ user.
   its own. When a journal has lost its oldest segment, each model's first
   exit read counts everything of that model before it, so another
   journal's records of that session and model (a fork's copies) dated up
-  to that exit don't count. A copied exit with any counter above that
-  exit's is from before an accounting reset and still counts.
+  to that exit don't count. A copied receipt goes by the session its
+  `sourceSessionId` names, not the fork it was copied under, and one within
+  that exit's watermark for the session doesn't count however it's dated.
+  A copied exit with any counter above that exit's is from before an
+  accounting reset and still counts.
 
   From a session's first recorded call on, or from 60 s before its first
   live row if that's earlier, its rows replace its snapshots: an exit a

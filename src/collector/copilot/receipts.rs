@@ -17,6 +17,12 @@ pub(super) fn source_of(key: &str) -> Option<&str> {
     (!sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())).then_some(source)
 }
 
+pub(super) fn identity_of(key: &str) -> Option<(&str, u64)> {
+    let source = source_of(key)?;
+    let sequence = key.rsplit_once(':')?.1.parse().ok()?;
+    Some((source, sequence))
+}
+
 /// `session.usage_record` receipts read so far in one session's stream, and
 /// those no snapshot has covered yet, by model: an exit takes each model's
 /// in turn, and one list of every model was scanned once per model.
