@@ -749,6 +749,43 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 440);
     }
 
+    /// A copied receipt without an accounting identity is the parent's once
+    /// the marker names it, so the fork's exit takes it off as a copy.
+    #[test]
+    fn a_copied_receipt_without_an_identity_comes_off_the_forks_exit() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let bare = json!({
+            "type": "session.usage_record",
+            "id": "u-1",
+            "timestamp": "2026-07-27T10:00:00.000Z",
+            "data": {"usage": {"model": "gpt-5-mini", "inputTokens": 100, "outputTokens": 10, "cacheReadTokens": 0, "cacheWriteTokens": 0, "reasoningTokens": 0}},
+        })
+        .to_string();
+        write_session(temp.path(), "parent", &lines(std::slice::from_ref(&bare)));
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T11:00:00.000Z"),
+                bare,
+                fork_info(
+                    "m-1",
+                    "2026-07-27T11:00:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+                shutdown("e-1", "2026-07-27T11:30:00.000Z", 100, 10),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("fork", "2026-07-27T12:00:00.000Z", 50, 5)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 165);
+    }
+
     /// A parent known only by caught-up rows, its journal gone, keeps them:
     /// the forks' copies, now the parent's, don't make it a session with
     /// receipts at hand, or every call the forks didn't copy would be lost.

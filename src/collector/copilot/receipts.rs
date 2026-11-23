@@ -133,6 +133,16 @@ impl Receipts {
     /// for a model whose counters the exit validated: taking every model's
     /// up front, an exit without the model's counters consumed its receipts
     /// without deducting them, and the next cumulative counted them again.
+    /// The receipts read so far are copies of a parent's history, so a
+    /// later exit takes them off as copies. A copy without an accounting
+    /// identity read as the fork's own, and came off its exit only when the
+    /// fork had no store rows.
+    pub(super) fn disown_pending(&mut self) {
+        for receipt in self.pending.values_mut().flatten() {
+            receipt.own = false;
+        }
+    }
+
     pub(super) fn take_covered(&mut self, snapshot: &Value, model: &str) -> Covered {
         let marks = snapshot
             .pointer("/data/usageAccountingWatermarks")

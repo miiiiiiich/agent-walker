@@ -263,6 +263,7 @@ impl SessionState {
             for keyed in &mut events.usage_events[block..] {
                 keyed.event.session_id = Some(parent.clone());
             }
+            self.receipts.disown_pending();
         } else {
             // Only the block: looking at every event kept before it, a run of
             // such markers took quadratic time.
