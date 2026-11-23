@@ -173,9 +173,17 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
     session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
-    for (fork, at) in session.fork_times {
+    let fork_times = session
+        .fork_times
+        .into_iter()
+        .map(|fork| (forks::FORK_PREFIX, fork));
+    let forked_into = session
+        .forked_into
+        .into_iter()
+        .map(|fork| (forks::FORKED_INTO_PREFIX, fork));
+    for (prefix, (fork, at)) in fork_times.chain(forked_into) {
         events.usage_events.push(KeyedUsageEvent {
-            key: Some(format!("{}{fork}", forks::FORK_PREFIX)),
+            key: Some(format!("{prefix}{fork}")),
             event: UsageEvent {
                 timestamp: Some(at),
                 session_id: Some(fork),
@@ -213,6 +221,8 @@ struct SessionState {
     earliest: Option<OffsetDateTime>,
     /// Each fork the markers name, and when it was made.
     fork_times: Vec<(String, OffsetDateTime)>,
+    /// Each fork a parent's own marker names, and when.
+    forked_into: Vec<(String, OffsetDateTime)>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -298,6 +308,27 @@ impl SessionState {
         });
     }
 
+    fn read_fork_markers(
+        &mut self,
+        value: &Value,
+        timestamp: Option<OffsetDateTime>,
+        session_id: Option<&String>,
+        events: &mut FileEvents,
+    ) {
+        if let (Some(fork), Some(at)) = (forks::forked_into(value), timestamp) {
+            self.forked_into.push((fork, at));
+        }
+        if let Some(marker) = forks::fork_marker(value) {
+            self.close_copied_block(&marker, session_id, events);
+            // A marker that doesn't name the fork is still this journal's.
+            if let (Some(fork), Some(at)) =
+                (marker.child.or_else(|| session_id.cloned()), timestamp)
+            {
+                self.fork_times.push((fork, at));
+            }
+        }
+    }
+
     fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
         let kind = value.get("type").and_then(Value::as_str);
         // A rotated journal's head opens with a replay checkpoint: copies of
@@ -311,15 +342,7 @@ impl SessionState {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
-        if let Some(marker) = forks::fork_marker(value) {
-            self.close_copied_block(&marker, session_id, events);
-            // A marker that doesn't name the fork is still this journal's.
-            if let (Some(fork), Some(at)) =
-                (marker.child.or_else(|| session_id.cloned()), timestamp)
-            {
-                self.fork_times.push((fork, at));
-            }
-        }
+        self.read_fork_markers(value, timestamp, session_id, events);
         let line = Line {
             timestamp,
             session_id,

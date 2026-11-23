@@ -12,6 +12,10 @@ use crate::collector::ident::ident;
 /// events.
 pub(super) const FORK_PREFIX: &str = "copilot-fork:";
 
+/// Likewise, from the parent's marker: used only for a fork whose own
+/// marker isn't read, its journal gone.
+pub(super) const FORKED_INTO_PREFIX: &str = "copilot-forked-into:";
+
 /// A fork's journal opens with a copy of its parent's history, event ids
 /// and all, then a `session.info` of `infoType` "fork" reading "Forked from
 /// <parent> [before event <id>] as <fork>.", each session named by its id
@@ -24,7 +28,7 @@ pub(super) struct ForkMarker {
     pub(super) child: Option<String>,
 }
 
-pub(super) fn fork_marker(value: &Value) -> Option<ForkMarker> {
+fn fork_message(value: &Value) -> Option<&str> {
     if value.get("type").and_then(Value::as_str) != Some("session.info") {
         return None;
     }
@@ -32,10 +36,18 @@ pub(super) fn fork_marker(value: &Value) -> Option<ForkMarker> {
     if data.get("infoType").and_then(Value::as_str) != Some("fork") {
         return None;
     }
-    let named = data
-        .get("message")?
-        .as_str()?
-        .strip_prefix("Forked from ")?;
+    data.get("message")?.as_str()
+}
+
+/// The fork a parent's own marker, "Forked this session into <fork>
+/// [before event <id>].", names. Its history stays the parent's.
+pub(super) fn forked_into(value: &Value) -> Option<String> {
+    let named = fork_message(value)?.strip_prefix("Forked this session into ")?;
+    session_ref(named).map(|(id, _)| id.to_owned())
+}
+
+pub(super) fn fork_marker(value: &Value) -> Option<ForkMarker> {
+    let named = fork_message(value)?.strip_prefix("Forked from ")?;
     let parent = session_ref(named);
     let child = parent.and_then(|(_, rest)| {
         let rest = match rest.strip_prefix(" before event ") {
@@ -68,23 +80,26 @@ fn session_ref(text: &str) -> Option<(&str, &str)> {
     Some((ident(id).filter(|_| valid)?, rest))
 }
 
-/// Each fork's session and the time of its fork, taken out of the events.
+/// Each fork's session and the time of its fork, taken out of the events:
+/// from the fork's own marker, or failing that the parent's.
 pub(super) fn take_fork_times(
     per_file: &mut [(PathBuf, Option<FileEvents>)],
 ) -> HashMap<String, OffsetDateTime> {
-    let mut forks: HashMap<String, OffsetDateTime> = HashMap::new();
+    let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
+    let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
     for events in per_file
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
     {
         events.usage_events.retain(|keyed| {
-            if !keyed
-                .key
-                .as_deref()
-                .is_some_and(|key| key.starts_with(FORK_PREFIX))
-            {
+            let key = keyed.key.as_deref().unwrap_or_default();
+            let forks = if key.starts_with(FORK_PREFIX) {
+                &mut own
+            } else if key.starts_with(FORKED_INTO_PREFIX) {
+                &mut named
+            } else {
                 return true;
-            }
+            };
             if let (Some(session), Some(time)) =
                 (keyed.event.session_id.clone(), keyed.event.timestamp)
             {
@@ -96,7 +111,10 @@ pub(super) fn take_fork_times(
             false
         });
     }
-    forks
+    for (fork, at) in named {
+        own.entry(fork).or_insert(at);
+    }
+    own
 }
 
 #[cfg(test)]
@@ -159,6 +177,21 @@ pub(in crate::collector::copilot) mod tests {
             Some(named("p-1", "f-1"))
         );
         assert_eq!(marker("Forked this session into f-1."), None);
+        let into = |message: &str| {
+            forked_into(
+                &serde_json::from_str(&fork_info("m", "2026-07-27T12:00:00.000Z", message))
+                    .expect("marker json"),
+            )
+        };
+        assert_eq!(
+            into("Forked this session into f-1.").as_deref(),
+            Some("f-1")
+        );
+        assert_eq!(
+            into(r#"Forked this session into "a (b)" (f-1) before event e-9."#).as_deref(),
+            Some("f-1")
+        );
+        assert_eq!(into("Forked from p-1 as f-1."), None);
         assert_eq!(
             marker(r#"Forked from "unclosed (p-1) as f-1."#),
             Some((None, None))
@@ -437,6 +470,40 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110 + 440);
+    }
+
+    /// The review's case: the fork's journal is gone, but the parent's own
+    /// marker names it, so the fork's caught-up row of the parent's call
+    /// doesn't count beside the parent's live row.
+    #[test]
+    fn the_parents_marker_dates_a_fork_whose_journal_is_gone() {
+        use crate::collector::copilot::ledger::tests::set_event_ids;
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                fork_start("parent", "2026-07-27T09:00:00.000Z"),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T11:00:00.000Z",
+                    "Forked this session into fork.",
+                ),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("parent", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
+            ],
+        );
+        set_event_ids(temp.path(), &[(2, "usage-record:a")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
     }
 
     /// A parent known only by caught-up rows, its journal gone, keeps them:

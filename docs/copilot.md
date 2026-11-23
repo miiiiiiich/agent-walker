@@ -99,6 +99,9 @@ user.
   its store rows dated up to its marker (without a marker naming it, up to
   its start) aren't read: whether the CLI caught them up from the copied
   receipts or the store copied them, they repeat the parent's history.
+  With the fork's journal gone, the parent's own marker ("Forked this
+  session into <fork>.") dates the fork instead; the parent's history stays
+  its own.
 
   From a session's first recorded call on, or from 60 s before its first
   live row if that's earlier, its rows replace its snapshots: an exit a
