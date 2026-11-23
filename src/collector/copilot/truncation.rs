@@ -57,6 +57,9 @@ pub(super) struct Truncated {
 /// usage from before the store.
 pub(super) fn drop_covered_copies(per_file: &mut [(PathBuf, Option<FileEvents>)]) {
     let mut truncated = Truncated::default();
+    // Pooled across journals: a first exit standing in any journal that
+    // read it as its first stands for every one of them.
+    let mut standing: HashSet<String> = HashSet::new();
     for (path, events) in per_file.iter() {
         let Some((events, summary)) = events
             .as_ref()
@@ -78,18 +81,21 @@ pub(super) fn drop_covered_copies(per_file: &mut [(PathBuf, Option<FileEvents>)]
             .iter()
             .filter_map(|keyed| keyed.key.as_deref())
             .collect();
-        let standing: HashMap<String, FirstExit> = summary
-            .first_exits
-            .iter()
-            .filter(|(_, exit)| keys.contains(exit.key.as_str()))
-            .cloned()
-            .collect();
-        if !standing.is_empty() {
-            truncated.first_exits.insert(session.to_owned(), standing);
-        }
+        standing.extend(
+            summary
+                .first_exits
+                .iter()
+                .filter(|(_, exit)| keys.contains(exit.key.as_str()))
+                .map(|(_, exit)| exit.key.clone()),
+        );
+        let exits = summary.first_exits.iter().cloned().collect();
+        truncated.first_exits.insert(session.to_owned(), exits);
     }
-    if truncated.first_exits.is_empty() {
+    if standing.is_empty() {
         return;
+    }
+    for models in truncated.first_exits.values_mut() {
+        models.retain(|_, exit| standing.contains(&exit.key));
     }
     for (path, events) in per_file.iter_mut() {
         let Some(events) = events.as_mut() else {

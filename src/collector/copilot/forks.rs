@@ -926,6 +926,53 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 130);
     }
 
+    /// Two truncated journals whose first exits share an id: the copy left
+    /// with nothing to count still holds the fork's history, because the
+    /// parent's copy of that exit stands.
+    #[test]
+    fn a_first_exit_standing_in_any_journal_covers_its_copies() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 90, 10),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                journal_link("fork", "2026-07-27T10:20:00.000Z"),
+                receipt("2026-07-27T10:30:00.000Z", "fork", 1, 90, 10),
+                marked(
+                    &shutdown("e-2", "2026-07-27T11:00:00.000Z", 90, 10),
+                    r#"{"fork":1}"#,
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "nested",
+            &lines(&[
+                fork_start("nested", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 45, 5),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from fork as nested.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
     /// A session can't have used anything before it existed: a fork's
     /// receipt without an accounting identity dated before its start is a
     /// copy, whether the marker is missing or unreadable.
