@@ -26,7 +26,7 @@ use turns::{TurnState, is_human_turn};
 /// Background harnesses (the claude-mem observer) keep always-on sessions.
 /// Their calls are billed like any other, so dropping the files lost their
 /// tokens and cost; kept whole, they inflated sessions and active days.
-const BACKGROUND_DIR_MARKERS: [&str; 1] = ["claude-mem-observer"];
+const BACKGROUND_DIR_MARKER: &str = "claude-mem-observer";
 
 pub fn collect(
     root: &Path,
@@ -144,11 +144,10 @@ fn earlier_files(per_file: &[(PathBuf, Option<FileEvents>)], floor: SystemTime) 
 
 fn is_background_path(path: &Path) -> bool {
     path.components().any(|component| {
-        component.as_os_str().to_str().is_some_and(|name| {
-            BACKGROUND_DIR_MARKERS
-                .iter()
-                .any(|marker| name.contains(marker))
-        })
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.contains(BACKGROUND_DIR_MARKER))
     })
 }
 
