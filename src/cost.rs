@@ -360,25 +360,29 @@ fn priced(
     reason = "Token counts are far below 2^52; estimate precision is dominated by pricing anyway."
 )]
 fn cost_at(rates: &Pricing, usage: &TokenUsage) -> f64 {
-    // The 5m/1h split comes from untrusted logs; if it is absent, broken, or
-    // would overflow, fall back to pricing every write at the 5m rate.
+    let (write_short, write_long) = write_split(usage);
+    usage.input_tokens as f64 * rates.input
+        + usage.output_tokens as f64 * rates.output
+        + usage.cache_read_input_tokens as f64 * rates.cache_read
+        + write_short as f64 * rates.cache_write_5m
+        + write_long as f64 * rates.cache_write_1h
+}
+
+/// The cache writes at the 5m and the 1h rate. The split comes from
+/// untrusted logs; if it is absent, broken, or would overflow, every write
+/// is at the 5m rate.
+pub fn write_split(usage: &TokenUsage) -> (u64, u64) {
     let split = usage
         .cache_creation_ephemeral_5m_input_tokens
         .checked_add(usage.cache_creation_ephemeral_1h_input_tokens);
-    let (write_short, write_long) = match split {
+    match split {
         Some(split) if split > 0 && split <= usage.cache_creation_input_tokens => (
             usage.cache_creation_ephemeral_5m_input_tokens
                 + (usage.cache_creation_input_tokens - split),
             usage.cache_creation_ephemeral_1h_input_tokens,
         ),
         _ => (usage.cache_creation_input_tokens, 0),
-    };
-
-    usage.input_tokens as f64 * rates.input
-        + usage.output_tokens as f64 * rates.output
-        + usage.cache_read_input_tokens as f64 * rates.cache_read
-        + write_short as f64 * rates.cache_write_5m
-        + write_long as f64 * rates.cache_write_1h
+    }
 }
 
 /// Price one usage event, at the rates of the options it was billed with.
