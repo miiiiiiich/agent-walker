@@ -220,6 +220,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
             continue;
         }
         let usage_before = events.usage_events.len();
+        let timestamp = parse_timestamp(value.get("timestamp"));
         if project.is_none()
             && let Some(cwd) = value
                 .get("cwd")
@@ -233,7 +234,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
                 // Clear an interrupted turn before timestamp validation; an undated
                 // marker must also prevent a completed-duration event.
                 turn = TurnState::default();
-            } else if let Some(timestamp) = parse_timestamp(value.get("timestamp")) {
+            } else if let Some(timestamp) = timestamp {
                 if is_human_turn(&value) {
                     let key = string_field(&value, "uuid");
                     let replayed = key
@@ -306,10 +307,7 @@ fn parse_file(path: &Path, root: &Path, local_offset: UtcOffset) -> Option<FileE
             &mut events,
         );
         if source_kind == SourceKind::Main {
-            cost_state.note(
-                parse_timestamp(value.get("timestamp")),
-                events.usage_events.len() > usage_before,
-            );
+            cost_state.note(timestamp, events.usage_events.len() > usage_before);
         }
     }
 
