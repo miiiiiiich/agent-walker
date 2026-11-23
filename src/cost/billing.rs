@@ -6,16 +6,15 @@ impl ModelPricing {
     /// A service tier the table lists no rates for prices at the standard
     /// ones.
     pub(super) fn card(&self, tier: ServiceTier) -> RateCard {
-        let standard = RateCard {
-            base: self.base,
-            long_context: self.long_context,
-        };
         let listed = match tier {
             ServiceTier::Priority => self.priority,
             ServiceTier::Ultrafast => self.ultrafast,
             ServiceTier::Standard | ServiceTier::Fast => None,
         };
-        listed.unwrap_or(standard)
+        listed.unwrap_or(RateCard {
+            base: self.base,
+            long_context: self.long_context,
+        })
     }
 
     /// One factor on the whole request: both multipliers scale every rate,
