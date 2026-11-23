@@ -45,7 +45,8 @@ pub fn collect(
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::take_fork_times(&mut per_file);
-    truncation::drop_copies_inside_truncated_exits(&mut per_file);
+    let truncated = truncation::take(&mut per_file);
+    truncated.drop_covered_copies(&mut per_file);
     forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
     let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
@@ -179,10 +180,13 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
     session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
-    let truncated = session
-        .first_exit
-        .zip(session_id.clone())
-        .map(|(at, session)| (truncation::TRUNCATED_PREFIX, (session, at)));
+    if let Some(sid) = &session_id {
+        for (model, (at, counters)) in session.first_exits {
+            events
+                .usage_events
+                .push(truncation::first_exit(sid, model, at, counters));
+        }
+    }
     let fork_times = session
         .fork_times
         .into_iter()
@@ -191,25 +195,41 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .forked_into
         .into_iter()
         .map(|fork| (forks::FORKED_INTO_PREFIX, fork));
-    for (prefix, (fork, at)) in fork_times.chain(forked_into).chain(truncated) {
-        events.usage_events.push(KeyedUsageEvent {
-            key: Some(format!("{prefix}{fork}")),
-            event: UsageEvent {
-                timestamp: Some(at),
-                session_id: Some(fork),
-                model: None,
-                source_kind: SourceKind::Main,
-                attribution_agent: None,
-                attribution_skill: None,
-                project: None,
-                usage: TokenUsage::default(),
-                granularity: UsageGranularity::Aggregate,
-                billing: crate::model::Billing::default(),
-            },
-        });
+    for (prefix, (fork, at)) in fork_times.chain(forked_into) {
+        events.usage_events.push(helper_event(
+            format!("{prefix}{fork}"),
+            Some(fork),
+            None,
+            at,
+        ));
     }
     events.compress_touches(local_offset);
     Some(events)
+}
+
+/// An event carrying data from parsing to reconciliation, stripped before
+/// anything is counted.
+fn helper_event(
+    key: String,
+    session_id: Option<String>,
+    model: Option<String>,
+    at: OffsetDateTime,
+) -> KeyedUsageEvent {
+    KeyedUsageEvent {
+        key: Some(key),
+        event: UsageEvent {
+            timestamp: Some(at),
+            session_id,
+            model,
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: None,
+            project: None,
+            usage: TokenUsage::default(),
+            granularity: UsageGranularity::Aggregate,
+            billing: crate::model::Billing::default(),
+        },
+    }
 }
 
 #[derive(Default)]
@@ -233,11 +253,11 @@ struct SessionState {
     fork_times: Vec<(String, OffsetDateTime)>,
     /// Each fork a parent's own marker names, and when.
     forked_into: Vec<(String, OffsetDateTime)>,
-    /// The journal's oldest segment is gone, so its first exit read counts
-    /// everything before it.
+    /// The journal's oldest segment is gone, so each model's first exit
+    /// read counts everything of that model before it.
     truncated: bool,
-    /// That first exit's time, once read.
-    first_exit: Option<OffsetDateTime>,
+    /// Those first exits' times and cumulatives, once read.
+    first_exits: BTreeMap<String, (OffsetDateTime, RawCounters)>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -281,21 +301,12 @@ impl SessionState {
     /// run of unchanged exits kept an event per model per exit.
     fn mark_latest_exits(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
         for (model, at) in std::mem::take(&mut self.latest_exits) {
-            events.usage_events.push(KeyedUsageEvent {
-                key: Some(format!("{}{model}", ledger::EXIT_PREFIX)),
-                event: UsageEvent {
-                    timestamp: Some(at),
-                    session_id: session_id.cloned(),
-                    model: Some(model),
-                    source_kind: SourceKind::Main,
-                    attribution_agent: None,
-                    attribution_skill: None,
-                    project: None,
-                    usage: TokenUsage::default(),
-                    granularity: UsageGranularity::Aggregate,
-                    billing: crate::model::Billing::default(),
-                },
-            });
+            events.usage_events.push(helper_event(
+                format!("{}{model}", ledger::EXIT_PREFIX),
+                session_id.cloned(),
+                Some(model),
+                at,
+            ));
         }
     }
 
@@ -420,7 +431,7 @@ impl SessionState {
                     &mut self.credit_index,
                     events,
                 );
-                let advanced = collect_shutdown_usage(
+                let exits = collect_shutdown_usage(
                     value,
                     &line,
                     self.project.as_deref(),
@@ -429,13 +440,15 @@ impl SessionState {
                     self.shutdown_index,
                     events,
                 );
-                if self.truncated && self.first_exit.is_none() && !advanced.is_empty() {
-                    self.first_exit = timestamp;
-                }
                 // The latest time, not the last read: a clock moved back dated
                 // a later exit before one covering a row.
                 if let Some(at) = timestamp {
-                    for model in advanced {
+                    for (model, counters) in exits {
+                        if self.truncated {
+                            self.first_exits
+                                .entry(model.clone())
+                                .or_insert((at, counters));
+                        }
                         self.latest_exits
                             .entry(model)
                             .and_modify(|latest| *latest = (*latest).max(at))
@@ -518,7 +531,7 @@ fn collect_shutdown_usage(
     receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
-) -> Vec<String> {
+) -> Vec<(String, RawCounters)> {
     let mut advanced = Vec::new();
     // A shutdown the analyzer cannot place in time must not advance the
     // baseline either — otherwise the usage up to it would be subtracted by
@@ -572,7 +585,7 @@ fn collect_shutdown_usage(
         // call its watermark leaves out.
         let zero = RawCounters::default();
         if current != previous || covered.copied != zero || covered.own != zero {
-            advanced.push(model.clone());
+            advanced.push((model.clone(), current));
         }
         let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
@@ -599,10 +612,14 @@ fn collect_shutdown_usage(
                 event: exit_usage(line, Some(model), None, delta.minus(covered.own).to_usage()),
             });
         }
-        events.usage_events.push(KeyedUsageEvent {
+        let exit = KeyedUsageEvent {
             key,
             event: exit_usage(line, Some(model), project, usage),
-        });
+        };
+        events
+            .usage_events
+            .extend(truncation::cumulative(&exit, current));
+        events.usage_events.push(exit);
     }
     advanced
 }

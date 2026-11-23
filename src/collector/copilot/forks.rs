@@ -629,6 +629,72 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 200);
     }
 
+    /// The review's case: the parent's exit still in view counts only
+    /// another model, so the fork's copy of the first model's exit is the
+    /// only count of it.
+    #[test]
+    fn a_truncated_parents_exit_covers_only_its_own_models() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20).replace("gpt-5-mini", "gpt-5"),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 300);
+    }
+
+    /// The review's case: counters lower than the copy's mean the parent's
+    /// accounting restarted after it, so the exit still in view doesn't
+    /// hold the copy.
+    #[test]
+    fn a_truncated_parents_exit_after_a_reset_doesnt_cover_the_copy() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 27, 3),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 130);
+    }
+
     /// A session can't have used anything before it existed: a fork's
     /// receipt without an accounting identity dated before its start is a
     /// copy, whether the marker is missing or unreadable.

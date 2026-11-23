@@ -107,9 +107,11 @@ user.
   once.
   With the fork's journal gone, the parent's own marker ("Forked this
   session into <fork>.") dates the fork instead; the parent's history stays
-  its own. When a journal has lost its oldest segment, its first exit
-  read counts everything before it, so another journal's records of that
-  session (a fork's copies) dated up to that exit don't count.
+  its own. When a journal has lost its oldest segment, each model's first
+  exit read counts everything of that model before it, so another
+  journal's records of that session and model (a fork's copies) dated up
+  to that exit don't count. A copied exit with any counter above that
+  exit's is from before an accounting reset and still counts.
 
   From a session's first recorded call on, or from 60 s before its first
   live row if that's earlier, its rows replace its snapshots: an exit a
@@ -152,7 +154,9 @@ user.
   is gone and only a fork's copy of the exit remains. A fork's copy of a
   receipt written after the snapshot of a parent's first exit read (past
   its watermark, but dated before it), when the parent's journal has lost
-  its oldest segment.
+  its oldest segment; and, in that case, a copy from before an accounting
+  reset when that exit's counters all grew past the copy's again, or the
+  copy is a receipt.
 
   All three map to the same schema as the other providers:
 
