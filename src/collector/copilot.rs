@@ -45,15 +45,15 @@ pub fn collect(
     let mut collection = Collection::new(Provider::Copilot, root.to_path_buf());
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
-    let forked = forks::fork_times(&per_file);
+    let forks = forks::Forks::read(&per_file);
     let truncated = truncation::Truncated::read(&per_file);
-    forks::drop_before_fork(&mut per_file, &forked);
+    forks.drop_copies(&mut per_file);
     let db_path = root.join("session-store.db");
-    let mut ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
+    let mut ledger = read_call_ledger(&db_path, local_offset, &forks, &mut collection);
     if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
-    let exits = ledger::exit_marks(&per_file, &forked);
+    let exits = ledger::exit_marks(&per_file, &forks);
     let (live, caught_up) = ledger
         .as_ref()
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
@@ -198,6 +198,12 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     });
     events.compress_touches(local_offset);
     Some(events)
+}
+
+fn summaries(per_file: &[(PathBuf, Option<FileEvents>)]) -> impl Iterator<Item = &JournalSummary> {
+    per_file
+        .iter()
+        .filter_map(|(_, events)| events.as_ref()?.copilot.as_ref())
 }
 
 /// What reconciling the journals needs of each besides its events, cached

@@ -12,7 +12,8 @@ use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
 use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent, UsageGranularity};
 use crate::timestamp::{parse_rfc3339, plausible};
 
-use super::{MAX_SANE_TOKENS, RawCounters};
+use super::forks::Forks;
+use super::{MAX_SANE_TOKENS, RawCounters, summaries};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
@@ -22,17 +23,10 @@ pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
 
 /// Each session's and model's latest exit mark. A fork's marks up to its
 /// fork are its parent's history, like its usage then.
-pub(super) fn exit_marks(
-    per_file: &[(PathBuf, Option<FileEvents>)],
-    forked: &HashMap<String, OffsetDateTime>,
-) -> Exits {
+pub(super) fn exit_marks(per_file: &[(PathBuf, Option<FileEvents>)], forks: &Forks) -> Exits {
     let mut exits: Exits = HashMap::new();
-    for (session, model, time) in per_file
-        .iter()
-        .filter_map(|(_, events)| events.as_ref()?.copilot.as_ref())
-        .flat_map(|summary| &summary.exit_marks)
-    {
-        if forked.get(session).is_some_and(|fork| time <= fork) {
+    for (session, model, time) in summaries(per_file).flat_map(|summary| &summary.exit_marks) {
+        if forks.copied(session, *time) {
             continue;
         }
         exits
@@ -280,14 +274,13 @@ struct CallRow {
 }
 
 /// Without both tables there is no ledger, as with a CLI that predates it.
-/// A fork's rows dated up to its fork, in `forked`, aren't read: it can't
-/// have made a call before it existed, so they copy the parent's history,
-/// whether the CLI caught them up from the copied receipts or the store
-/// copied them, and the parent's own records count those calls.
+/// A fork's rows dated up to its fork aren't read: whether the CLI caught
+/// them up from the copied receipts or the store copied them, they repeat
+/// the parent's history, and the parent's own records count those calls.
 pub(super) fn read_call_ledger(
     path: &Path,
     local_offset: UtcOffset,
-    forked: &HashMap<String, OffsetDateTime>,
+    forks: &Forks,
     collection: &mut Collection,
 ) -> Option<CallLedger> {
     if !path.is_file() {
@@ -345,10 +338,7 @@ pub(super) fn read_call_ledger(
             }
             continue;
         };
-        if forked
-            .get(&row.session_id)
-            .is_some_and(|fork| timestamp <= *fork)
-        {
+        if forks.copied(&row.session_id, timestamp) {
             continue;
         }
         ledger.events.session_touches.push(SessionTouch {

@@ -9,37 +9,68 @@ use crate::collector::ident::ident;
 use crate::model::UsageGranularity;
 
 use super::receipts::source_of;
+use super::summaries;
 
-/// A session can't have used anything before it existed: a fork's usage
-/// dated up to its fork is a copy of its parent's history, whether or not a
-/// marker named the parent. Only a receipt naming another session as its
-/// source stays, for that source to decide. The store's rows get the same
-/// cut when they are read.
-pub(super) fn drop_before_fork(
-    per_file: &mut [(PathBuf, Option<FileEvents>)],
-    forked: &HashMap<String, OffsetDateTime>,
-) {
-    if forked.is_empty() {
-        return;
+/// Each fork's session and the time of its fork: from the fork's own
+/// marker, or failing that the parent's.
+pub(super) struct Forks(HashMap<String, OffsetDateTime>);
+
+impl Forks {
+    pub(super) fn read(per_file: &[(PathBuf, Option<FileEvents>)]) -> Self {
+        let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
+        let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
+        for summary in summaries(per_file) {
+            for (forks, found) in [
+                (&mut own, &summary.forks),
+                (&mut named, &summary.forked_into),
+            ] {
+                for (session, time) in found {
+                    forks
+                        .entry(session.clone())
+                        .and_modify(|at| *at = (*at).max(*time))
+                        .or_insert(*time);
+                }
+            }
+        }
+        for (fork, at) in named {
+            own.entry(fork).or_insert(at);
+        }
+        Self(own)
     }
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let (Some(session), Some(time)) =
-                (keyed.event.session_id.as_deref(), keyed.event.timestamp)
-            else {
-                return true;
-            };
-            let named_elsewhere = keyed.event.granularity == UsageGranularity::Call
-                && keyed
-                    .key
-                    .as_deref()
-                    .and_then(source_of)
-                    .is_some_and(|source| source != session);
-            named_elsewhere || forked.get(session).is_none_or(|fork| time > *fork)
-        });
+
+    /// A session can't have used anything before it existed: a fork's
+    /// record dated up to its fork is a copy of its parent's history,
+    /// whether or not a marker named the parent. The store's rows and the
+    /// exit marks get the same cut.
+    pub(super) fn copied(&self, session: &str, time: OffsetDateTime) -> bool {
+        self.0.get(session).is_some_and(|fork| time <= *fork)
+    }
+
+    /// Only a receipt naming another session as its source stays, for that
+    /// source to decide.
+    pub(super) fn drop_copies(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+        if self.0.is_empty() {
+            return;
+        }
+        for events in per_file
+            .iter_mut()
+            .filter_map(|(_, events)| events.as_mut())
+        {
+            events.usage_events.retain(|keyed| {
+                let (Some(session), Some(time)) =
+                    (keyed.event.session_id.as_deref(), keyed.event.timestamp)
+                else {
+                    return true;
+                };
+                let named_elsewhere = keyed.event.granularity == UsageGranularity::Call
+                    && keyed
+                        .key
+                        .as_deref()
+                        .and_then(source_of)
+                        .is_some_and(|source| source != session);
+                named_elsewhere || !self.copied(session, time)
+            });
+        }
     }
 }
 
@@ -105,35 +136,6 @@ fn session_ref(text: &str) -> Option<(&str, &str)> {
     };
     let valid = !id.is_empty() && !id.contains(char::is_whitespace);
     Some((ident(id).filter(|_| valid)?, rest))
-}
-
-/// Each fork's session and the time of its fork: from the fork's own
-/// marker, or failing that the parent's.
-pub(super) fn fork_times(
-    per_file: &[(PathBuf, Option<FileEvents>)],
-) -> HashMap<String, OffsetDateTime> {
-    let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
-    let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
-    for summary in per_file
-        .iter()
-        .filter_map(|(_, events)| events.as_ref()?.copilot.as_ref())
-    {
-        for (forks, found) in [
-            (&mut own, &summary.forks),
-            (&mut named, &summary.forked_into),
-        ] {
-            for (session, time) in found {
-                forks
-                    .entry(session.clone())
-                    .and_modify(|at| *at = (*at).max(*time))
-                    .or_insert(*time);
-            }
-        }
-    }
-    for (fork, at) in named {
-        own.entry(fork).or_insert(at);
-    }
-    own
 }
 
 #[cfg(test)]
