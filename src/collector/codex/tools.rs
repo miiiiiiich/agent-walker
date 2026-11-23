@@ -75,14 +75,7 @@ pub(super) fn collect_tool_event(
     if is_shell_call && let Some(call_id) = &call_id {
         state.counted.insert(call_id.clone());
     }
-    let key = call_id.unwrap_or_else(|| {
-        format!(
-            "{}:{}:{}",
-            path.display(),
-            line_index + 1,
-            tool_name.as_str()
-        )
-    });
+    let key = call_id.unwrap_or_else(|| fallback_key(path, line_index, &tool_name));
     if is_code_mode_exec {
         state
             .execs
@@ -164,14 +157,7 @@ fn collect_command_item(
         *named = true;
         return;
     }
-    let key = item_id.unwrap_or_else(|| {
-        format!(
-            "{}:{}:{}",
-            path.display(),
-            line_index + 1,
-            tool_name.as_str()
-        )
-    });
+    let key = item_id.unwrap_or_else(|| fallback_key(path, line_index, &tool_name));
     events.tool_events.push(KeyedToolEvent {
         key: Some(key),
         event: ToolEvent {
@@ -182,6 +168,10 @@ fn collect_command_item(
             source_kind: origin.source_kind(),
         },
     });
+}
+
+fn fallback_key(path: &Path, line_index: usize, tool_name: &str) -> String {
+    format!("{}:{}:{}", path.display(), line_index + 1, tool_name)
 }
 
 fn is_shell_wrapper(name: &str) -> bool {
