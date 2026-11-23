@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use time::OffsetDateTime;
 
 use crate::collector::FileEvents;
+use crate::collector::merge::{dedupe_into, older_timestamp};
 use crate::model::{SourceKind, TokenUsage};
 
 use super::transcript_model;
@@ -63,28 +64,23 @@ pub(super) fn transcripts<'a>(
                 project: event.project.clone(),
                 source_kind: event.source_kind,
             };
-            let session_calls = calls.entry(session).or_default();
-            let Some(key) = call.key else {
-                session_calls.push(call);
-                continue;
-            };
-            if let Some(&index) = seen.get(&(session, key)) {
-                let kept = &mut session_calls[index];
-                let earliest = match (kept.timestamp, call.timestamp) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-                if call.usage.token_volume() > kept.usage.token_volume() {
-                    let replaced = std::mem::replace(kept, call);
-                    kept.fill_from(replaced);
-                } else {
-                    kept.fill_from(call);
-                }
-                kept.timestamp = earliest;
-            } else {
-                seen.insert((session, key), session_calls.len());
-                session_calls.push(call);
-            }
+            let key = call.key.map(|key| (session, key));
+            dedupe_into(
+                calls.entry(session).or_default(),
+                &mut seen,
+                key,
+                call,
+                |kept, call| {
+                    let earliest = older_timestamp(kept.timestamp, call.timestamp);
+                    if call.usage.token_volume() > kept.usage.token_volume() {
+                        let replaced = std::mem::replace(kept, call);
+                        kept.fill_from(replaced);
+                    } else {
+                        kept.fill_from(call);
+                    }
+                    kept.timestamp = earliest;
+                },
+            );
         }
     }
     calls
