@@ -346,6 +346,41 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 110 + 440);
     }
 
+    /// A fork whose marker doesn't name it, or that has none, still can't
+    /// have made a call before it existed: its own journal's rows from
+    /// before the fork go as well, dated up to the marker or, without one,
+    /// up to its start.
+    #[test]
+    fn an_unnamed_forks_rows_from_before_the_fork_dont_count() {
+        use crate::collector::copilot::ledger::tests::set_event_ids;
+        use crate::collector::copilot::receipts::tests::receipt;
+
+        for marker in [Some(r#"Forked from "broken as fork."#), None] {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            let copied = receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10);
+            write_session(temp.path(), "parent", &lines(std::slice::from_ref(&copied)));
+            let mut fork = vec![fork_start("fork", "2026-07-27T11:00:00.000Z"), copied];
+            fork.extend(
+                marker.map(|message| fork_info("m-1", "2026-07-27T11:00:00.000Z", message)),
+            );
+            fork.push(receipt("2026-07-27T12:00:00.000Z", "fork", 1, 400, 40));
+            write_session(temp.path(), "fork", &lines(&fork));
+            write_store(
+                temp.path(),
+                &[
+                    call("parent", "2026-07-27T10:00:00.500Z", 100, 10),
+                    call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
+                    call("fork", "2026-07-27T12:00:00.500Z", 400, 40),
+                ],
+            );
+            set_event_ids(temp.path(), &[(2, "usage-record:a")]);
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(total_volume(&collection), 110 + 440, "{marker:?}");
+        }
+    }
+
     /// A parent known only by caught-up rows, its journal gone, keeps them:
     /// the forks' copies, now the parent's, don't make it a session with
     /// receipts at hand, or every call the forks didn't copy would be lost.

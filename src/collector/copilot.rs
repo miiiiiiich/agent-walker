@@ -172,7 +172,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     }
 
     session.mark_latest_exits(session_id.as_ref(), &mut events);
-    session.drop_unnamed_copies(&mut events);
+    session.drop_unnamed_copies(session_id.as_ref(), &mut events);
     for (fork, at) in session.fork_times {
         events.usage_events.push(KeyedUsageEvent {
             key: Some(format!("{}{fork}", forks::FORK_PREFIX)),
@@ -273,16 +273,27 @@ impl SessionState {
         }
     }
 
-    /// A journal with no marker whose exits predate its own start holds a
+    /// A journal with no marker whose usage predates its own start holds a
     /// fork's copied history all the same (Copilot dates a fork's start at
-    /// the fork), and its owner can't be named: those exits go.
-    fn drop_unnamed_copies(&self, events: &mut FileEvents) {
+    /// the fork), and its owner can't be named: those exits go, and the
+    /// journal's session is a fork made at its start.
+    fn drop_unnamed_copies(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
         if self.forked {
             return;
         }
         let Some(start) = self.start else {
             return;
         };
+        let copied = events
+            .usage_events
+            .iter()
+            .any(|keyed| keyed.event.timestamp.is_some_and(|time| time < start));
+        if !copied {
+            return;
+        }
+        if let Some(session) = session_id {
+            self.fork_times.push((session.clone(), start));
+        }
         events.usage_events.retain(|keyed| {
             keyed.event.granularity != UsageGranularity::Aggregate
                 || keyed.event.timestamp.is_none_or(|time| time >= start)
@@ -304,8 +315,11 @@ impl SessionState {
             .and_then(parse_rfc3339);
         if let Some(marker) = forks::fork_marker(value) {
             self.close_copied_block(&marker, session_id, events);
-            if let (Some(child), Some(at)) = (marker.child, timestamp) {
-                self.fork_times.push((child, at));
+            // A marker that doesn't name the fork is still this journal's.
+            if let (Some(fork), Some(at)) =
+                (marker.child.or_else(|| session_id.cloned()), timestamp)
+            {
+                self.fork_times.push((fork, at));
             }
         }
         let line = Line {

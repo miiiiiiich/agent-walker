@@ -95,9 +95,9 @@ user.
   or, in a journal without a marker, dated before its own start (Copilot
   dates a fork's start at the fork). Copied receipts still go by their
   `sourceSessionId`. A fork can't have made a call before it existed, so
-  its store rows dated up to its marker aren't read: whether the CLI caught
-  them up from the copied receipts or the store copied them, they repeat
-  the parent's history.
+  its store rows dated up to its marker (without a marker naming it, up to
+  its start) aren't read: whether the CLI caught them up from the copied
+  receipts or the store copied them, they repeat the parent's history.
 
   From a session's first recorded call on, or from 60 s before its first
   live row if that's earlier, its rows replace its snapshots: an exit a
@@ -119,9 +119,14 @@ user.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 
-  When two records can't be told apart as one call or two, one is
-  counted: a call is never counted twice, at the cost of these
-  undercounts. In a session with a live row, a call only in a receipt (its
+  The rule is that when two records can't be told apart as one call or
+  two, one is counted. It isn't guaranteed where a fork can't be told from
+  its own journal: one with no marker and nothing dated before its start
+  (Copilot writes both), whose copied exit counts beside the parent's
+  store rows once the parent's journal is gone; and a fork's first exit
+  carrying the parent's total from before the fork with no copied exit to
+  measure from (CLIs that write receipts take the copied ones off it). The
+  rule costs these undercounts. In a session with a live row, a call only in a receipt (its
   row unreadable or missing), and an exit in the last minute before the
   first live row whose calls had no row. In a session on its receipts, a
   call only in a caught-up row whose receipt is gone and that no later
