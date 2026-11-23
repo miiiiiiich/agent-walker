@@ -76,6 +76,16 @@ cache writes (split into 5-minute and 1-hour) and cache reads. The rows carry
 no timestamp. The total also counts calls that never get an `assistant` row of
 their own. The log does not say which calls these are.
 
+These are the calls Claude Code makes besides answering you, which its
+changelog says use your usage: prompt suggestions (the next prompt offered
+after a reply, sent with the conversation; `promptSuggestionEnabled: false`
+turns them off), auto mode's local permission classifier, session titles,
+memory recall, prompt and agent hooks, background requests such as `/recap`
+and compaction, and model calls made by mods. Which of them a session made is
+not recorded, so the added usage is known per model only. It counts in the
+token totals, cost, the codename and the CONTEXT `other` row like any other
+usage, but not as calls.
+
 - **What is added.** Per session, model and field, the part of the total over
   the session's transcript: `max(0, total − transcript)`. The transcript side
   is the session's main and subagent files with advisor calls, each
