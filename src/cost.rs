@@ -195,7 +195,7 @@ fn replace_loaded(snapshot: Option<Snapshot>) {
     }
 }
 
-fn normalize(model_name: &str) -> String {
+pub(crate) fn normalize(model_name: &str) -> String {
     let lower = model_name.to_ascii_lowercase();
     let no_deploy = lower
         .split_once('[')

@@ -2,9 +2,8 @@ use super::proto::{message_field, string_field};
 
 /// The display name (`Gemini 4 Neon (High)`) in the pricing id form
 /// (`gemini-4-neon`). Rows on a `-tiered` selection carry no display name, so
-/// labelling the rest by it raw split one model into two labels. The steps are
-/// the pricing lookup's (lowercase, cut a `[deploy]` or `(tier)` suffix,
-/// hyphenate spaces), so a label is the key it prices under.
+/// labelling the rest by it raw split one model into two labels. The pricing
+/// lookup's own normalization makes it, so a label is the key it prices under.
 ///
 /// A name holding a control character or whitespace other than the space is
 /// not used, checked before anything is cut: hyphenating a tab turned
@@ -20,18 +19,7 @@ pub(in crate::collector::agy) fn display_name_label(display: &str) -> Option<Str
     {
         return None;
     }
-    let lower = display.to_ascii_lowercase();
-    let no_deploy = lower
-        .split_once('[')
-        .map_or(lower.as_str(), |(head, _)| head);
-    let no_tier = no_deploy
-        .split_once('(')
-        .map_or(no_deploy, |(head, _)| head);
-    let label = no_tier
-        .split(' ')
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let label = crate::cost::normalize(display);
     (!label.is_empty()).then_some(label)
 }
 
