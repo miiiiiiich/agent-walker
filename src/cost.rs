@@ -291,32 +291,25 @@ fn is_date_suffix(suffix: &str) -> bool {
     let (date, revision) = suffix
         .split_once("-v")
         .map_or((suffix, None), |(date, revision)| (date, Some(revision)));
-    is_date(date.as_bytes()) && revision.is_none_or(is_revision)
+    calendar_date(date.as_bytes()).is_some() && revision.is_none_or(is_revision)
 }
 
 /// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD` that is a day on the calendar, so a
 /// four-digit size (`-4096`) or a day the month lacks (`20260231`) is not
 /// taken for one. A yearless date is checked in a leap year, so `0229` is one.
-fn is_date(text: &[u8]) -> bool {
+fn calendar_date(text: &[u8]) -> Option<time::Date> {
     const LEAP_YEAR: [u8; 4] = *b"2000";
     let (year, month, day) = match text {
         [m1, m2, d1, d2] => (LEAP_YEAR, [*m1, *m2], [*d1, *d2]),
         [y1, y2, y3, y4, m1, m2, d1, d2] | [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] => {
             ([*y1, *y2, *y3, *y4], [*m1, *m2], [*d1, *d2])
         }
-        _ => return false,
+        _ => return None,
     };
-    let (Some(year), Some(month), Some(day)) = (number(&year), number(&month), number(&day)) else {
-        return false;
-    };
-    let (Ok(year), Ok(month), Ok(day)) =
-        (i32::try_from(year), u8::try_from(month), u8::try_from(day))
-    else {
-        return false;
-    };
-    time::Month::try_from(month)
-        .and_then(|month| time::Date::from_calendar_date(year, month, day))
-        .is_ok()
+    let year = i32::try_from(number(&year)?).ok()?;
+    let month = time::Month::try_from(u8::try_from(number(&month)?).ok()?).ok()?;
+    let day = u8::try_from(number(&day)?).ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
 }
 
 /// A `v<major>:<minor>` revision, its leading `v` already cut.
