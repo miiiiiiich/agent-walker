@@ -30,7 +30,7 @@ use crate::timestamp::parse_rfc3339;
 
 use ledger::read_call_ledger;
 use receipts::Receipts;
-use sources::{REST_PREFIX, choose_sources};
+use sources::choose_sources;
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -194,6 +194,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             .collect(),
         cumulatives: session.cumulatives,
         exit_marks: session.exit_marks,
+        rests: session.rests,
     });
     events.compress_touches(local_offset);
     Some(events)
@@ -217,6 +218,9 @@ pub struct JournalSummary {
     /// Session, model and time of each model's latest exit that covered
     /// something new, for the store fallback to cut that model's rows at.
     exit_marks: Vec<(String, String, OffsetDateTime)>,
+    /// Each exit less the journal's own receipts it covered, by its key: it
+    /// counts that if its session's calls come from those receipts.
+    rests: HashMap<String, TokenUsage>,
 }
 
 #[derive(Default)]
@@ -250,6 +254,7 @@ struct SessionState {
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
     exit_marks: Vec<(String, String, OffsetDateTime)>,
+    rests: HashMap<String, TokenUsage>,
 }
 
 impl SessionState {
@@ -426,15 +431,7 @@ impl SessionState {
     }
 
     fn read_exit(&mut self, value: &Value, line: &Line, events: &mut FileEvents) {
-        let exits = collect_shutdown_usage(
-            value,
-            line,
-            self.project.as_deref(),
-            &mut self.cumulative,
-            &mut self.receipts,
-            self.shutdown_index,
-            events,
-        );
+        let exits = self.collect_shutdown_usage(value, line, events);
         self.shutdown_index += 1;
         // The latest time, not the last read: a clock moved back dated a
         // later exit before one covering a row.
@@ -461,6 +458,100 @@ impl SessionState {
                 .and_modify(|latest| *latest = (*latest).max(at))
                 .or_insert(at);
         }
+    }
+
+    fn collect_shutdown_usage(
+        &mut self,
+        value: &Value,
+        line: &Line,
+        events: &mut FileEvents,
+    ) -> Vec<(String, RawCounters, Option<String>)> {
+        let mut advanced = Vec::new();
+        // A shutdown the analyzer cannot place in time must not advance the
+        // baseline either — otherwise the usage up to it would be subtracted by
+        // the NEXT valid shutdown and lost forever, instead of being recovered
+        // there in full.
+        if line.timestamp.is_none() {
+            return advanced;
+        }
+        let Some(metrics) = value
+            .get("data")
+            .and_then(|data| data.get("modelMetrics"))
+            .and_then(Value::as_object)
+        else {
+            return advanced;
+        };
+        for (model, entry) in metrics {
+            let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
+                continue;
+            };
+            // A syntactically valid but incomplete usage object would read as
+            // all-zero counters, masquerade as an epoch reset, and poison the
+            // baseline (1000 → missing → 1100 would count 1000 + 1100). Require
+            // the two core counters to be present before trusting the snapshot;
+            // a genuine zero (cache-write-only) still carries the fields.
+            if usage.get("inputTokens").and_then(Value::as_u64).is_none()
+                || usage.get("outputTokens").and_then(Value::as_u64).is_none()
+            {
+                continue;
+            }
+            let current = RawCounters {
+                input: u64_field(usage, "inputTokens"),
+                output: u64_field(usage, "outputTokens"),
+                cache_read: u64_field(usage, "cacheReadTokens"),
+                cache_write: u64_field(usage, "cacheWriteTokens"),
+                reasoning: u64_field(usage, "reasoningTokens"),
+            };
+            let previous = self.cumulative.get(model).copied().unwrap_or_default();
+            // A counter going backwards means the CLI restarted its accounting
+            // (update, epoch change): the snapshot is a fresh cumulative, not a
+            // continuation, so it counts in full.
+            let base = if current.any_less_than(previous) {
+                RawCounters::default()
+            } else {
+                previous
+            };
+            // A copied receipt's call is counted by the session that made it,
+            // from its receipts or its store rows, so it always comes off.
+            let covered = self.receipts.take_covered(value, model);
+            // The exit marks its model's fallback cut only if its total or its
+            // watermark moved: marked at an exit repeating both, the cut took a
+            // call its watermark leaves out.
+            let zero = RawCounters::default();
+            let moved = current != previous || covered.copied != zero || covered.own != zero;
+            let delta = current.minus(base).minus(covered.copied);
+            self.cumulative.insert(model.clone(), current);
+
+            let usage = delta.to_usage();
+            let key = match (line.event_id, line.session_id) {
+                (Some(id), _) => Some(format!("copilot:{id}:{model}")),
+                (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{}", self.shutdown_index)),
+                (None, None) => None,
+            };
+            let counts = usage.token_volume() > 0;
+            if moved {
+                advanced.push((model.clone(), current, key.clone().filter(|_| counts)));
+            }
+            if !counts {
+                continue;
+            }
+            // The journal's own receipts come off only if its session has no
+            // store rows, which parsing can't see: the exit without them goes
+            // along for `choose_sources`. Taken off after cache reads were split
+            // out of input, an exit without the cache counters kept the
+            // receipts' cached input as fresh.
+            if let Some(key) = &key
+                && covered.own.to_usage().token_volume() > 0
+            {
+                self.rests
+                    .insert(key.clone(), delta.minus(covered.own).to_usage());
+            }
+            events.usage_events.push(KeyedUsageEvent {
+                key,
+                event: exit_usage(line, Some(model), self.project.as_deref(), usage),
+            });
+        }
+        advanced
     }
 }
 
@@ -523,105 +614,6 @@ impl RawCounters {
             ..TokenUsage::default()
         }
     }
-}
-
-fn collect_shutdown_usage(
-    value: &Value,
-    line: &Line,
-    project: Option<&str>,
-    cumulative: &mut HashMap<String, RawCounters>,
-    receipts: &mut Receipts,
-    shutdown_index: usize,
-    events: &mut FileEvents,
-) -> Vec<(String, RawCounters, Option<String>)> {
-    let mut advanced = Vec::new();
-    // A shutdown the analyzer cannot place in time must not advance the
-    // baseline either — otherwise the usage up to it would be subtracted by
-    // the NEXT valid shutdown and lost forever, instead of being recovered
-    // there in full.
-    if line.timestamp.is_none() {
-        return advanced;
-    }
-    let Some(metrics) = value
-        .get("data")
-        .and_then(|data| data.get("modelMetrics"))
-        .and_then(Value::as_object)
-    else {
-        return advanced;
-    };
-    for (model, entry) in metrics {
-        let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
-            continue;
-        };
-        // A syntactically valid but incomplete usage object would read as
-        // all-zero counters, masquerade as an epoch reset, and poison the
-        // baseline (1000 → missing → 1100 would count 1000 + 1100). Require
-        // the two core counters to be present before trusting the snapshot;
-        // a genuine zero (cache-write-only) still carries the fields.
-        if usage.get("inputTokens").and_then(Value::as_u64).is_none()
-            || usage.get("outputTokens").and_then(Value::as_u64).is_none()
-        {
-            continue;
-        }
-        let current = RawCounters {
-            input: u64_field(usage, "inputTokens"),
-            output: u64_field(usage, "outputTokens"),
-            cache_read: u64_field(usage, "cacheReadTokens"),
-            cache_write: u64_field(usage, "cacheWriteTokens"),
-            reasoning: u64_field(usage, "reasoningTokens"),
-        };
-        let previous = cumulative.get(model).copied().unwrap_or_default();
-        // A counter going backwards means the CLI restarted its accounting
-        // (update, epoch change): the snapshot is a fresh cumulative, not a
-        // continuation, so it counts in full.
-        let base = if current.any_less_than(previous) {
-            RawCounters::default()
-        } else {
-            previous
-        };
-        // A copied receipt's call is counted by the session that made it,
-        // from its receipts or its store rows, so it always comes off.
-        let covered = receipts.take_covered(value, model);
-        // The exit marks its model's fallback cut only if its total or its
-        // watermark moved: marked at an exit repeating both, the cut took a
-        // call its watermark leaves out.
-        let zero = RawCounters::default();
-        let moved = current != previous || covered.copied != zero || covered.own != zero;
-        let delta = current.minus(base).minus(covered.copied);
-        cumulative.insert(model.clone(), current);
-
-        let usage = delta.to_usage();
-        let key = match (line.event_id, line.session_id) {
-            (Some(id), _) => Some(format!("copilot:{id}:{model}")),
-            (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
-            (None, None) => None,
-        };
-        let counts = usage.token_volume() > 0;
-        if moved {
-            advanced.push((model.clone(), current, key.clone().filter(|_| counts)));
-        }
-        if !counts {
-            continue;
-        }
-        // The journal's own receipts come off only if its session has no
-        // store rows, which parsing can't see: the exit without them goes
-        // along for `choose_sources`. Taken off after cache reads were split
-        // out of input, an exit without the cache counters kept the
-        // receipts' cached input as fresh.
-        if let Some(key) = &key
-            && covered.own.to_usage().token_volume() > 0
-        {
-            events.usage_events.push(KeyedUsageEvent {
-                key: Some(format!("{REST_PREFIX}{key}")),
-                event: exit_usage(line, Some(model), None, delta.minus(covered.own).to_usage()),
-            });
-        }
-        events.usage_events.push(KeyedUsageEvent {
-            key,
-            event: exit_usage(line, Some(model), project, usage),
-        });
-    }
-    advanced
 }
 
 fn exit_usage(
@@ -820,6 +812,7 @@ mod tests {
             )],
             cumulatives: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters)]),
             exit_marks: vec![("parent".to_owned(), "gpt-5-mini".to_owned(), at)],
+            rests: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters.to_usage())]),
         };
         let events = FileEvents {
             copilot: Some(summary),

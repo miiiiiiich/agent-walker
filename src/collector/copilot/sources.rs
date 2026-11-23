@@ -1,15 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::collector::FileEvents;
-use crate::model::{TokenUsage, UsageGranularity};
+use crate::model::UsageGranularity;
 
 use super::receipts::source_of;
-
-/// Key prefix of an exit less its journal's own receipts, for the exit keyed
-/// by the rest of the key. Stripped here, before anything else reads the
-/// events.
-pub(super) const REST_PREFIX: &str = "copilot-rest:";
 
 /// One source per session that made calls. On the store, its rows and its
 /// exits count and its receipts don't; otherwise its receipts count and its
@@ -71,28 +66,17 @@ pub(super) fn choose_sources(
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
     {
-        let mut rest: HashMap<String, TokenUsage> = HashMap::new();
-        events.usage_events.retain(|keyed| {
-            let Some(exit) = keyed
-                .key
-                .as_deref()
-                .and_then(|key| key.strip_prefix(REST_PREFIX))
-            else {
-                return true;
-            };
-            if keyed
-                .event
-                .session_id
-                .as_ref()
-                .is_some_and(|sid| !on_store(sid))
-            {
-                rest.insert(exit.to_owned(), keyed.event.usage.clone());
-            }
-            false
-        });
-        for keyed in &mut events.usage_events {
-            if let Some(rest) = keyed.key.as_ref().and_then(|key| rest.get(key)) {
-                keyed.event.usage = rest.clone();
+        if let Some(summary) = &events.copilot {
+            for keyed in &mut events.usage_events {
+                if let Some(rest) = keyed.key.as_ref().and_then(|key| summary.rests.get(key))
+                    && keyed
+                        .event
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|sid| !on_store(sid))
+                {
+                    keyed.event.usage = rest.clone();
+                }
             }
         }
         events
