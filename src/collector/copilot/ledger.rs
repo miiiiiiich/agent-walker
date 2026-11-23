@@ -393,7 +393,7 @@ fn db_count(value: Option<i64>) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
 
     use rusqlite::Connection;
@@ -404,7 +404,7 @@ mod tests {
     use crate::collector::copilot::receipts::tests::{marked, receipt};
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
 
-    struct Call<'a> {
+    pub(in crate::collector::copilot) struct Call<'a> {
         session: &'a str,
         model: &'a str,
         input: i64,
@@ -415,7 +415,12 @@ mod tests {
         created_at: Option<&'a str>,
     }
 
-    fn call<'a>(session: &'a str, created_at: &'a str, input: i64, output: i64) -> Call<'a> {
+    pub(in crate::collector::copilot) fn call<'a>(
+        session: &'a str,
+        created_at: &'a str,
+        input: i64,
+        output: i64,
+    ) -> Call<'a> {
         Call {
             session,
             model: "gpt-5-mini",
@@ -428,7 +433,7 @@ mod tests {
         }
     }
 
-    fn write_store(root: &Path, calls: &[Call]) {
+    pub(in crate::collector::copilot) fn write_store(root: &Path, calls: &[Call]) {
         fs::create_dir_all(root).expect("test root should be created");
         let conn = Connection::open(root.join("session-store.db")).expect("store should open");
         conn.execute_batch(
@@ -914,7 +919,7 @@ mod tests {
     }
 
     /// Gives rows (by insertion order, from 1) the store's `event_id`.
-    fn set_event_ids(root: &Path, ids: &[(i64, &str)]) {
+    pub(in crate::collector::copilot) fn set_event_ids(root: &Path, ids: &[(i64, &str)]) {
         let conn = Connection::open(root.join("session-store.db")).expect("store should open");
         conn.execute_batch("ALTER TABLE assistant_usage_events ADD COLUMN event_id TEXT")
             .expect("event_id column should be added");
@@ -1397,9 +1402,13 @@ mod tests {
 
     /// The parent isn't on the store and the fork is: both journals hold the
     /// parent's exit, and both must give it the same amount, or merging the
-    /// two copies keeps the larger and counts the parent's receipt again.
+    /// two copies keeps the larger and counts the parent's receipt again. The
+    /// fork's journal has the shape Copilot writes: its own start, the copied
+    /// history, and the fork marker.
     #[test]
     fn a_parents_exit_counts_once_from_either_journal() {
+        use crate::collector::copilot::forks::tests::{fork_info, fork_start};
+
         let temp = TempDir::new().expect("test tempdir should be created");
         let history = format!(
             "{}\n{}\n",
@@ -1414,7 +1423,13 @@ mod tests {
             temp.path(),
             "fork",
             &format!(
-                "{history}{}\n{}\n",
+                "{}\n{history}{}\n{}\n{}\n",
+                fork_start("fork", "2026-07-27T10:45:00.000Z"),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:45:00.000Z",
+                    "Forked from parent as fork."
+                ),
                 receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
                 marked(
                     &shutdown("e-2", "2026-07-27T12:00:00.000Z", 1_500, 150),

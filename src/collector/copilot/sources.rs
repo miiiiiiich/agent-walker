@@ -26,12 +26,20 @@ pub(super) fn choose_sources(
     live: &HashSet<String>,
     caught_up: &HashSet<String>,
 ) -> HashSet<String> {
+    // By the journal's directory: a fork's copies go to the parent, and by
+    // their sessions a parent known only by caught-up rows, its journal gone,
+    // would look like one holding receipts and lose every call not copied.
     let journals: HashSet<String> = per_file
         .iter()
-        .filter_map(|(_, events)| events.as_ref())
-        .flat_map(|events| &events.usage_events)
-        .filter(|keyed| keyed.event.granularity == UsageGranularity::Call)
-        .filter_map(|keyed| keyed.event.session_id.clone())
+        .filter(|(_, events)| {
+            events.as_ref().is_some_and(|events| {
+                events
+                    .usage_events
+                    .iter()
+                    .any(|keyed| keyed.event.granularity == UsageGranularity::Call)
+            })
+        })
+        .filter_map(|(path, _)| path.parent()?.file_name()?.to_str().map(ToOwned::to_owned))
         .collect();
     let on_store = |session: &str| {
         live.contains(session) || (caught_up.contains(session) && !journals.contains(session))

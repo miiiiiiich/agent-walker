@@ -90,6 +90,12 @@ user.
   the CLI files it there, which is not verified), would count beside the
   parent's receipts.
 
+  A fork's journal opens with a copy of its parent's history, event ids
+  and all, then a `session.info` marker reading "Forked from <parent> …
+  as <fork>." The usage read before the marker is the parent's, decided
+  by the parent's store rows like the parent's own; tools, turns and
+  activity stay with the fork.
+
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
   CLI upgrade keeps the history from before the store existed). A

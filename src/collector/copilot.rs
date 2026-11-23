@@ -1,3 +1,4 @@
+mod forks;
 mod ledger;
 mod receipts;
 mod segments;
@@ -182,9 +183,24 @@ struct SessionState {
     credit_index: usize,
     turn_starts: HashMap<String, OffsetDateTime>,
     receipts: Receipts,
+    /// Where the usage events since the last fork marker begin.
+    block: usize,
 }
 
 impl SessionState {
+    /// The usage read since the previous marker is a copy of the parent's
+    /// history, so it goes to the parent: reconciled as the fork's, a copied
+    /// exit counted beside the parent's store rows once the parent's journal
+    /// was gone. Tools, turns and activity stay with the fork.
+    fn close_copied_block(&mut self, marker: &forks::ForkMarker, events: &mut FileEvents) {
+        if let Some(parent) = &marker.parent {
+            for keyed in events.usage_events.iter_mut().skip(self.block) {
+                keyed.event.session_id = Some(parent.clone());
+            }
+        }
+        self.block = events.usage_events.len();
+    }
+
     fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
         let kind = value.get("type").and_then(Value::as_str);
         // A rotated journal's head opens with a replay checkpoint: copies of
@@ -193,6 +209,9 @@ impl SessionState {
         let replayed = value.get("checkpoint").and_then(Value::as_bool) == Some(true);
         if replayed && kind != Some("session.start") {
             return;
+        }
+        if let Some(marker) = forks::fork_marker(value) {
+            self.close_copied_block(&marker, events);
         }
         let timestamp = value
             .get("timestamp")
