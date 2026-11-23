@@ -191,6 +191,60 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 110 + 330 + 220);
     }
 
+    /// A marker that doesn't name its parent in a form read here leaves the
+    /// copied exits to no one: they don't count, rather than count beside
+    /// the parent's own records.
+    #[test]
+    fn copied_exits_under_an_unreadable_marker_dont_count() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T12:00:00.000Z"),
+                shutdown("e-1", "2026-07-27T11:00:00.000Z", 100, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T12:00:00.000Z",
+                    r#"Forked from "broken as fork."#,
+                ),
+                shutdown("e-2", "2026-07-27T13:00:00.000Z", 400, 40),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 330);
+    }
+
+    /// Without a marker, exits dated before the journal's own start are
+    /// copies: Copilot dates a fork's start at the fork.
+    #[test]
+    fn exits_dated_before_the_start_dont_count_without_a_marker() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T12:00:00.000Z"),
+                shutdown("e-1", "2026-07-27T11:00:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T13:00:00.000Z", 400, 40),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 330);
+    }
+
     /// A parent known only by caught-up rows, its journal gone, keeps them:
     /// the forks' copies, now the parent's, don't make it a session with
     /// receipts at hand, or every call the forks didn't copy would be lost.

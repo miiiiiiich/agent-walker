@@ -22,7 +22,7 @@ use crate::collector::{
 };
 use crate::model::{
     Collection, CreditSample, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    ToolEvent, UsageEvent, UsageGranularity,
 };
 use crate::timestamp::parse_rfc3339;
 
@@ -170,6 +170,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
     }
 
+    session.drop_unnamed_copies(&mut events);
     events.compress_touches(local_offset);
     Some(events)
 }
@@ -185,6 +186,10 @@ struct SessionState {
     receipts: Receipts,
     /// Where the usage events since the last fork marker begin.
     block: usize,
+    /// Whether the journal holds a fork marker at all.
+    forked: bool,
+    /// The journal's own start, which Copilot dates at the fork.
+    start: Option<OffsetDateTime>,
 }
 
 impl SessionState {
@@ -192,13 +197,41 @@ impl SessionState {
     /// history, so it goes to the parent: reconciled as the fork's, a copied
     /// exit counted beside the parent's store rows once the parent's journal
     /// was gone. Tools, turns and activity stay with the fork.
+    ///
+    /// When the marker names no parent read here, the copied exits go: kept
+    /// as the fork's, one could count beside the parent's own records. The
+    /// copied receipts stay, each naming its parent in its accounting.
     fn close_copied_block(&mut self, marker: &forks::ForkMarker, events: &mut FileEvents) {
+        let block = self.block.min(events.usage_events.len());
         if let Some(parent) = &marker.parent {
-            for keyed in events.usage_events.iter_mut().skip(self.block) {
+            for keyed in &mut events.usage_events[block..] {
                 keyed.event.session_id = Some(parent.clone());
             }
+        } else {
+            let mut index = 0;
+            events.usage_events.retain(|keyed| {
+                index += 1;
+                index <= block || keyed.event.granularity != UsageGranularity::Aggregate
+            });
         }
+        self.forked = true;
         self.block = events.usage_events.len();
+    }
+
+    /// A journal with no marker whose exits predate its own start holds a
+    /// fork's copied history all the same (Copilot dates a fork's start at
+    /// the fork), and its owner can't be named: those exits go.
+    fn drop_unnamed_copies(&self, events: &mut FileEvents) {
+        if self.forked {
+            return;
+        }
+        let Some(start) = self.start else {
+            return;
+        };
+        events.usage_events.retain(|keyed| {
+            keyed.event.granularity != UsageGranularity::Aggregate
+                || keyed.event.timestamp.is_none_or(|time| time >= start)
+        });
     }
 
     fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
@@ -231,6 +264,9 @@ impl SessionState {
 
         match kind {
             Some("session.start") => {
+                if self.start.is_none() {
+                    self.start = timestamp;
+                }
                 if let Some(cwd) = value
                     .get("data")
                     .and_then(|data| data.get("context"))

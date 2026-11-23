@@ -96,7 +96,11 @@ user.
   and all, then a `session.info` marker reading "Forked from <parent> …
   as <fork>." The usage read before the marker is the parent's, decided
   by the parent's store rows like the parent's own; tools, turns and
-  activity stay with the fork.
+  activity stay with the fork. Copied exits whose parent can't be named
+  don't count: under a marker that doesn't name it in a form read here,
+  or, in a journal without a marker, dated before its own start (Copilot
+  dates a fork's start at the fork). Copied receipts still go by their
+  `sourceSessionId`.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
