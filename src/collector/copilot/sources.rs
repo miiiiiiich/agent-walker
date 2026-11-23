@@ -19,8 +19,9 @@ pub(super) const REST_PREFIX: &str = "copilot-rest:";
 /// the receipts at hand the rows go. Each round of rules mixing the two
 /// inside one session lost or doubled calls in another case, and no log on
 /// disk exercises them. A receipt goes by the session its accounting
-/// identity names, so a fork's copies of a parent on the store don't count
-/// again. Returns the sessions whose caught-up rows go.
+/// identity names and by every journal holding it, so a fork's copies of a
+/// parent on the store don't count again. Returns the sessions whose
+/// caught-up rows go.
 pub(super) fn choose_sources(
     per_file: &mut [(PathBuf, Option<FileEvents>)],
     live: &HashSet<String>,
@@ -44,6 +45,28 @@ pub(super) fn choose_sources(
     let on_store = |session: &str| {
         live.contains(session) || (caught_up.contains(session) && !journals.contains(session))
     };
+    // A receipt goes if its source or any journal holding it is on the
+    // store. Its source alone kept a copy without an identity, which names
+    // none, and a receipt naming another session, beside the live row of a
+    // journal on the store.
+    let mut gone: HashSet<String> = HashSet::new();
+    for keyed in per_file
+        .iter()
+        .filter_map(|(_, events)| events.as_ref())
+        .flat_map(|events| &events.usage_events)
+        .filter(|keyed| keyed.event.granularity == UsageGranularity::Call)
+    {
+        let Some(key) = keyed.key.as_deref() else {
+            continue;
+        };
+        if source_of(key)
+            .into_iter()
+            .chain(keyed.event.session_id.as_deref())
+            .any(&on_store)
+        {
+            gone.insert(key.to_owned());
+        }
+    }
     for events in per_file
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
@@ -75,14 +98,7 @@ pub(super) fn choose_sources(
         events
             .usage_events
             .retain(|keyed| match keyed.event.granularity {
-                UsageGranularity::Call => {
-                    let source = keyed
-                        .key
-                        .as_deref()
-                        .and_then(source_of)
-                        .or(keyed.event.session_id.as_deref());
-                    source.is_none_or(|source| !on_store(source))
-                }
+                UsageGranularity::Call => keyed.key.as_ref().is_none_or(|key| !gone.contains(key)),
                 UsageGranularity::Aggregate | UsageGranularity::Remainder => {
                     keyed.event.usage.token_volume() > 0
                 }

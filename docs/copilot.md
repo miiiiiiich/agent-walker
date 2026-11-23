@@ -80,9 +80,11 @@ user.
   up from its log (`event_id` starting `usage-record:`) copy those receipts
   and don't count, unless its journal holds no receipts (it is gone), and
   then they are the only record and count as its store rows. A receipt
-  goes by its `sourceSessionId`, so a fork's copies of a parent's receipts
-  follow the parent, and a copied receipt always comes off the fork's
-  exit, since the parent counts that call. What this still undercounts: in
+  goes by its `sourceSessionId` and by every journal holding it: it
+  doesn't count if any of them is on the store, so neither a copy without
+  an accounting identity nor a receipt naming another session counts
+  beside a store row. A copied receipt always comes off the fork's exit,
+  since the parent counts that call. What this still undercounts: in
   a session with a live row, a call only in a receipt (its row unreadable
   or missing); in a session on its receipts, a call only in a caught-up row
   whose receipt is gone and that no later exit covers. A row caught up

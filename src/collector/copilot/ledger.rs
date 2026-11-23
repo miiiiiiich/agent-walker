@@ -1541,6 +1541,48 @@ pub(super) mod tests {
         assert_eq!(total_volume(&collection), 110);
     }
 
+    /// A receipt without an accounting identity names no source, so every
+    /// journal holding it decides together: the parent's live row stands for
+    /// the call, and the fork's copy doesn't count beside it.
+    #[test]
+    fn a_copied_receipt_without_an_identity_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let bare = r#"{"type":"session.usage_record","id":"u-1","timestamp":"2026-07-27T10:00:00.000Z","parentId":null,"data":{"usage":{"model":"gpt-5-mini","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}"#;
+        write_session(temp.path(), "parent", &format!("{bare}\n"));
+        write_session(temp.path(), "fork", &format!("{bare}\n"));
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// A journal on the store takes its calls from its rows, whatever
+    /// session a receipt in it names as its source.
+    #[test]
+    fn a_receipt_naming_another_source_gives_way_in_a_journal_on_the_store() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "other", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
     #[test]
     fn sqlite_default_stamp_is_read_as_utc() {
         let parsed = parse_db_time("2026-07-27 12:00:00").expect("default stamp should parse");
