@@ -767,6 +767,43 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 200);
     }
 
+    /// The review's case: the parent's exit still in view gives way to its
+    /// store rows, so it holds nothing, and the fork's copy of the exit the
+    /// missing segment held is the only count of it.
+    #[test]
+    fn a_truncated_parents_exit_superseded_by_its_rows_covers_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:30:00.000Z", 270, 30),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:00:00.000Z", 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T11:00:00.000Z", 180, 20)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 300);
+    }
+
     /// The review's case: the parent's exit still in view counts only
     /// another model, so the fork's copy of the first model's exit is the
     /// only count of it.

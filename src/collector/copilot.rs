@@ -46,10 +46,9 @@ pub fn collect(
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::take_fork_times(&mut per_file);
     let truncated = truncation::take(&mut per_file);
-    truncated.drop_covered_copies(&mut per_file);
     forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
-    let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
+    let mut ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
     if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
@@ -59,10 +58,13 @@ pub fn collect(
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
         .unwrap_or_default();
     let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
-    if let Some(mut ledger) = ledger {
+    if let Some(ledger) = &mut ledger {
         ledger.ignore_caught_up(&from_receipts);
         ledger.fall_back_where_incomplete(&exits);
         ledger.supersede_log_usage(&mut per_file);
+    }
+    truncated.drop_covered_copies(&mut per_file);
+    if let Some(ledger) = ledger {
         per_file.push((db_path, Some(ledger.events)));
     }
     merge_into(&mut collection, per_file);
@@ -184,7 +186,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         for (model, exit) in session.first_exits {
             events
                 .usage_events
-                .push(truncation::first_exit(sid, model, &exit));
+                .extend(exit.map(|exit| truncation::first_exit(sid, model, &exit)));
         }
     }
     let fork_times = session
@@ -256,8 +258,8 @@ struct SessionState {
     /// The journal's oldest segment is gone, so each model's first exit
     /// read counts everything of that model before it.
     truncated: bool,
-    /// Those first exits, once read.
-    first_exits: BTreeMap<String, truncation::FirstExit>,
+    /// Those first exits, once read; none when it had nothing to count.
+    first_exits: BTreeMap<String, Option<truncation::FirstExit>>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -431,34 +433,44 @@ impl SessionState {
                     &mut self.credit_index,
                     events,
                 );
-                let exits = collect_shutdown_usage(
-                    value,
-                    &line,
-                    self.project.as_deref(),
-                    &mut self.cumulative,
-                    &mut self.receipts,
-                    self.shutdown_index,
-                    events,
-                );
-                // The latest time, not the last read: a clock moved back dated
-                // a later exit before one covering a row.
-                if let Some(at) = timestamp {
-                    let mark = truncation::own_mark(value, session_id);
-                    for (model, counters) in exits {
-                        if self.truncated {
-                            self.first_exits
-                                .entry(model.clone())
-                                .or_insert(truncation::FirstExit { at, counters, mark });
-                        }
-                        self.latest_exits
-                            .entry(model)
-                            .and_modify(|latest| *latest = (*latest).max(at))
-                            .or_insert(at);
-                    }
-                }
-                self.shutdown_index += 1;
+                self.read_exit(value, &line, events);
             }
             _ => {}
+        }
+    }
+
+    fn read_exit(&mut self, value: &Value, line: &Line, events: &mut FileEvents) {
+        let exits = collect_shutdown_usage(
+            value,
+            line,
+            self.project.as_deref(),
+            &mut self.cumulative,
+            &mut self.receipts,
+            self.shutdown_index,
+            events,
+        );
+        self.shutdown_index += 1;
+        // The latest time, not the last read: a clock moved back dated a
+        // later exit before one covering a row.
+        let Some(at) = line.timestamp else {
+            return;
+        };
+        let mark = truncation::own_mark(value, line.session_id);
+        for (model, counters, key) in exits {
+            if self.truncated {
+                self.first_exits.entry(model.clone()).or_insert_with(|| {
+                    key.map(|key| truncation::FirstExit {
+                        at,
+                        counters,
+                        mark,
+                        key,
+                    })
+                });
+            }
+            self.latest_exits
+                .entry(model)
+                .and_modify(|latest| *latest = (*latest).max(at))
+                .or_insert(at);
         }
     }
 }
@@ -532,7 +544,7 @@ fn collect_shutdown_usage(
     receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
-) -> Vec<(String, RawCounters)> {
+) -> Vec<(String, RawCounters, Option<String>)> {
     let mut advanced = Vec::new();
     // A shutdown the analyzer cannot place in time must not advance the
     // baseline either — otherwise the usage up to it would be subtracted by
@@ -585,21 +597,23 @@ fn collect_shutdown_usage(
         // watermark moved: marked at an exit repeating both, the cut took a
         // call its watermark leaves out.
         let zero = RawCounters::default();
-        if current != previous || covered.copied != zero || covered.own != zero {
-            advanced.push((model.clone(), current));
-        }
+        let moved = current != previous || covered.copied != zero || covered.own != zero;
         let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();
-        if usage.token_volume() == 0 {
-            continue;
-        }
         let key = match (line.event_id, line.session_id) {
             (Some(id), _) => Some(format!("copilot:{id}:{model}")),
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
             (None, None) => None,
         };
+        let counts = usage.token_volume() > 0;
+        if moved {
+            advanced.push((model.clone(), current, key.clone().filter(|_| counts)));
+        }
+        if !counts {
+            continue;
+        }
         // The journal's own receipts come off only if its session has no
         // store rows, which parsing can't see: the exit without them goes
         // along for `choose_sources`. Taken off after cache reads were split

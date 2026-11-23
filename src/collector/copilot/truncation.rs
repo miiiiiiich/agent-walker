@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
@@ -13,19 +13,20 @@ use super::{RawCounters, helper_event};
 
 /// Key prefix of the event carrying a model's first exit read in a journal
 /// that lost its oldest segment: the session, model, time and cumulative,
-/// and the exit's watermark for the session's own receipts after the prefix.
+/// and after the prefix the exit's watermark for the session's own receipts
+/// and the exit's key.
 const TRUNCATED_PREFIX: &str = "copilot-truncated:";
 
 /// Key prefix of the event carrying an exit's cumulative, for the exit keyed
 /// by the rest of the key: the exit itself counts only what's new.
 const CUMULATIVE_PREFIX: &str = "copilot-cumulative:";
 
-#[derive(Clone, Copy)]
 pub(super) struct FirstExit {
     pub(super) at: OffsetDateTime,
     pub(super) counters: RawCounters,
     /// The highest sequence of the session's own receipts it holds.
     pub(super) mark: Option<u64>,
+    pub(super) key: String,
 }
 
 /// Without watermarks the exit predates receipts and holds all of them; with
@@ -43,7 +44,7 @@ pub(super) fn own_mark(exit: &Value, session_id: Option<&String>) -> Option<u64>
 pub(super) fn first_exit(session: &str, model: String, exit: &FirstExit) -> KeyedUsageEvent {
     let mark = exit.mark.map(|mark| mark.to_string()).unwrap_or_default();
     let mut event = helper_event(
-        format!("{TRUNCATED_PREFIX}{mark}"),
+        format!("{TRUNCATED_PREFIX}{mark}:{}", exit.key),
         Some(session.to_owned()),
         Some(model),
         exit.at,
@@ -110,16 +111,20 @@ pub(super) fn take(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Truncated 
                     .insert(exit.to_owned(), held(&event.usage));
                 return false;
             }
-            let Some(mark) = key.strip_prefix(TRUNCATED_PREFIX) else {
+            let Some(rest) = key.strip_prefix(TRUNCATED_PREFIX) else {
                 return true;
             };
-            if let (Some(session), Some(model), Some(at)) =
-                (&event.session_id, &event.model, event.timestamp)
-            {
+            if let (Some(session), Some(model), Some(at), Some((mark, exit_key))) = (
+                &event.session_id,
+                &event.model,
+                event.timestamp,
+                rest.split_once(':'),
+            ) {
                 let exit = FirstExit {
                     at,
                     counters: held(&event.usage),
                     mark: mark.parse().ok(),
+                    key: exit_key.to_owned(),
                 };
                 truncated
                     .first_exits
@@ -146,18 +151,40 @@ impl Truncated {
     /// filed under: a fork of a fork made before the first fork's marker
     /// files the copy under the first fork. One the exit's watermark holds
     /// is inside it however it's dated.
-    pub(super) fn drop_covered_copies(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-        if self.first_exits.is_empty() {
+    ///
+    /// Run once the store has settled which exits count: an exit its rows
+    /// superseded holds nothing, and its copies dropped against it lost the
+    /// usage from before the store.
+    pub(super) fn drop_covered_copies(mut self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+        let mut standing: HashSet<String> = HashSet::new();
+        for (path, events) in per_file.iter() {
+            let (Some(models), Some(events)) = (
+                journal(path).and_then(|session| self.first_exits.get(session)),
+                events,
+            ) else {
+                continue;
+            };
+            for key in events
+                .usage_events
+                .iter()
+                .filter_map(|keyed| keyed.key.as_ref())
+            {
+                if models.values().any(|exit| exit.key == *key) {
+                    standing.insert(key.clone());
+                }
+            }
+        }
+        for models in self.first_exits.values_mut() {
+            models.retain(|_, exit| standing.contains(&exit.key));
+        }
+        if standing.is_empty() {
             return;
         }
         for (path, events) in per_file.iter_mut() {
             let Some(events) = events.as_mut() else {
                 continue;
             };
-            let journal = path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str());
+            let journal = journal(path);
             events
                 .usage_events
                 .retain(|keyed| !self.covers(journal, keyed));
@@ -195,4 +222,8 @@ impl Truncated {
             .is_some_and(|copied| exit.counters.any_less_than(*copied));
         (time <= exit.at || held) && !earlier_epoch
     }
+}
+
+fn journal(path: &Path) -> Option<&str> {
+    path.parent()?.file_name()?.to_str()
 }
