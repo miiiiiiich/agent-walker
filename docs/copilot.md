@@ -93,7 +93,8 @@ user.
   activity stay with the fork. Copied exits whose parent can't be named
   don't count: under a marker that doesn't name it in a form read here,
   or, in a journal without a marker, dated before its own start (Copilot
-  dates a fork's start at the fork). Copied receipts still go by their
+  dates a fork's start at the fork; any record dated before the start
+  marks such a journal as a fork). Copied receipts still go by their
   `sourceSessionId`. A fork can't have made a call before it existed, so
   its store rows dated up to its marker (without a marker naming it, up to
   its start) aren't read: whether the CLI caught them up from the copied

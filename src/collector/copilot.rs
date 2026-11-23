@@ -209,6 +209,8 @@ struct SessionState {
     forked: bool,
     /// The journal's own start, which Copilot dates at the fork.
     start: Option<OffsetDateTime>,
+    /// The earliest record other than a start, replays aside.
+    earliest: Option<OffsetDateTime>,
     /// Each fork the markers name, and when it was made.
     fork_times: Vec<(String, OffsetDateTime)>,
     /// Each model's latest exit since the last fork marker whose total or
@@ -271,22 +273,20 @@ impl SessionState {
         }
     }
 
-    /// A journal with no marker whose usage predates its own start holds a
-    /// fork's copied history all the same (Copilot dates a fork's start at
-    /// the fork), and its owner can't be named: those exits go, and the
-    /// journal's session is a fork made at its start.
+    /// A journal with no marker holding any record dated before its own
+    /// start holds a fork's copied history all the same (Copilot dates a
+    /// fork's start at the fork), and its owner can't be named: those exits
+    /// go, and the journal's session is a fork made at its start. Judged by
+    /// usage alone, a fork whose copies were a user message and no receipt
+    /// went unseen.
     fn drop_unnamed_copies(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
         if self.forked {
             return;
         }
-        let Some(start) = self.start else {
+        let (Some(start), Some(earliest)) = (self.start, self.earliest) else {
             return;
         };
-        let copied = events
-            .usage_events
-            .iter()
-            .any(|keyed| keyed.event.timestamp.is_some_and(|time| time < start));
-        if !copied {
+        if earliest >= start {
             return;
         }
         if let Some(session) = session_id {
@@ -330,6 +330,9 @@ impl SessionState {
                 timestamp,
                 session_id: session_id.clone(),
             });
+        }
+        if let (false, false, Some(at)) = (replayed, kind == Some("session.start"), timestamp) {
+            self.earliest = Some(self.earliest.map_or(at, |earliest| earliest.min(at)));
         }
 
         match kind {

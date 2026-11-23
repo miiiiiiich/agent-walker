@@ -408,6 +408,37 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 2 * N);
     }
 
+    /// The review's case: a marker-less fork whose only copy dated before
+    /// its start is a user message is still a fork, so its caught-up row of
+    /// the parent's call doesn't count beside the parent's live row.
+    #[test]
+    fn any_record_dated_before_the_start_marks_a_fork() {
+        use crate::collector::copilot::ledger::tests::set_event_ids;
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T11:00:00.000Z"),
+                json!({"type": "user.message", "id": "u-1", "timestamp": "2026-07-27T10:00:00.000Z", "data": {"content": "hi"}}).to_string(),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("parent", "2026-07-27T10:00:00.500Z", 100, 10),
+                call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("fork", "2026-07-27T12:00:00.500Z", 400, 40),
+            ],
+        );
+        set_event_ids(temp.path(), &[(2, "usage-record:a")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 440);
+    }
+
     /// A parent known only by caught-up rows, its journal gone, keeps them:
     /// the forks' copies, now the parent's, don't make it a session with
     /// receipts at hand, or every call the forks didn't copy would be lost.
