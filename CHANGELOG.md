@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-23
+
+### Added
+
+- Claude Code's calls besides answering you now count: prompt suggestions,
+  auto mode's permission checks, titles and the like. They come from Claude
+  Code's own session totals, so a heavy user's total rises; docs/claude.md
+  lists what they are.
+- Copilot CLI's per-call usage records and split session logs are read, so a
+  session the session store doesn't know no longer shows zero.
+- Fast mode, US-only inference and Codex's priority and ultrafast tiers price
+  at their own rates.
+
+### Changed
+
+- Subagent work counts in the session it serves for every agent, as it
+  already did for Claude Code. Codex and Antigravity session counts drop
+  accordingly.
+- A model the price table doesn't list yet shows as unpriced instead of
+  borrowing an older version's rate.
+
+### Fixed
+
+- Antigravity no longer counts its model id as input, and reads thinking and
+  response output the right way round.
+- Codex shows the commands Code Mode ran instead of `exec`, shows your pace
+  again, and counts subagent rollouts its migration rewrote.
+- Copilot no longer counts a call twice across forks, the session store and
+  shutdowns.
+- OpenCode no longer counts turns without tokens as calls, nor Claude Agent
+  turns that Claude Code already counts.
+
 ## [0.22.1] - 2026-11-09
 
 ### Changed
@@ -464,6 +496,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.23.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.2...v0.22.0
 [0.21.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.1...v0.21.2
