@@ -1,9 +1,11 @@
+mod forks;
 mod ledger;
 mod receipts;
 mod segments;
 mod sources;
+mod truncation;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -21,13 +23,13 @@ use crate::collector::{
 };
 use crate::model::{
     Collection, CreditSample, DurationEvent, Provider, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    ToolEvent, UsageEvent, UsageGranularity,
 };
 use crate::timestamp::parse_rfc3339;
 
 use ledger::read_call_ledger;
 use receipts::Receipts;
-use sources::{OWN_PREFIX, choose_sources};
+use sources::{REST_PREFIX, choose_sources};
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -41,22 +43,28 @@ pub fn collect(
 ) -> Collection {
     let mut collection = Collection::new(Provider::Copilot, root.to_path_buf());
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
+    let mut per_file = parse_heads(files, use_cache, local_offset);
+    let forked = forks::take_fork_times(&mut per_file);
+    let truncated = truncation::take(&mut per_file);
+    forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
-    let ledger = read_call_ledger(&db_path, local_offset, &mut collection);
-    if files.is_empty() && ledger.is_none() {
+    let mut ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
+    if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
-
-    let mut per_file = parse_heads(files, use_cache, local_offset);
+    let exits = ledger::take_exit_marks(&mut per_file);
     let (live, caught_up) = ledger
         .as_ref()
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
         .unwrap_or_default();
     let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
-    if let Some(mut ledger) = ledger {
+    if let Some(ledger) = &mut ledger {
         ledger.ignore_caught_up(&from_receipts);
-        ledger.fall_back_where_incomplete(&per_file);
+        ledger.fall_back_where_incomplete(&exits);
         ledger.supersede_log_usage(&mut per_file);
+    }
+    truncated.drop_covered_copies(&mut per_file);
+    if let Some(ledger) = ledger {
         per_file.push((db_path, Some(ledger.events)));
     }
     merge_into(&mut collection, per_file);
@@ -149,9 +157,12 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
     let journal = segments::journal(path, &mut events)?;
-    let mut session = SessionState::default();
+    let mut session = SessionState {
+        truncated: journal.truncated,
+        ..SessionState::default()
+    };
 
-    for file in &journal {
+    for file in &journal.files {
         let reader = match open_regular(file) {
             Ok(reader) => reader,
             Err(_) if file == path => return None,
@@ -169,8 +180,58 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
     }
 
+    session.mark_latest_exits(session_id.as_ref(), &mut events);
+    session.drop_unnamed_copies(session_id.as_ref(), &mut events);
+    if let Some(sid) = &session_id {
+        for (model, exit) in session.first_exits {
+            events
+                .usage_events
+                .extend(exit.map(|exit| truncation::first_exit(sid, model, &exit)));
+        }
+    }
+    let fork_times = session
+        .fork_times
+        .into_iter()
+        .map(|fork| (forks::FORK_PREFIX, fork));
+    let forked_into = session
+        .forked_into
+        .into_iter()
+        .map(|fork| (forks::FORKED_INTO_PREFIX, fork));
+    for (prefix, (fork, at)) in fork_times.chain(forked_into) {
+        events.usage_events.push(helper_event(
+            format!("{prefix}{fork}"),
+            Some(fork),
+            None,
+            at,
+        ));
+    }
     events.compress_touches(local_offset);
     Some(events)
+}
+
+/// An event carrying data from parsing to reconciliation, stripped before
+/// anything is counted.
+fn helper_event(
+    key: String,
+    session_id: Option<String>,
+    model: Option<String>,
+    at: OffsetDateTime,
+) -> KeyedUsageEvent {
+    KeyedUsageEvent {
+        key: Some(key),
+        event: UsageEvent {
+            timestamp: Some(at),
+            session_id,
+            model,
+            source_kind: SourceKind::Main,
+            attribution_agent: None,
+            attribution_skill: None,
+            project: None,
+            usage: TokenUsage::default(),
+            granularity: UsageGranularity::Aggregate,
+            billing: crate::model::Billing::default(),
+        },
+    }
 }
 
 #[derive(Default)]
@@ -182,9 +243,121 @@ struct SessionState {
     credit_index: usize,
     turn_starts: HashMap<String, OffsetDateTime>,
     receipts: Receipts,
+    /// Where the usage events since the last fork marker begin.
+    block: usize,
+    /// Whether the journal holds a fork marker at all.
+    forked: bool,
+    /// The journal's own start, which Copilot dates at the fork.
+    start: Option<OffsetDateTime>,
+    /// The earliest record other than a start, replays aside.
+    earliest: Option<OffsetDateTime>,
+    /// Each fork the markers name, and when it was made.
+    fork_times: Vec<(String, OffsetDateTime)>,
+    /// Each fork a parent's own marker names, and when.
+    forked_into: Vec<(String, OffsetDateTime)>,
+    /// The journal's oldest segment is gone, so each model's first exit
+    /// read counts everything of that model before it.
+    truncated: bool,
+    /// Those first exits, once read; none when it had nothing to count.
+    first_exits: BTreeMap<String, Option<truncation::FirstExit>>,
+    /// Each model's latest exit since the last fork marker whose total or
+    /// watermark for it moved.
+    latest_exits: BTreeMap<String, OffsetDateTime>,
 }
 
 impl SessionState {
+    /// The usage read since the previous marker is a copy of the parent's
+    /// history, so it goes to the parent: reconciled as the fork's, a copied
+    /// exit counted beside the parent's store rows once the parent's journal
+    /// was gone. Tools, turns and activity stay with the fork.
+    ///
+    /// When the marker names no parent read here, the copied exits go: kept
+    /// as the fork's, one could count beside the parent's own records. The
+    /// copied receipts stay, each naming its parent in its accounting.
+    fn close_copied_block(
+        &mut self,
+        marker: &forks::ForkMarker,
+        session_id: Option<&String>,
+        events: &mut FileEvents,
+    ) {
+        self.mark_latest_exits(session_id, events);
+        let block = self.block.min(events.usage_events.len());
+        if let Some(parent) = &marker.parent {
+            for keyed in &mut events.usage_events[block..] {
+                keyed.event.session_id = Some(parent.clone());
+            }
+            self.receipts.disown_pending();
+        } else {
+            // Only the block: looking at every event kept before it, a run of
+            // such markers took quadratic time.
+            let mut copied = events.usage_events.split_off(block);
+            copied.retain(|keyed| keyed.event.granularity != UsageGranularity::Aggregate);
+            events.usage_events.append(&mut copied);
+        }
+        self.forked = true;
+        self.block = events.usage_events.len();
+    }
+
+    /// One mark per model at its latest exit covering something new, for the
+    /// store fallback to cut that model's rows at. Marked at every exit, a
+    /// run of unchanged exits kept an event per model per exit.
+    fn mark_latest_exits(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
+        for (model, at) in std::mem::take(&mut self.latest_exits) {
+            events.usage_events.push(helper_event(
+                format!("{}{model}", ledger::EXIT_PREFIX),
+                session_id.cloned(),
+                Some(model),
+                at,
+            ));
+        }
+    }
+
+    /// A journal with no marker holding any record dated before its own
+    /// start holds a fork's copied history all the same (Copilot dates a
+    /// fork's start at the fork), and its owner can't be named: those exits
+    /// go, and the journal's session is a fork made at its start. Judged by
+    /// usage alone, a fork whose copies were a user message and no receipt
+    /// went unseen.
+    fn drop_unnamed_copies(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
+        if self.forked {
+            return;
+        }
+        let (Some(start), Some(earliest)) = (self.start, self.earliest) else {
+            return;
+        };
+        if earliest >= start {
+            return;
+        }
+        if let Some(session) = session_id {
+            self.fork_times.push((session.clone(), start));
+        }
+        events.usage_events.retain(|keyed| {
+            keyed.event.granularity != UsageGranularity::Aggregate
+                || keyed.event.timestamp.is_none_or(|time| time >= start)
+        });
+    }
+
+    fn read_fork_markers(
+        &mut self,
+        value: &Value,
+        timestamp: Option<OffsetDateTime>,
+        session_id: Option<&String>,
+        events: &mut FileEvents,
+    ) {
+        if let (Some(fork), Some(at)) = (forks::forked_into(value), timestamp) {
+            self.forked_into.push((fork, at));
+        }
+        if let Some(marker) = forks::fork_marker(value) {
+            self.close_copied_block(&marker, session_id, events);
+            // A marker that doesn't name the fork is still this journal's.
+            if let (Some(fork), Some(at)) =
+                (marker.child.or_else(|| session_id.cloned()), timestamp)
+            {
+                self.fork_times.push((fork, at));
+            }
+        }
+    }
+
     fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
         let kind = value.get("type").and_then(Value::as_str);
         // A rotated journal's head opens with a replay checkpoint: copies of
@@ -198,6 +371,7 @@ impl SessionState {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
+        self.read_fork_markers(value, timestamp, session_id, events);
         let line = Line {
             timestamp,
             session_id,
@@ -209,9 +383,15 @@ impl SessionState {
                 session_id: session_id.clone(),
             });
         }
+        if let (false, false, Some(at)) = (replayed, kind == Some("session.start"), timestamp) {
+            self.earliest = Some(self.earliest.map_or(at, |earliest| earliest.min(at)));
+        }
 
         match kind {
             Some("session.start") => {
+                if self.start.is_none() {
+                    self.start = timestamp;
+                }
                 if let Some(cwd) = value
                     .get("data")
                     .and_then(|data| data.get("context"))
@@ -253,18 +433,44 @@ impl SessionState {
                     &mut self.credit_index,
                     events,
                 );
-                collect_shutdown_usage(
-                    value,
-                    &line,
-                    self.project.as_deref(),
-                    &mut self.cumulative,
-                    &mut self.receipts,
-                    self.shutdown_index,
-                    events,
-                );
-                self.shutdown_index += 1;
+                self.read_exit(value, &line, events);
             }
             _ => {}
+        }
+    }
+
+    fn read_exit(&mut self, value: &Value, line: &Line, events: &mut FileEvents) {
+        let exits = collect_shutdown_usage(
+            value,
+            line,
+            self.project.as_deref(),
+            &mut self.cumulative,
+            &mut self.receipts,
+            self.shutdown_index,
+            events,
+        );
+        self.shutdown_index += 1;
+        // The latest time, not the last read: a clock moved back dated a
+        // later exit before one covering a row.
+        let Some(at) = line.timestamp else {
+            return;
+        };
+        let mark = truncation::own_mark(value, line.session_id);
+        for (model, counters, key) in exits {
+            if self.truncated {
+                self.first_exits.entry(model.clone()).or_insert_with(|| {
+                    key.map(|key| truncation::FirstExit {
+                        at,
+                        counters,
+                        mark,
+                        key,
+                    })
+                });
+            }
+            self.latest_exits
+                .entry(model)
+                .and_modify(|latest| *latest = (*latest).max(at))
+                .or_insert(at);
         }
     }
 }
@@ -277,7 +483,7 @@ struct Line<'a> {
     event_id: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct RawCounters {
     input: u64,
     output: u64,
@@ -338,20 +544,21 @@ fn collect_shutdown_usage(
     receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
-) {
+) -> Vec<(String, RawCounters, Option<String>)> {
+    let mut advanced = Vec::new();
     // A shutdown the analyzer cannot place in time must not advance the
     // baseline either — otherwise the usage up to it would be subtracted by
     // the NEXT valid shutdown and lost forever, instead of being recovered
     // there in full.
     if line.timestamp.is_none() {
-        return;
+        return advanced;
     }
     let Some(metrics) = value
         .get("data")
         .and_then(|data| data.get("modelMetrics"))
         .and_then(Value::as_object)
     else {
-        return;
+        return advanced;
     };
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
@@ -386,35 +593,50 @@ fn collect_shutdown_usage(
         // A copied receipt's call is counted by the session that made it,
         // from its receipts or its store rows, so it always comes off.
         let covered = receipts.take_covered(value, model);
+        // The exit marks its model's fallback cut only if its total or its
+        // watermark moved: marked at an exit repeating both, the cut took a
+        // call its watermark leaves out.
+        let zero = RawCounters::default();
+        let moved = current != previous || covered.copied != zero || covered.own != zero;
         let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();
-        if usage.token_volume() == 0 {
-            continue;
-        }
         let key = match (line.event_id, line.session_id) {
             (Some(id), _) => Some(format!("copilot:{id}:{model}")),
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
             (None, None) => None,
         };
+        let counts = usage.token_volume() > 0;
+        if moved {
+            advanced.push((model.clone(), current, key.clone().filter(|_| counts)));
+        }
+        if !counts {
+            continue;
+        }
         // The journal's own receipts come off only if its session has no
-        // store rows, which parsing can't see: what they carried goes along
-        // for `choose_sources`.
-        let own = covered.own.to_usage();
+        // store rows, which parsing can't see: the exit without them goes
+        // along for `choose_sources`. Taken off after cache reads were split
+        // out of input, an exit without the cache counters kept the
+        // receipts' cached input as fresh.
         if let Some(key) = &key
-            && own.token_volume() > 0
+            && covered.own.to_usage().token_volume() > 0
         {
             events.usage_events.push(KeyedUsageEvent {
-                key: Some(format!("{OWN_PREFIX}{key}")),
-                event: exit_usage(line, Some(model), None, own),
+                key: Some(format!("{REST_PREFIX}{key}")),
+                event: exit_usage(line, Some(model), None, delta.minus(covered.own).to_usage()),
             });
         }
-        events.usage_events.push(KeyedUsageEvent {
+        let exit = KeyedUsageEvent {
             key,
             event: exit_usage(line, Some(model), project, usage),
-        });
+        };
+        events
+            .usage_events
+            .extend(truncation::cumulative(&exit, current));
+        events.usage_events.push(exit);
     }
+    advanced
 }
 
 fn exit_usage(

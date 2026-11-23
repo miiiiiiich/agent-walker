@@ -17,6 +17,12 @@ pub(super) fn source_of(key: &str) -> Option<&str> {
     (!sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())).then_some(source)
 }
 
+pub(super) fn identity_of(key: &str) -> Option<(&str, u64)> {
+    let source = source_of(key)?;
+    let sequence = key.rsplit_once(':')?.1.parse().ok()?;
+    Some((source, sequence))
+}
+
 /// `session.usage_record` receipts read so far in one session's stream, and
 /// those no snapshot has covered yet, by model: an exit takes each model's
 /// in turn, and one list of every model was scanned once per model.
@@ -133,6 +139,16 @@ impl Receipts {
     /// for a model whose counters the exit validated: taking every model's
     /// up front, an exit without the model's counters consumed its receipts
     /// without deducting them, and the next cumulative counted them again.
+    /// The receipts read so far are copies of a parent's history, so a
+    /// later exit takes them off as copies. A copy without an accounting
+    /// identity read as the fork's own, and came off its exit only when the
+    /// fork had no store rows.
+    pub(super) fn disown_pending(&mut self) {
+        for receipt in self.pending.values_mut().flatten() {
+            receipt.own = false;
+        }
+    }
+
     pub(super) fn take_covered(&mut self, snapshot: &Value, model: &str) -> Covered {
         let marks = snapshot
             .pointer("/data/usageAccountingWatermarks")
@@ -392,6 +408,25 @@ pub(super) mod tests {
                 "{metrics}"
             );
         }
+    }
+
+    /// An exit's remainder is taken before cache reads are split out of
+    /// input: taken after, an exit that leaves the cache counters out kept
+    /// the receipt's cached input as fresh.
+    #[test]
+    fn an_exits_remainder_is_taken_before_splitting_out_cache_reads() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cached = receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 0).replacen(
+            r#""cacheReadTokens":0"#,
+            r#""cacheReadTokens":80"#,
+            1,
+        );
+        let exit = r#"{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{"usageAccountingWatermarks":{"s1":1},"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":100,"outputTokens":0}}}}}"#;
+        write(&temp, "s1", &[cached, exit.to_owned()]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
     }
 
     #[test]

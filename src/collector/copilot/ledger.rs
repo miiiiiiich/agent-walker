@@ -16,8 +16,52 @@ use super::{MAX_SANE_TOKENS, RawCounters};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
+/// Key prefix of a journal's mark of a model's latest exit with usable
+/// counters, taken out by `take_exit_marks` before anything else reads the
+/// events.
+pub(super) const EXIT_PREFIX: &str = "copilot-exit:";
+
+/// Exits by session and model: the latest with usable counters, zero deltas
+/// included.
+pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
+
+/// Each session's and model's latest exit mark, taken out of the events.
+pub(super) fn take_exit_marks(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Exits {
+    let mut exits: Exits = HashMap::new();
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events.usage_events.retain(|keyed| {
+            if !keyed
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(EXIT_PREFIX))
+            {
+                return true;
+            }
+            let event = &keyed.event;
+            if let (Some(sid), Some(model), Some(time)) = (
+                event.session_id.as_ref(),
+                event.model.as_ref(),
+                event.timestamp,
+            ) {
+                exits
+                    .entry(sid.clone())
+                    .or_default()
+                    .entry(model.clone())
+                    .and_modify(|exit| *exit = (*exit).max(time))
+                    .or_insert(time);
+            }
+            false
+        });
+    }
+    exits
+}
+
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
-/// session's first live row on, as a copy of a live one.
+/// session's first live row on, as a copy of a live one; the store's
+/// coverage of the session's exits starts there too.
 const LIVE_SLACK: Duration = Duration::seconds(60);
 
 #[derive(Default)]
@@ -64,39 +108,21 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit with that model's counters stay: the snapshots
-    /// cover everything up to it, and dropping the later rows would lose
-    /// every call since that exit. Cut per model: cutting every model's rows
-    /// at one exit took those of a model whose counters it lacked.
-    pub(super) fn fall_back_where_incomplete(
-        &mut self,
-        per_file: &[(PathBuf, Option<FileEvents>)],
-    ) {
+    /// after the latest exit covering something new for it (`exits`) stay,
+    /// live rows only from 60 s after it: the snapshots cover everything up
+    /// to it, and dropping the later rows would lose every call since that
+    /// exit. Cut per model: cutting every model's rows at one exit took those
+    /// of a model whose counters it lacked.
+    pub(super) fn fall_back_where_incomplete(&mut self, exits: &Exits) {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
-        let mut exits: HashMap<String, HashMap<String, OffsetDateTime>> = HashMap::new();
-        for keyed in per_file
+        let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
+        let caught_up: HashSet<&str> = self
+            .caught_up
             .iter()
-            .filter_map(|(_, events)| events.as_ref())
-            .flat_map(|events| &events.usage_events)
-            .filter(|keyed| keyed.event.granularity == UsageGranularity::Aggregate)
-        {
-            let event = &keyed.event;
-            if let (Some(sid), Some(model), Some(time)) = (
-                event.session_id.as_ref(),
-                event.model.as_ref(),
-                event.timestamp,
-            ) && (self.unattributed || self.incomplete.contains(sid))
-            {
-                exits
-                    .entry(sid.clone())
-                    .or_default()
-                    .entry(model.clone())
-                    .and_modify(|exit| *exit = (*exit).max(time))
-                    .or_insert(time);
-            }
-        }
+            .filter_map(|(_, key)| key.as_deref())
+            .collect();
         self.events.usage_events.retain(|keyed| {
             let event = &keyed.event;
             let (Some(sid), Some(model), Some(time)) = (
@@ -106,12 +132,30 @@ impl CallLedger {
             ) else {
                 return true;
             };
+            // A live row stamped just after the exit can be a call that exit
+            // covers, as on the store side: kept, it counted beside the exit.
+            let live = keyed
+                .key
+                .as_deref()
+                .is_none_or(|key| !caught_up.contains(key));
             exits
                 .get(sid)
+                .filter(|_| falls_back(sid))
                 .and_then(|models| models.get(model))
-                .is_none_or(|exit| time > *exit)
+                .is_none_or(|exit| {
+                    let covered_to = if live {
+                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
+                    } else {
+                        *exit
+                    };
+                    time > covered_to
+                })
         });
-        self.fallback = exits.into_keys().collect();
+        self.fallback = exits
+            .keys()
+            .filter(|sid| falls_back(sid))
+            .cloned()
+            .collect();
     }
 
     /// Sessions with a readable live row: the store recorded their calls as
@@ -147,12 +191,15 @@ impl CallLedger {
             .retain(|session, _| !sessions.contains(session));
     }
 
-    /// From a session's first recorded call on, its rows replace its
-    /// snapshots; earlier snapshots still count, and a session that fell
-    /// back keeps them all. A fork's copy of a superseded snapshot (same
-    /// key) is dropped too, or the parent's calls would count again under
-    /// the fork. Receipts are left alone: `choose_sources` settled them, and
-    /// one that counts can sit in a journal whose session has rows.
+    /// From a session's first recorded call on, or 60 s before its first
+    /// live row if that's earlier, its rows replace its snapshots; earlier
+    /// snapshots still count, and a session that fell back keeps them all.
+    /// From the first live row alone, an exit a moment before it counted
+    /// beside the row of a call it covered. A fork's copy of a superseded
+    /// snapshot (same key) is dropped too, or the parent's calls would count
+    /// again under the fork. Receipts are left alone: `choose_sources`
+    /// settled them, and one that counts can sit in a journal whose session
+    /// has rows.
     pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
         let mut superseded: HashSet<String> = HashSet::new();
         for events in per_file
@@ -170,7 +217,13 @@ impl CallLedger {
                 let Some(first) = self.first_call.get(sid) else {
                     return true;
                 };
-                let before_store = keyed.event.timestamp.is_some_and(|time| time < *first);
+                let covered_from = self.first_live.get(sid).map_or(*first, |live| {
+                    (*first).min(live.checked_sub(LIVE_SLACK).unwrap_or(*live))
+                });
+                let before_store = keyed
+                    .event
+                    .timestamp
+                    .is_some_and(|time| time < covered_from);
                 if !before_store && let Some(key) = &keyed.key {
                     superseded.insert(key.clone());
                 }
@@ -241,9 +294,14 @@ struct CallRow {
 }
 
 /// Without both tables there is no ledger, as with a CLI that predates it.
+/// A fork's rows dated up to its fork, in `forked`, aren't read: it can't
+/// have made a call before it existed, so they copy the parent's history,
+/// whether the CLI caught them up from the copied receipts or the store
+/// copied them, and the parent's own records count those calls.
 pub(super) fn read_call_ledger(
     path: &Path,
     local_offset: UtcOffset,
+    forked: &HashMap<String, OffsetDateTime>,
     collection: &mut Collection,
 ) -> Option<CallLedger> {
     if !path.is_file() {
@@ -301,6 +359,12 @@ pub(super) fn read_call_ledger(
             }
             continue;
         };
+        if forked
+            .get(&row.session_id)
+            .is_some_and(|fork| timestamp <= *fork)
+        {
+            continue;
+        }
         ledger.events.session_touches.push(SessionTouch {
             timestamp,
             session_id: row.session_id.clone(),
@@ -393,7 +457,7 @@ fn db_count(value: Option<i64>) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
 
     use rusqlite::Connection;
@@ -404,7 +468,7 @@ mod tests {
     use crate::collector::copilot::receipts::tests::{marked, receipt};
     use crate::collector::copilot::tests::{shutdown, total_volume, write_session};
 
-    struct Call<'a> {
+    pub(in crate::collector::copilot) struct Call<'a> {
         session: &'a str,
         model: &'a str,
         input: i64,
@@ -415,7 +479,12 @@ mod tests {
         created_at: Option<&'a str>,
     }
 
-    fn call<'a>(session: &'a str, created_at: &'a str, input: i64, output: i64) -> Call<'a> {
+    pub(in crate::collector::copilot) fn call<'a>(
+        session: &'a str,
+        created_at: &'a str,
+        input: i64,
+        output: i64,
+    ) -> Call<'a> {
         Call {
             session,
             model: "gpt-5-mini",
@@ -428,7 +497,7 @@ mod tests {
         }
     }
 
-    fn write_store(root: &Path, calls: &[Call]) {
+    pub(in crate::collector::copilot) fn write_store(root: &Path, calls: &[Call]) {
         fs::create_dir_all(root).expect("test root should be created");
         let conn = Connection::open(root.join("session-store.db")).expect("store should open");
         conn.execute_batch(
@@ -914,7 +983,7 @@ mod tests {
     }
 
     /// Gives rows (by insertion order, from 1) the store's `event_id`.
-    fn set_event_ids(root: &Path, ids: &[(i64, &str)]) {
+    pub(in crate::collector::copilot) fn set_event_ids(root: &Path, ids: &[(i64, &str)]) {
         let conn = Connection::open(root.join("session-store.db")).expect("store should open");
         conn.execute_batch("ALTER TABLE assistant_usage_events ADD COLUMN event_id TEXT")
             .expect("event_id column should be added");
@@ -1397,9 +1466,13 @@ mod tests {
 
     /// The parent isn't on the store and the fork is: both journals hold the
     /// parent's exit, and both must give it the same amount, or merging the
-    /// two copies keeps the larger and counts the parent's receipt again.
+    /// two copies keeps the larger and counts the parent's receipt again. The
+    /// fork's journal has the shape Copilot writes: its own start, the copied
+    /// history, and the fork marker.
     #[test]
     fn a_parents_exit_counts_once_from_either_journal() {
+        use crate::collector::copilot::forks::tests::{fork_info, fork_start};
+
         let temp = TempDir::new().expect("test tempdir should be created");
         let history = format!(
             "{}\n{}\n",
@@ -1414,7 +1487,13 @@ mod tests {
             temp.path(),
             "fork",
             &format!(
-                "{history}{}\n{}\n",
+                "{}\n{history}{}\n{}\n{}\n",
+                fork_start("fork", "2026-07-27T10:45:00.000Z"),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:45:00.000Z",
+                    "Forked from parent as fork."
+                ),
                 receipt("2026-07-27T11:00:00.000Z", "fork", 1, 400, 40),
                 marked(
                     &shutdown("e-2", "2026-07-27T12:00:00.000Z", 1_500, 150),
@@ -1524,6 +1603,193 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// A receipt without an accounting identity names no source, so every
+    /// journal holding it decides together: the parent's live row stands for
+    /// the call, and the fork's copy doesn't count beside it.
+    #[test]
+    fn a_copied_receipt_without_an_identity_counts_once() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let bare = r#"{"type":"session.usage_record","id":"u-1","timestamp":"2026-07-27T10:00:00.000Z","parentId":null,"data":{"usage":{"model":"gpt-5-mini","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}"#;
+        write_session(temp.path(), "parent", &format!("{bare}\n"));
+        write_session(temp.path(), "fork", &format!("{bare}\n"));
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// A journal on the store takes its calls from its rows, whatever
+    /// session a receipt in it names as its source.
+    #[test]
+    fn a_receipt_naming_another_source_gives_way_in_a_journal_on_the_store() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "other", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// An exit just before the session's first live row can cover that
+    /// row's call: the store's coverage starts 60 s before its first live
+    /// row, as Copilot's own totals take it, and the exit gives way.
+    #[test]
+    fn an_exit_just_before_the_first_live_row_gives_way_to_it() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T09:59:59.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The fallback cuts a model's rows at its latest exit with usable
+    /// counters even when that exit added nothing: cut at the earlier exit,
+    /// a row it covers but stamped just after it counted beside it.
+    #[test]
+    fn the_fallback_cuts_at_an_exit_that_added_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 100, 10),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:01.000Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// A clock moved back can date a later exit before an earlier one: the
+    /// mark keeps the latest time, or a row the earlier exit covers counted
+    /// beside it.
+    #[test]
+    fn a_backward_clock_keeps_the_fallback_mark_at_the_latest_exit() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                r#"{"type":"session.start","id":"st","timestamp":"2026-07-27T09:00:00.000Z","data":{"context":{"cwd":"/Users/me/code/app"}}}"#,
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T10:00:00.000Z", 100, 10),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:04:00.000Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The review's case: a live row stamped half a second after the exit
+    /// covering its call is that call, also when the store is incomplete.
+    #[test]
+    fn a_live_row_just_after_the_fallback_exit_is_its_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T09:59:59.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The review's case: an exit that repeats the last total and watermark
+    /// covers nothing new, so the call past its watermark keeps its row.
+    #[test]
+    fn an_unchanged_exit_keeps_a_later_call_past_its_watermark() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 90, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:30:00.000Z", 90, 10),
+                    r#"{"s1":1}"#
+                ),
+                receipt("2026-07-27T11:00:00.000Z", "s1", 2, 360, 40),
+                marked(
+                    &shutdown("e-2", "2026-07-27T12:00:00.000Z", 90, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 90, 10),
+                call("s1", "2026-07-27T11:00:00.500Z", 360, 40),
+            ],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100 + 400);
     }
 
     #[test]

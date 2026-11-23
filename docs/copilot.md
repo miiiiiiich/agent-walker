@@ -80,32 +80,92 @@ user.
   up from its log (`event_id` starting `usage-record:`) copy those receipts
   and don't count, unless its journal holds no receipts (it is gone), and
   then they are the only record and count as its store rows. A receipt
-  goes by its `sourceSessionId`, so a fork's copies of a parent's receipts
-  follow the parent, and a copied receipt always comes off the fork's
-  exit, since the parent counts that call. What this still undercounts: in
-  a session with a live row, a call only in a receipt (its row unreadable
-  or missing); in a session on its receipts, a call only in a caught-up row
-  whose receipt is gone and that no later exit covers. A row caught up
-  under a fork that has live rows, for a receipt copied from the parent (if
-  the CLI files it there, which is not verified), would count beside the
-  parent's receipts.
+  goes by its `sourceSessionId` and by every journal holding it: it
+  doesn't count if any of them is on the store, so neither a copy without
+  an accounting identity nor a receipt naming another session counts
+  beside a store row. A copied receipt always comes off the fork's exit,
+  since the parent counts that call.
 
-  From a session's first recorded call on, its rows replace its snapshots;
-  snapshots dated before that call still count (a session resumed across a
-  CLI upgrade keeps the history from before the store existed). A
+  A fork's journal opens with a copy of its parent's history, event ids
+  and all, then a `session.info` marker reading "Forked from <parent> …
+  as <fork>." The usage read before the marker is the parent's, decided
+  by the parent's store rows like the parent's own; tools, turns and
+  activity stay with the fork. Copied exits whose parent can't be named
+  don't count: under a marker that doesn't name it in a form read here,
+  or, in a journal without a marker, dated before its own start (Copilot
+  dates a fork's start at the fork; any record dated before the start
+  marks such a journal as a fork). Copied receipts still go by their
+  `sourceSessionId`. A fork can't have made a call before it existed, so
+  its store rows dated up to its marker (without a marker naming it, up to
+  its start) aren't read: whether the CLI caught them up from the copied
+  receipts or the store copied them, they repeat the parent's history. Its
+  journal's own usage dated up to then doesn't count either, except a
+  receipt naming another session as its source. These rules were read
+  from Copilot's fork path for custom session filesystems; the default
+  on-disk fork runs natively and isn't verified, and if it writes no
+  marker, this before-it-existed cut is what keeps each call counted
+  once.
+  With the fork's journal gone, the parent's own marker ("Forked this
+  session into <fork>.") dates the fork instead; the parent's history stays
+  its own. When a journal has lost its oldest segment, each model's first
+  exit read counts everything of that model before it, so another
+  journal's records of that session and model (a fork's copies) dated up
+  to that exit don't count, as long as that exit still counts after the
+  store below is applied: one its rows supersede holds nothing, so the
+  copies stay. A copied receipt also goes by the session its
+  `sourceSessionId` names (a fork of a fork files it under the first fork),
+  and one within that exit's watermark for that session doesn't count
+  however it's dated.
+  A copied exit with any counter above that exit's is from before an
+  accounting reset and still counts.
+
+  From a session's first recorded call on, or from 60 s before its first
+  live row if that's earlier, its rows replace its snapshots: an exit a
+  moment before the first live row may cover that row's call. Snapshots
+  dated before still count (a session resumed across a CLI upgrade keeps
+  the history from before the store existed); one in that last minute
+  before the store doesn't, even if its calls had no row. A
   caught-up row dated from 60 s before the session's first live row on is
   dropped, as Copilot drops it from its own totals. If any of a session's
   rows can't be read (a `created_at` that doesn't parse, a value of the
   wrong type), that session keeps all its snapshots: superseding them from
   the readable rows alone would lose the unreadable row's usage. A model's
-  readable rows up to the latest exit with usable counters for that model
-  are dropped (that cumulative already covers them); an exit without a
-  model's counters covers none of its rows. A session with no exit keeps
-  all its readable rows. A row that can't be tied to a session at all
-  applies the same fallback to every session. An unreadable row dated
-  after the latest exit can't be counted anywhere.
+  readable rows up to the latest exit whose total or watermark for that
+  model moved are dropped (that cumulative already covers them), and so are
+  live rows stamped within 60 s after it, which may be a call it covers. An
+  exit repeating both covers nothing new, so a call past its watermark
+  keeps its row; an exit without a model's counters covers none of its
+  rows. A session with no exit keeps all its readable rows. A row that
+  can't be tied to a session at all applies the same fallback to every
+  session. An unreadable row dated after the latest exit can't be counted
+  anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
+
+  The rule is that when two records can't be told apart as one call or
+  two, one is counted. It isn't guaranteed where a fork can't be told from
+  its own journal: one with no marker and nothing dated before its start
+  (Copilot writes both), whose copied exit counts beside the parent's
+  store rows once the parent's journal is gone; and a fork's first exit
+  carrying the parent's total from before the fork with no copied exit to
+  measure from (CLIs that write receipts take the copied ones off it); and,
+  for a journal that has lost its oldest segment, a fork's copy of a receipt
+  from the missing part that a clock moved back dated after the first exit
+  read, past its watermark, which a later exit of that journal counts. The
+  rule costs these undercounts. In a session with a live row, a call only in a receipt (its
+  row unreadable or missing), and an exit in the last minute before the
+  first live row whose calls had no row. In a session on its receipts, a
+  call only in a caught-up row whose receipt is gone and that no later
+  exit covers. Any receipt held by a journal on the store, such as one an
+  older fork copied without a marker. A copied exit whose parent can't be
+  named, when the parent's own journal is gone. A parent's calls before
+  its first store row that its receipts carried, when the parent's journal
+  is gone and only a fork's copy of the exit remains. A fork's copy of a
+  receipt written after the snapshot of a parent's first exit read (past
+  its watermark, but dated before it), when the parent's journal has lost
+  its oldest segment; and, in that case, a copy from before an accounting
+  reset when that exit's counters all grew past the copy's again, or the
+  copy is a receipt.
 
   All three map to the same schema as the other providers:
 
