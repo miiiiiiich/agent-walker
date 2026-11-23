@@ -39,84 +39,70 @@ pub(super) struct Truncated {
     cumulatives: HashMap<String, RawCounters>,
 }
 
-impl Truncated {
-    pub(super) fn read(per_file: &[(PathBuf, Option<FileEvents>)]) -> Self {
-        let mut truncated = Self::default();
-        for (path, events) in per_file {
-            let Some(summary) = events.as_ref().and_then(|events| events.copilot.as_ref()) else {
-                continue;
-            };
-            if let Some(session) = journal(path) {
-                for (model, exit) in &summary.first_exits {
-                    truncated
-                        .first_exits
-                        .entry(session.to_owned())
-                        .or_default()
-                        .insert(model.clone(), exit.clone());
-                }
-            }
-            truncated.cumulatives.extend(
-                summary
-                    .cumulatives
-                    .iter()
-                    .map(|(key, counters)| (key.clone(), *counters)),
-            );
-        }
-        truncated
-    }
-
-    /// A journal missing its oldest segment counts everything of a model
-    /// before that model's first exit read in that exit, so copies of the
-    /// session's history held by other journals (a fork's) and dated up to
-    /// it give way: kept, a fork's copy of a receipt or exit from the missing
-    /// segment counted again. The session's own records stay; its receipts
-    /// already came off that exit. A copied exit whose cumulative the first
-    /// exit's falls below is from an accounting epoch before a reset (the
-    /// rule of `collect_shutdown_usage`), so the first exit doesn't hold it.
-    /// A receipt also goes by the session its accounting names: a fork of a
-    /// fork made before the first fork's marker files the copy under the
-    /// first fork. One the exit's watermark holds is inside it however it's
-    /// dated.
-    ///
-    /// Run once the store has settled which exits count: an exit its rows
-    /// superseded holds nothing, and its copies dropped against it lost the
-    /// usage from before the store.
-    pub(super) fn drop_covered_copies(mut self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-        let mut standing: HashSet<String> = HashSet::new();
-        for (path, events) in per_file.iter() {
-            let (Some(models), Some(events)) = (
-                journal(path).and_then(|session| self.first_exits.get(session)),
-                events,
-            ) else {
-                continue;
-            };
-            for key in events
-                .usage_events
+/// A journal missing its oldest segment counts everything of a model
+/// before that model's first exit read in that exit, so copies of the
+/// session's history held by other journals (a fork's) and dated up to
+/// it give way: kept, a fork's copy of a receipt or exit from the missing
+/// segment counted again. The session's own records stay; its receipts
+/// already came off that exit. A copied exit whose cumulative the first
+/// exit's falls below is from an accounting epoch before a reset (the
+/// rule of `collect_shutdown_usage`), so the first exit doesn't hold it.
+/// A receipt also goes by the session its accounting names: a fork of a
+/// fork made before the first fork's marker files the copy under the
+/// first fork. One the exit's watermark holds is inside it however it's
+/// dated.
+///
+/// Run once the store has settled which exits count: an exit its rows
+/// superseded holds nothing, and its copies dropped against it lost the
+/// usage from before the store.
+pub(super) fn drop_covered_copies(per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+    let mut truncated = Truncated::default();
+    for (path, events) in per_file.iter() {
+        let Some((events, summary)) = events
+            .as_ref()
+            .and_then(|events| Some((events, events.copilot.as_ref()?)))
+        else {
+            continue;
+        };
+        truncated.cumulatives.extend(
+            summary
+                .cumulatives
                 .iter()
-                .filter_map(|keyed| keyed.key.as_ref())
-            {
-                if models.values().any(|exit| exit.key == *key) {
-                    standing.insert(key.clone());
-                }
-            }
-        }
-        for models in self.first_exits.values_mut() {
-            models.retain(|_, exit| standing.contains(&exit.key));
-        }
-        if standing.is_empty() {
-            return;
-        }
-        for (path, events) in per_file.iter_mut() {
-            let Some(events) = events.as_mut() else {
-                continue;
-            };
-            let journal = journal(path);
-            events
-                .usage_events
-                .retain(|keyed| !self.covers(journal, keyed));
+                .map(|(key, counters)| (key.clone(), *counters)),
+        );
+        let Some(session) = journal(path).filter(|_| !summary.first_exits.is_empty()) else {
+            continue;
+        };
+        let keys: HashSet<&str> = events
+            .usage_events
+            .iter()
+            .filter_map(|keyed| keyed.key.as_deref())
+            .collect();
+        let standing: HashMap<String, FirstExit> = summary
+            .first_exits
+            .iter()
+            .filter(|(_, exit)| keys.contains(exit.key.as_str()))
+            .cloned()
+            .collect();
+        if !standing.is_empty() {
+            truncated.first_exits.insert(session.to_owned(), standing);
         }
     }
+    if truncated.first_exits.is_empty() {
+        return;
+    }
+    for (path, events) in per_file.iter_mut() {
+        let Some(events) = events.as_mut() else {
+            continue;
+        };
+        let journal = journal(path);
+        events
+            .usage_events
+            .retain(|keyed| !truncated.covers(journal, keyed));
+    }
+}
 
+impl Truncated {
     /// By the session a receipt names and by the one it's filed under: an
     /// exit holds the copied receipts read before it whatever they name.
     fn covers(&self, journal: Option<&str>, keyed: &KeyedUsageEvent) -> bool {

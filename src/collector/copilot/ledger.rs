@@ -17,28 +17,6 @@ use super::{MAX_SANE_TOKENS, RawCounters, summaries};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
-/// Exits by session and model: the latest with usable counters, zero deltas
-/// included.
-pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
-
-/// Each session's and model's latest exit mark. A fork's marks up to its
-/// fork are its parent's history, like its usage then.
-pub(super) fn exit_marks(per_file: &[(PathBuf, Option<FileEvents>)], forks: &Forks) -> Exits {
-    let mut exits: Exits = HashMap::new();
-    for (session, model, time) in summaries(per_file).flat_map(|summary| &summary.exit_marks) {
-        if forks.copied(session, *time) {
-            continue;
-        }
-        exits
-            .entry(session.clone())
-            .or_default()
-            .entry(model.clone())
-            .and_modify(|exit| *exit = (*exit).max(*time))
-            .or_insert(*time);
-    }
-    exits
-}
-
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
 /// session's first live row on, as a copy of a live one; the store's
 /// coverage of the session's exits starts there too.
@@ -108,14 +86,30 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit covering something new for it (`exits`) stay,
-    /// live rows only from 60 s after it: the snapshots cover everything up
-    /// to it, and dropping the later rows would lose every call since that
-    /// exit. Cut per model: cutting every model's rows at one exit took those
-    /// of a model whose counters it lacked.
-    pub(super) fn fall_back_where_incomplete(&mut self, exits: &Exits) {
+    /// after the latest exit covering something new for it stay, live rows
+    /// only from 60 s after it: the snapshots cover everything up to it, and
+    /// dropping the later rows would lose every call since that exit. Cut
+    /// per model: cutting every model's rows at one exit took those of a
+    /// model whose counters it lacked. A fork's exits up to its fork are its
+    /// parent's history, like its usage then.
+    pub(super) fn fall_back_where_incomplete(
+        &mut self,
+        per_file: &[(PathBuf, Option<FileEvents>)],
+        forks: &Forks,
+    ) {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
+        }
+        let mut exits: HashMap<&str, HashMap<&str, OffsetDateTime>> = HashMap::new();
+        for (session, model, time) in summaries(per_file).flat_map(|summary| &summary.exit_marks) {
+            if !forks.copied(session, *time) {
+                exits
+                    .entry(session)
+                    .or_default()
+                    .entry(model)
+                    .and_modify(|exit| *exit = (*exit).max(*time))
+                    .or_insert(*time);
+            }
         }
         let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
         self.rows.retain(|row| {
@@ -125,9 +119,9 @@ impl CallLedger {
             // A live row stamped just after the exit can be a call that exit
             // covers, as on the store side: kept, it counted beside the exit.
             exits
-                .get(&row.session)
+                .get(row.session.as_str())
                 .filter(|_| falls_back(&row.session))
-                .and_then(|models| models.get(model))
+                .and_then(|models| models.get(model.as_str()))
                 .is_none_or(|exit| {
                     let covered_to = if row.live {
                         exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
@@ -139,8 +133,8 @@ impl CallLedger {
         });
         self.fallback = exits
             .keys()
+            .map(|sid| (*sid).to_owned())
             .filter(|sid| falls_back(sid))
-            .cloned()
             .collect();
     }
 

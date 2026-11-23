@@ -46,14 +46,12 @@ pub fn collect(
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forks = forks::Forks::read(&per_file);
-    let truncated = truncation::Truncated::read(&per_file);
     forks.drop_copies(&mut per_file);
     let db_path = root.join("session-store.db");
     let mut ledger = read_call_ledger(&db_path, local_offset, &forks, &mut collection);
     if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
-    let exits = ledger::exit_marks(&per_file, &forks);
     let (live, caught_up) = ledger
         .as_ref()
         .map(ledger::CallLedger::sessions)
@@ -61,10 +59,10 @@ pub fn collect(
     let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
     if let Some(ledger) = &mut ledger {
         ledger.ignore_caught_up(&from_receipts);
-        ledger.fall_back_where_incomplete(&exits);
+        ledger.fall_back_where_incomplete(&per_file, &forks);
         ledger.supersede_log_usage(&mut per_file);
     }
-    truncated.drop_covered_copies(&mut per_file);
+    truncation::drop_covered_copies(&mut per_file);
     if let Some(ledger) = ledger {
         per_file.push((db_path, Some(ledger.into_events())));
     }
