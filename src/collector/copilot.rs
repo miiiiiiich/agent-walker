@@ -389,9 +389,14 @@ impl SessionState {
                     self.shutdown_index,
                     events,
                 );
+                // The latest time, not the last read: a clock moved back dated
+                // a later exit before one covering a row.
                 if let Some(at) = timestamp {
                     for model in validated {
-                        self.latest_exits.insert(model, at);
+                        self.latest_exits
+                            .entry(model)
+                            .and_modify(|latest| *latest = (*latest).max(at))
+                            .or_insert(at);
                     }
                 }
                 self.shutdown_index += 1;

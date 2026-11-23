@@ -1683,6 +1683,33 @@ pub(super) mod tests {
         assert_eq!(total_volume(&collection), 110);
     }
 
+    /// A clock moved back can date a later exit before an earlier one: the
+    /// mark keeps the latest time, or a row the earlier exit covers counted
+    /// beside it.
+    #[test]
+    fn a_backward_clock_keeps_the_fallback_mark_at_the_latest_exit() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n",
+                r#"{"type":"session.start","id":"st","timestamp":"2026-07-27T09:00:00.000Z","data":{"context":{"cwd":"/Users/me/code/app"}}}"#,
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T10:00:00.000Z", 100, 10),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:04:00.000Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
     #[test]
     fn sqlite_default_stamp_is_read_as_utc() {
         let parsed = parse_db_time("2026-07-27 12:00:00").expect("default stamp should parse");
