@@ -16,6 +16,49 @@ use super::{MAX_SANE_TOKENS, RawCounters};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
+/// Key prefix of a journal's mark of a model's latest exit with usable
+/// counters, taken out by `take_exit_marks` before anything else reads the
+/// events.
+pub(super) const EXIT_PREFIX: &str = "copilot-exit:";
+
+/// Exits by session and model: the latest with usable counters, zero deltas
+/// included.
+pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
+
+/// Each session's and model's latest exit mark, taken out of the events.
+pub(super) fn take_exit_marks(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Exits {
+    let mut exits: Exits = HashMap::new();
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events.usage_events.retain(|keyed| {
+            if !keyed
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(EXIT_PREFIX))
+            {
+                return true;
+            }
+            let event = &keyed.event;
+            if let (Some(sid), Some(model), Some(time)) = (
+                event.session_id.as_ref(),
+                event.model.as_ref(),
+                event.timestamp,
+            ) {
+                exits
+                    .entry(sid.clone())
+                    .or_default()
+                    .entry(model.clone())
+                    .and_modify(|exit| *exit = (*exit).max(time))
+                    .or_insert(time);
+            }
+            false
+        });
+    }
+    exits
+}
+
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
 /// session's first live row on, as a copy of a live one; the store's
 /// coverage of the session's exits starts there too.
@@ -65,39 +108,16 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit with that model's counters stay: the snapshots
-    /// cover everything up to it, and dropping the later rows would lose
-    /// every call since that exit. Cut per model: cutting every model's rows
-    /// at one exit took those of a model whose counters it lacked.
-    pub(super) fn fall_back_where_incomplete(
-        &mut self,
-        per_file: &[(PathBuf, Option<FileEvents>)],
-    ) {
+    /// after the latest exit with that model's counters (`exits`, zero deltas
+    /// included) stay: the snapshots cover everything up to it, and dropping
+    /// the later rows would lose every call since that exit. Cut per model:
+    /// cutting every model's rows at one exit took those of a model whose
+    /// counters it lacked.
+    pub(super) fn fall_back_where_incomplete(&mut self, exits: &Exits) {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
-        let mut exits: HashMap<String, HashMap<String, OffsetDateTime>> = HashMap::new();
-        for keyed in per_file
-            .iter()
-            .filter_map(|(_, events)| events.as_ref())
-            .flat_map(|events| &events.usage_events)
-            .filter(|keyed| keyed.event.granularity == UsageGranularity::Aggregate)
-        {
-            let event = &keyed.event;
-            if let (Some(sid), Some(model), Some(time)) = (
-                event.session_id.as_ref(),
-                event.model.as_ref(),
-                event.timestamp,
-            ) && (self.unattributed || self.incomplete.contains(sid))
-            {
-                exits
-                    .entry(sid.clone())
-                    .or_default()
-                    .entry(model.clone())
-                    .and_modify(|exit| *exit = (*exit).max(time))
-                    .or_insert(time);
-            }
-        }
+        let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
         self.events.usage_events.retain(|keyed| {
             let event = &keyed.event;
             let (Some(sid), Some(model), Some(time)) = (
@@ -109,10 +129,15 @@ impl CallLedger {
             };
             exits
                 .get(sid)
+                .filter(|_| falls_back(sid))
                 .and_then(|models| models.get(model))
                 .is_none_or(|exit| time > *exit)
         });
-        self.fallback = exits.into_keys().collect();
+        self.fallback = exits
+            .keys()
+            .filter(|sid| falls_back(sid))
+            .cloned()
+            .collect();
     }
 
     /// Sessions with a readable live row: the store recorded their calls as
@@ -1626,6 +1651,32 @@ pub(super) mod tests {
             temp.path(),
             &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
         );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The fallback cuts a model's rows at its latest exit with usable
+    /// counters even when that exit added nothing: cut at the earlier exit,
+    /// a row it covers but stamped just after it counted beside it.
+    #[test]
+    fn the_fallback_cuts_at_an_exit_that_added_nothing() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 100, 10),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:01.000Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
 
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 

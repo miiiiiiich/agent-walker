@@ -4,7 +4,7 @@ mod receipts;
 mod segments;
 mod sources;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -49,6 +49,7 @@ pub fn collect(
     if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
+    let exits = ledger::take_exit_marks(&mut per_file);
     let (live, caught_up) = ledger
         .as_ref()
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
@@ -56,7 +57,7 @@ pub fn collect(
     let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
     if let Some(mut ledger) = ledger {
         ledger.ignore_caught_up(&from_receipts);
-        ledger.fall_back_where_incomplete(&per_file);
+        ledger.fall_back_where_incomplete(&exits);
         ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
     }
@@ -170,6 +171,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
     }
 
+    session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(&mut events);
     for (fork, at) in session.fork_times {
         events.usage_events.push(KeyedUsageEvent {
@@ -209,6 +211,9 @@ struct SessionState {
     start: Option<OffsetDateTime>,
     /// Each fork the markers name, and when it was made.
     fork_times: Vec<(String, OffsetDateTime)>,
+    /// Each model's latest exit with usable counters since the last fork
+    /// marker, zero deltas included.
+    latest_exits: BTreeMap<String, OffsetDateTime>,
 }
 
 impl SessionState {
@@ -220,7 +225,13 @@ impl SessionState {
     /// When the marker names no parent read here, the copied exits go: kept
     /// as the fork's, one could count beside the parent's own records. The
     /// copied receipts stay, each naming its parent in its accounting.
-    fn close_copied_block(&mut self, marker: &forks::ForkMarker, events: &mut FileEvents) {
+    fn close_copied_block(
+        &mut self,
+        marker: &forks::ForkMarker,
+        session_id: Option<&String>,
+        events: &mut FileEvents,
+    ) {
+        self.mark_latest_exits(session_id, events);
         let block = self.block.min(events.usage_events.len());
         if let Some(parent) = &marker.parent {
             for keyed in &mut events.usage_events[block..] {
@@ -235,6 +246,31 @@ impl SessionState {
         }
         self.forked = true;
         self.block = events.usage_events.len();
+    }
+
+    /// One mark per model at its latest exit with usable counters, for the
+    /// store fallback to cut that model's rows at. Marked at every exit, a
+    /// run of unchanged exits kept an event per model per exit; marked only
+    /// where the exit added usage, the cut fell at an earlier exit than the
+    /// one covering a row.
+    fn mark_latest_exits(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
+        for (model, at) in std::mem::take(&mut self.latest_exits) {
+            events.usage_events.push(KeyedUsageEvent {
+                key: Some(format!("{}{model}", ledger::EXIT_PREFIX)),
+                event: UsageEvent {
+                    timestamp: Some(at),
+                    session_id: session_id.cloned(),
+                    model: Some(model),
+                    source_kind: SourceKind::Main,
+                    attribution_agent: None,
+                    attribution_skill: None,
+                    project: None,
+                    usage: TokenUsage::default(),
+                    granularity: UsageGranularity::Aggregate,
+                    billing: crate::model::Billing::default(),
+                },
+            });
+        }
     }
 
     /// A journal with no marker whose exits predate its own start holds a
@@ -267,7 +303,7 @@ impl SessionState {
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
         if let Some(marker) = forks::fork_marker(value) {
-            self.close_copied_block(&marker, events);
+            self.close_copied_block(&marker, session_id, events);
             if let (Some(child), Some(at)) = (marker.child, timestamp) {
                 self.fork_times.push((child, at));
             }
@@ -330,7 +366,7 @@ impl SessionState {
                     &mut self.credit_index,
                     events,
                 );
-                collect_shutdown_usage(
+                let validated = collect_shutdown_usage(
                     value,
                     &line,
                     self.project.as_deref(),
@@ -339,6 +375,11 @@ impl SessionState {
                     self.shutdown_index,
                     events,
                 );
+                if let Some(at) = timestamp {
+                    for model in validated {
+                        self.latest_exits.insert(model, at);
+                    }
+                }
                 self.shutdown_index += 1;
             }
             _ => {}
@@ -415,20 +456,21 @@ fn collect_shutdown_usage(
     receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
-) {
+) -> Vec<String> {
+    let mut validated = Vec::new();
     // A shutdown the analyzer cannot place in time must not advance the
     // baseline either — otherwise the usage up to it would be subtracted by
     // the NEXT valid shutdown and lost forever, instead of being recovered
     // there in full.
     if line.timestamp.is_none() {
-        return;
+        return validated;
     }
     let Some(metrics) = value
         .get("data")
         .and_then(|data| data.get("modelMetrics"))
         .and_then(Value::as_object)
     else {
-        return;
+        return validated;
     };
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
@@ -444,6 +486,7 @@ fn collect_shutdown_usage(
         {
             continue;
         }
+        validated.push(model.clone());
         let current = RawCounters {
             input: u64_field(usage, "inputTokens"),
             output: u64_field(usage, "outputTokens"),
@@ -493,6 +536,7 @@ fn collect_shutdown_usage(
             event: exit_usage(line, Some(model), project, usage),
         });
     }
+    validated
 }
 
 fn exit_usage(

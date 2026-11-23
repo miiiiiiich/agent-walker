@@ -116,9 +116,9 @@ user.
   rows can't be read (a `created_at` that doesn't parse, a value of the
   wrong type), that session keeps all its snapshots: superseding them from
   the readable rows alone would lose the unreadable row's usage. A model's
-  readable rows up to the latest exit with usable counters for that model
-  are dropped (that cumulative already covers them); an exit without a
-  model's counters covers none of its rows. A session with no exit keeps
+  readable rows up to the latest exit with usable counters for that model,
+  even one that added nothing, are dropped (that cumulative already covers
+  them); an exit without a model's counters covers none of its rows. A session with no exit keeps
   all its readable rows. A row that can't be tied to a session at all
   applies the same fallback to every session. An unreadable row dated
   after the latest exit can't be counted anywhere.
