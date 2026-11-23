@@ -119,7 +119,7 @@ mod tests {
             let priced = cost(&snapshot, "claude-opus-5-5", &usage, billing);
             assert!(
                 (priced - expected * factor).abs() < 1e-12,
-                "{billing:?}: {priced}"
+                "x{factor}: {priced}"
             );
         };
         close(FAST, 2.0);
@@ -228,7 +228,10 @@ mod tests {
             let standard = cost(&snapshot, model, &usage, Billing::default());
             for billing in [PRIORITY, ULTRAFAST] {
                 let priced = cost(&snapshot, model, &usage, billing);
-                assert!((priced - standard).abs() < 1e-12, "{model} {billing:?}");
+                assert!(
+                    (priced - standard).abs() < 1e-12,
+                    "{model}: {priced} vs {standard}"
+                );
             }
         }
     }

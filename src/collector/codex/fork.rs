@@ -641,7 +641,7 @@ mod tests {
     /// fork second, the copies before it do not. A mark past the last row (a
     /// migrated child) leaves the window in charge.
     #[test]
-    fn history_start_ordinal_keeps_the_childs_own_rows_in_the_fork_window() {
+    fn history_start_ordinal_keeps_rows_the_child_wrote_in_the_fork_window() {
         let temp = TempDir::new().expect("test tempdir should be created");
         let numbered = |lines: Vec<String>| -> Vec<String> {
             lines

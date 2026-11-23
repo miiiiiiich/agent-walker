@@ -762,7 +762,7 @@ fn tied_parents_are_chosen_the_same_way_every_time() {
 /// A streamed reply whose larger copy does not name its model is still that
 /// model's call, as the collection merge reads it, in either copy order.
 #[test]
-fn a_streamed_copy_without_a_model_counts_under_the_other_copys_model() {
+fn a_streamed_copy_without_a_model_counts_under_the_model_of_the_other_copy() {
     let temp = TempDir::new().expect("tempdir");
     let unnamed = |at: &str, session: &str| {
         format!(
