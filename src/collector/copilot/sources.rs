@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::collector::FileEvents;
-use crate::model::UsageGranularity;
+use crate::model::{TokenUsage, UsageGranularity};
 
 use super::receipts::source_of;
 
@@ -67,15 +67,16 @@ pub(super) fn choose_sources(
         .filter_map(|(_, events)| events.as_mut())
     {
         if let Some(summary) = &events.copilot {
+            // In the order read, so the last rest standing for a key wins.
+            let rests: HashMap<&str, &TokenUsage> = summary
+                .rests
+                .iter()
+                .filter(|rest| rest.session.as_deref().is_some_and(|sid| !on_store(sid)))
+                .map(|rest| (rest.key.as_str(), &rest.usage))
+                .collect();
             for keyed in &mut events.usage_events {
-                if let Some(rest) = keyed.key.as_ref().and_then(|key| summary.rests.get(key))
-                    && keyed
-                        .event
-                        .session_id
-                        .as_ref()
-                        .is_some_and(|sid| !on_store(sid))
-                {
-                    keyed.event.usage = rest.clone();
+                if let Some(rest) = keyed.key.as_deref().and_then(|key| rests.get(key)) {
+                    keyed.event.usage = (*rest).clone();
                 }
             }
         }

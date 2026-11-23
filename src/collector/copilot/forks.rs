@@ -56,6 +56,13 @@ impl Forks {
             .iter_mut()
             .filter_map(|(_, events)| events.as_mut())
         {
+            if let Some(summary) = &mut events.copilot {
+                summary.rests.retain(|rest| {
+                    rest.session
+                        .as_deref()
+                        .is_none_or(|session| !self.copied(session, rest.at))
+                });
+            }
             events.usage_events.retain(|keyed| {
                 let (Some(session), Some(time)) =
                     (keyed.event.session_id.as_deref(), keyed.event.timestamp)
@@ -924,6 +931,37 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 130);
+    }
+
+    /// One journal holding the same shutdown twice, the second copy dated
+    /// before the journal's start: that copy goes, and the exit that stands
+    /// counts what its own receipts left of it, not what the copy's did.
+    #[test]
+    fn a_shutdown_read_twice_counts_the_rest_of_the_copy_that_stands() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "solo",
+            &lines(&[
+                fork_start("solo", "2026-07-27T10:00:00.000Z"),
+                receipt("2026-07-27T10:05:00.000Z", "solo", 1, 27, 3),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:10:00.000Z", 90, 10),
+                    r#"{"solo":1}"#,
+                ),
+                receipt("2026-07-27T09:50:00.000Z", "solo", 2, 18, 2),
+                marked(
+                    &shutdown("e-1", "2026-07-27T09:55:00.000Z", 135, 15),
+                    r#"{"solo":2}"#,
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
     }
 
     /// Two truncated journals whose first exits share an id: the copy left

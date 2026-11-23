@@ -217,9 +217,19 @@ pub struct JournalSummary {
     /// Session, model and time of each model's latest exit that covered
     /// something new, for the store fallback to cut that model's rows at.
     exit_marks: Vec<(String, String, OffsetDateTime)>,
-    /// Each exit less the journal's own receipts it covered, by its key: it
-    /// counts that if its session's calls come from those receipts.
-    rests: HashMap<String, TokenUsage>,
+    /// Each exit less the journal's own receipts it covered, in the order
+    /// read: it counts that if its session's calls come from those receipts.
+    rests: Vec<Rest>,
+}
+
+/// Filed, cut and dropped with the exit it belongs to, so that where one
+/// journal reads a shutdown twice, the copy that stands sets the count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Rest {
+    key: String,
+    session: Option<String>,
+    at: OffsetDateTime,
+    usage: TokenUsage,
 }
 
 #[derive(Default)]
@@ -233,6 +243,8 @@ struct SessionState {
     receipts: Receipts,
     /// Where the usage events since the last fork marker begin.
     block: usize,
+    /// Likewise the summary's rests.
+    rest_block: usize,
     /// Whether the journal holds a fork marker at all.
     forked: bool,
     /// The journal's own start, which Copilot dates at the fork.
@@ -266,9 +278,13 @@ impl SessionState {
             self.latest_exits.clear();
         }
         let block = self.block.min(events.usage_events.len());
+        let rests = &mut self.summary.rests;
         if let Some(parent) = &marker.parent {
             for keyed in &mut events.usage_events[block..] {
                 keyed.event.session_id = Some(parent.clone());
+            }
+            for rest in &mut rests[self.rest_block..] {
+                rest.session = Some(parent.clone());
             }
             self.receipts.disown_pending();
         } else {
@@ -277,9 +293,11 @@ impl SessionState {
             let mut copied = events.usage_events.split_off(block);
             copied.retain(|keyed| keyed.event.granularity != UsageGranularity::Aggregate);
             events.usage_events.append(&mut copied);
+            rests.truncate(self.rest_block);
         }
         self.forked = true;
         self.block = events.usage_events.len();
+        self.rest_block = rests.len();
     }
 
     /// The marks of the exits read since the last marker go to the session
@@ -315,6 +333,7 @@ impl SessionState {
             self.summary.forks.push((session.clone(), start));
         }
         self.summary.exit_marks.retain(|(_, _, at)| *at >= start);
+        self.summary.rests.retain(|rest| rest.at >= start);
         events.usage_events.retain(|keyed| {
             keyed.event.granularity != UsageGranularity::Aggregate
                 || keyed.event.timestamp.is_none_or(|time| time >= start)
@@ -520,9 +539,12 @@ impl SessionState {
             if let Some(key) = &key
                 && covered.own.to_usage().token_volume() > 0
             {
-                self.summary
-                    .rests
-                    .insert(key.clone(), delta.minus(covered.own).to_usage());
+                self.summary.rests.push(Rest {
+                    key: key.clone(),
+                    session: line.session_id.cloned(),
+                    at,
+                    usage: delta.minus(covered.own).to_usage(),
+                });
             }
             events.usage_events.push(KeyedUsageEvent {
                 key,
@@ -780,7 +802,12 @@ mod tests {
             )],
             cumulatives: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters)]),
             exit_marks: vec![("parent".to_owned(), "gpt-5-mini".to_owned(), at)],
-            rests: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters.to_usage())]),
+            rests: vec![Rest {
+                key: "copilot:e-1:gpt-5-mini".to_owned(),
+                session: Some("fork".to_owned()),
+                at,
+                usage: counters.to_usage(),
+            }],
         };
         let events = FileEvents {
             copilot: Some(summary),
