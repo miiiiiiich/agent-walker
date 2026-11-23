@@ -26,17 +26,14 @@ pub(in crate::collector::agy) fn trajectory_meta(
     if !store.has_table("trajectory_metadata_blob", &["data"]) {
         return Trajectory::default();
     }
-    let blob: Option<Vec<u8>> = store
-        .query_row(
-            "SELECT data FROM trajectory_metadata_blob LIMIT 1",
-            [],
-            |row| {
-                store.charge(row, 1)?;
-                row.get(0)
-            },
-        )
-        .ok();
-    let Some(blob) = blob else {
+    let Ok(blob) = store.query_row(
+        "SELECT data FROM trajectory_metadata_blob LIMIT 1",
+        [],
+        |row| {
+            store.charge(row, 1)?;
+            row.get::<_, Vec<u8>>(0)
+        },
+    ) else {
         return Trajectory::default();
     };
     let started_ms = message_field(&blob, 2)
