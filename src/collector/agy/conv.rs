@@ -417,7 +417,7 @@ pub(super) mod tests {
         out.extend(enc(value));
         out
     }
-    fn lenf(field: u64, payload: &[u8]) -> Vec<u8> {
+    pub(in crate::collector::agy) fn lenf(field: u64, payload: &[u8]) -> Vec<u8> {
         let mut out = enc((field << 3) | 2);
         out.extend(enc(payload.len() as u64));
         out.extend_from_slice(payload);
@@ -693,43 +693,34 @@ pub(super) mod tests {
         );
     }
 
-    #[test]
-    fn own_timestamp_wins_over_the_step_time() {
+    fn stamped_row_time(stamp_ms: i64, local_offset: UtcOffset) -> Option<i64> {
         let mut usage = varint(3, 10);
         usage.extend(varint(9, 10));
         usage.extend(lenf(11, b"r1"));
         let mut chat = lenf(4, &usage);
-        chat.extend(lenf(9, &lenf(4, &timestamp(1_780_000_000_000))));
+        chat.extend(lenf(9, &lenf(4, &timestamp(stamp_ms))));
         let blob = lenf(1, &chat);
         let conversation = Conversation {
             step_times_ms: HashMap::from([("r1".to_owned(), 1_790_000_000_000)]),
             ..conversation(1)
         };
-        let e = event_of(parse_gen(&blob, 0, &conversation, UtcOffset::UTC));
+        let e = event_of(parse_gen(&blob, 0, &conversation, local_offset));
+        e.timestamp.map(OffsetDateTime::unix_timestamp)
+    }
+
+    #[test]
+    fn own_timestamp_wins_over_the_step_time() {
         assert_eq!(
-            e.timestamp.map(OffsetDateTime::unix_timestamp),
+            stamped_row_time(1_780_000_000_000, UtcOffset::UTC),
             Some(1_780_000_000)
         );
     }
 
     #[test]
     fn row_stamp_past_the_plausible_range_falls_back_to_the_step_time() {
-        let mut usage = varint(3, 10);
-        usage.extend(varint(9, 10));
-        usage.extend(lenf(11, b"r1"));
-        let mut chat = lenf(4, &usage);
-        chat.extend(lenf(9, &lenf(4, &timestamp(253_402_290_000_000))));
-        let blob = lenf(1, &chat);
-        let conversation = Conversation {
-            step_times_ms: HashMap::from([("r1".to_owned(), 1_790_000_000_000)]),
-            ..conversation(1)
-        };
-
         let tokyo = UtcOffset::from_hms(9, 0, 0).expect("offset");
-        let e = event_of(parse_gen(&blob, 0, &conversation, tokyo));
-
         assert_eq!(
-            e.timestamp.map(OffsetDateTime::unix_timestamp),
+            stamped_row_time(253_402_290_000_000, tokyo),
             Some(1_790_000_000)
         );
     }

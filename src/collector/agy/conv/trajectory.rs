@@ -84,13 +84,7 @@ fn file_uri_to_path(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lenf(field: u64, payload: &[u8]) -> Vec<u8> {
-        let mut out = vec![u8::try_from(field << 3 | 2).expect("small field")];
-        out.push(u8::try_from(payload.len()).expect("short payload"));
-        out.extend_from_slice(payload);
-        out
-    }
+    use crate::collector::agy::conv::tests::lenf;
 
     #[test]
     fn windows_file_uri_drops_the_drive_slash() {
