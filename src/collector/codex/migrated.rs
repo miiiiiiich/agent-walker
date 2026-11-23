@@ -376,4 +376,41 @@ mod tests {
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(total_volume(&collection), 110, "only the parent's record");
     }
+
+    /// Held rows ride in the parse cache typed: any parent id, `:` and `|`
+    /// included, comes back as written, and no held row reaches the events.
+    #[test]
+    fn held_rows_round_trip_any_parent_id() {
+        let mut held = HeldRows::for_fork_of(Some("a:b|c".to_owned()));
+        held.rows.push((
+            "1:2:3:4:5:6:7:8:9:10:11:12".to_owned(),
+            KeyedUsageEvent {
+                key: Some("codex-usage:v2:x:y".to_owned()),
+                event: crate::model::UsageEvent {
+                    timestamp: None,
+                    session_id: None,
+                    model: None,
+                    source_kind: crate::model::SourceKind::Subagent,
+                    attribution_agent: None,
+                    attribution_skill: None,
+                    project: None,
+                    usage: crate::model::TokenUsage::default(),
+                    granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
+                },
+            },
+        ));
+        let mut events = FileEvents::default();
+        held.finish(&mut events);
+        assert!(events.usage_events.is_empty());
+
+        let bytes = postcard::to_stdvec(&events).expect("events should encode");
+        let decoded: FileEvents = postcard::from_bytes(&bytes).expect("events should decode");
+
+        let window = decoded.codex_held.expect("held window");
+        assert_eq!(window.parent, "a:b|c");
+        let (pair, event) = &window.rows[0];
+        assert_eq!(pair, "1:2:3:4:5:6:7:8:9:10:11:12");
+        assert_eq!(event.key.as_deref(), Some("codex-usage:v2:x:y"));
+    }
 }
