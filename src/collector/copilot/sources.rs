@@ -69,10 +69,10 @@ pub(super) fn choose_sources(
         if let Some(summary) = &events.copilot {
             // In the order read, so the last rest standing for a key wins.
             let rests: HashMap<&str, &TokenUsage> = summary
-                .rests
+                .exits
                 .iter()
-                .filter(|rest| rest.session.as_deref().is_some_and(|sid| !on_store(sid)))
-                .map(|rest| (rest.key.as_str(), &rest.usage))
+                .filter(|exit| exit.session.as_deref().is_some_and(|sid| !on_store(sid)))
+                .filter_map(|exit| Some((exit.key.as_str(), exit.rest.as_ref()?)))
                 .collect();
             for keyed in &mut events.usage_events {
                 if let Some(rest) = keyed.key.as_deref().and_then(|key| rests.get(key)) {

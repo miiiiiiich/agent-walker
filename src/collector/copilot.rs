@@ -211,25 +211,26 @@ pub struct JournalSummary {
     /// With the journal's oldest segment gone, each model's first exit read
     /// that counted something.
     first_exits: Vec<(String, truncation::FirstExit)>,
-    /// Each counted exit's cumulative, by its key: the exit counts only what's
-    /// new.
-    cumulatives: HashMap<String, RawCounters>,
     /// Session, model and time of each model's latest exit that covered
     /// something new, for the store fallback to cut that model's rows at.
     exit_marks: Vec<(String, String, OffsetDateTime)>,
-    /// Each exit less the journal's own receipts it covered, in the order
-    /// read: it counts that if its session's calls come from those receipts.
-    rests: Vec<Rest>,
+    /// Each counted exit with a key, in the order read.
+    exits: Vec<Exit>,
 }
 
-/// Filed, cut and dropped with the exit it belongs to, so that where one
-/// journal reads a shutdown twice, the copy that stands sets the count.
+/// Filed, cut and dropped with the exit event it belongs to, so that where
+/// one journal reads a shutdown twice, the copy that stands sets the count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Rest {
+struct Exit {
     key: String,
     session: Option<String>,
     at: OffsetDateTime,
-    usage: TokenUsage,
+    /// The cumulative read, for the reset rule: the exit counts only what's
+    /// new.
+    counters: RawCounters,
+    /// The exit less the journal's own receipts it covered: it counts that
+    /// if its session's calls come from those receipts.
+    rest: Option<TokenUsage>,
 }
 
 #[derive(Default)]
@@ -243,8 +244,8 @@ struct SessionState {
     receipts: Receipts,
     /// Where the usage events since the last fork marker begin.
     block: usize,
-    /// Likewise the summary's rests.
-    rest_block: usize,
+    /// Likewise the summary's exits.
+    exit_block: usize,
     /// Whether the journal holds a fork marker at all.
     forked: bool,
     /// The journal's own start, which Copilot dates at the fork.
@@ -278,13 +279,13 @@ impl SessionState {
             self.latest_exits.clear();
         }
         let block = self.block.min(events.usage_events.len());
-        let rests = &mut self.summary.rests;
+        let exits = &mut self.summary.exits;
         if let Some(parent) = &marker.parent {
             for keyed in &mut events.usage_events[block..] {
                 keyed.event.session_id = Some(parent.clone());
             }
-            for rest in &mut rests[self.rest_block..] {
-                rest.session = Some(parent.clone());
+            for exit in &mut exits[self.exit_block..] {
+                exit.session = Some(parent.clone());
             }
             self.receipts.disown_pending();
         } else {
@@ -293,11 +294,11 @@ impl SessionState {
             let mut copied = events.usage_events.split_off(block);
             copied.retain(|keyed| keyed.event.granularity != UsageGranularity::Aggregate);
             events.usage_events.append(&mut copied);
-            rests.truncate(self.rest_block);
+            exits.truncate(self.exit_block);
         }
         self.forked = true;
         self.block = events.usage_events.len();
-        self.rest_block = rests.len();
+        self.exit_block = exits.len();
     }
 
     /// The marks of the exits read since the last marker go to the session
@@ -333,7 +334,7 @@ impl SessionState {
             self.summary.forks.push((session.clone(), start));
         }
         self.summary.exit_marks.retain(|(_, _, at)| *at >= start);
-        self.summary.rests.retain(|rest| rest.at >= start);
+        self.summary.exits.retain(|exit| exit.at >= start);
         events.usage_events.retain(|keyed| {
             keyed.event.granularity != UsageGranularity::Aggregate
                 || keyed.event.timestamp.is_none_or(|time| time >= start)
@@ -507,11 +508,8 @@ impl SessionState {
             };
             let counts = usage.token_volume() > 0;
             if moved {
-                let counted = key.clone().filter(|_| counts);
-                if let Some(key) = &counted {
-                    self.summary.cumulatives.insert(key.clone(), current);
-                }
                 if self.truncated {
+                    let counted = key.clone().filter(|_| counts);
                     self.first_exits.entry(model.clone()).or_insert_with(|| {
                         counted.map(|key| truncation::FirstExit {
                             at,
@@ -536,14 +534,14 @@ impl SessionState {
             // along for `choose_sources`. Taken off after cache reads were split
             // out of input, an exit without the cache counters kept the
             // receipts' cached input as fresh.
-            if let Some(key) = &key
-                && covered.own.to_usage().token_volume() > 0
-            {
-                self.summary.rests.push(Rest {
+            if let Some(key) = &key {
+                self.summary.exits.push(Exit {
                     key: key.clone(),
                     session: line.session_id.cloned(),
                     at,
-                    usage: delta.minus(covered.own).to_usage(),
+                    counters: current,
+                    rest: (covered.own.to_usage().token_volume() > 0)
+                        .then(|| delta.minus(covered.own).to_usage()),
                 });
             }
             events.usage_events.push(KeyedUsageEvent {
@@ -800,13 +798,13 @@ mod tests {
                     key: "copilot:e-1:gpt-5-mini".to_owned(),
                 },
             )],
-            cumulatives: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters)]),
             exit_marks: vec![("parent".to_owned(), "gpt-5-mini".to_owned(), at)],
-            rests: vec![Rest {
+            exits: vec![Exit {
                 key: "copilot:e-1:gpt-5-mini".to_owned(),
                 session: Some("fork".to_owned()),
                 at,
-                usage: counters.to_usage(),
+                counters,
+                rest: Some(counters.to_usage()),
             }],
         };
         let events = FileEvents {

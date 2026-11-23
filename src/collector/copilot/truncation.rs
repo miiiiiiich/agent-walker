@@ -67,11 +67,13 @@ pub(super) fn drop_covered_copies(per_file: &mut [(PathBuf, Option<FileEvents>)]
         else {
             continue;
         };
+        // In the order read: a copy of an exit cut from its journal no
+        // longer sets the exit's cumulative.
         truncated.cumulatives.extend(
             summary
-                .cumulatives
+                .exits
                 .iter()
-                .map(|(key, counters)| (key.clone(), *counters)),
+                .map(|exit| (exit.key.clone(), exit.counters)),
         );
         let Some(session) = journal(path).filter(|_| !summary.first_exits.is_empty()) else {
             continue;

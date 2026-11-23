@@ -56,12 +56,19 @@ impl Forks {
             .iter_mut()
             .filter_map(|(_, events)| events.as_mut())
         {
-            if let Some(summary) = &mut events.copilot {
-                summary.rests.retain(|rest| {
-                    rest.session
-                        .as_deref()
-                        .is_none_or(|session| !self.copied(session, rest.at))
-                });
+            // Only the rest: the reset rule reads the cumulatives before this cut.
+            for exit in events
+                .copilot
+                .iter_mut()
+                .flat_map(|summary| &mut summary.exits)
+            {
+                if exit
+                    .session
+                    .as_deref()
+                    .is_some_and(|session| self.copied(session, exit.at))
+                {
+                    exit.rest = None;
+                }
             }
             events.usage_events.retain(|keyed| {
                 let (Some(session), Some(time)) =
@@ -1009,6 +1016,40 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// The review's case: a copy of an exit read again in a block an
+    /// unreadable marker then discards leaves the copy that stands with its
+    /// own cumulative, which the parent's first exit holds.
+    #[test]
+    fn a_discarded_copy_of_an_exit_doesnt_set_its_cumulative() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T11:00:00.000Z"),
+                shutdown("e-p", "2026-07-27T12:00:00.000Z", 90, 10),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                shutdown("x", "2026-07-27T09:00:00.000Z", 45, 5),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:00:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+                shutdown("x", "2026-07-27T10:30:00.000Z", 180, 20),
+                fork_info("m-2", "2026-07-27T11:00:00.000Z", r#"Forked from "broken"#),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
     }
 
     /// A session can't have used anything before it existed: a fork's
