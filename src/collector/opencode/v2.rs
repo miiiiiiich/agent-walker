@@ -101,12 +101,7 @@ pub(super) fn parse_session_messages(
             session_id: session_id.clone(),
         });
 
-        let has_usage = match kind.as_str() {
-            "assistant" => true,
-            "compaction" => value.get("tokens").is_some(),
-            _ => false,
-        };
-        if !has_usage {
+        if !matches!(kind.as_str(), "assistant" | "compaction") {
             continue;
         }
         push_usage(&kind, &value, timestamp, &session_id, meta, collection);
