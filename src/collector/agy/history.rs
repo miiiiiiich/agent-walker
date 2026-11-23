@@ -34,26 +34,22 @@ pub(in crate::collector::agy) fn parse_history_file(
         };
         // A line without a conversationId (a slash command, say) names no
         // conversation; a session per such line counted sessions that never ran.
-        let Some(session_id) = string_field(&value, "conversationId") else {
+        let Some(session_id) = value
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .and_then(ident)
+        else {
             continue;
         };
         events.session_touches.push(SessionTouch {
             timestamp,
-            session_id,
+            session_id: session_id.to_owned(),
         });
     }
 
     events.compress_touches(local_offset);
     Some(events)
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .and_then(ident)
-        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 
 use time::OffsetDateTime;
@@ -45,7 +46,10 @@ fn fill_usage_metadata(target: &mut UsageEvent, source: &UsageEvent) {
 /// Earlier of two optional timestamps; a lone `Some` beats `None`. Used on
 /// keyed duplicates so the original observation's time wins over a replayed
 /// copy stamped at the fork instant, whatever the file scan order.
-fn older_timestamp(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Option<OffsetDateTime> {
+pub(in crate::collector) fn older_timestamp(
+    a: Option<OffsetDateTime>,
+    b: Option<OffsetDateTime>,
+) -> Option<OffsetDateTime> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, None) => a,
@@ -53,10 +57,10 @@ fn older_timestamp(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Opti
     }
 }
 
-fn dedupe_into<E>(
+pub(in crate::collector) fn dedupe_into<K: Eq + Hash, E>(
     sink: &mut Vec<E>,
-    seen: &mut HashMap<String, usize>,
-    key: Option<String>,
+    seen: &mut HashMap<K, usize>,
+    key: Option<K>,
     event: E,
     merge: impl FnOnce(&mut E, E),
 ) {

@@ -1,26 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::OffsetDateTime;
 
-use serde_json::Value;
-
 use crate::collector::{FileEvents, KeyedUsageEvent};
-use crate::model::TokenUsage;
 
+use super::RawCounters;
 use super::receipts::identity_of;
-use super::{RawCounters, helper_event};
 
-/// Key prefix of the event carrying a model's first exit read in a journal
-/// that lost its oldest segment: the session, model, time and cumulative,
-/// and after the prefix the exit's watermark for the session's own receipts
-/// and the exit's key.
-const TRUNCATED_PREFIX: &str = "copilot-truncated:";
-
-/// Key prefix of the event carrying an exit's cumulative, for the exit keyed
-/// by the rest of the key: the exit itself counts only what's new.
-const CUMULATIVE_PREFIX: &str = "copilot-cumulative:";
-
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct FirstExit {
     pub(super) at: OffsetDateTime,
     pub(super) counters: RawCounters,
@@ -41,50 +31,6 @@ pub(super) fn own_mark(exit: &Value, session_id: Option<&String>) -> Option<u64>
     }
 }
 
-pub(super) fn first_exit(session: &str, model: String, exit: &FirstExit) -> KeyedUsageEvent {
-    let mark = exit.mark.map(|mark| mark.to_string()).unwrap_or_default();
-    let mut event = helper_event(
-        format!("{TRUNCATED_PREFIX}{mark}:{}", exit.key),
-        Some(session.to_owned()),
-        Some(model),
-        exit.at,
-    );
-    event.event.usage = carried(exit.counters);
-    event
-}
-
-pub(super) fn cumulative(exit: &KeyedUsageEvent, counters: RawCounters) -> Option<KeyedUsageEvent> {
-    let key = exit.key.as_ref()?;
-    let mut event = exit.event.clone();
-    event.usage = carried(counters);
-    Some(KeyedUsageEvent {
-        key: Some(format!("{CUMULATIVE_PREFIX}{key}")),
-        event,
-    })
-}
-
-/// Raw, unlike a counted usage, so the reset rule reads what Copilot wrote.
-fn carried(counters: RawCounters) -> TokenUsage {
-    TokenUsage {
-        input_tokens: counters.input,
-        output_tokens: counters.output,
-        reasoning_output_tokens: counters.reasoning,
-        cache_read_input_tokens: counters.cache_read,
-        cache_creation_input_tokens: counters.cache_write,
-        ..TokenUsage::default()
-    }
-}
-
-fn held(usage: &TokenUsage) -> RawCounters {
-    RawCounters {
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        cache_read: usage.cache_read_input_tokens,
-        cache_write: usage.cache_creation_input_tokens,
-        reasoning: usage.reasoning_output_tokens,
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Truncated {
     /// Per session and model, the first exit read in the session's
@@ -93,104 +39,78 @@ pub(super) struct Truncated {
     cumulatives: HashMap<String, RawCounters>,
 }
 
-/// Takes both kinds of event out before anything counts them.
-pub(super) fn take(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Truncated {
+/// A journal missing its oldest segment counts everything of a model
+/// before that model's first exit read in that exit, so copies of the
+/// session's history held by other journals (a fork's) and dated up to
+/// it give way: kept, a fork's copy of a receipt or exit from the missing
+/// segment counted again. The session's own records stay; its receipts
+/// already came off that exit. A copied exit whose cumulative the first
+/// exit's falls below is from an accounting epoch before a reset (the
+/// rule `read_exit` counts exits by), so the first exit doesn't hold it.
+/// A receipt also goes by the session its accounting names: a fork of a
+/// fork made before the first fork's marker files the copy under the
+/// first fork. One the exit's watermark holds is inside it however it's
+/// dated.
+///
+/// Run once the store has settled which exits count: an exit its rows
+/// superseded holds nothing, and its copies dropped against it lost the
+/// usage from before the store.
+pub(super) fn drop_covered_copies(per_file: &mut [(PathBuf, Option<FileEvents>)]) {
     let mut truncated = Truncated::default();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let Some(key) = keyed.key.as_deref() else {
-                return true;
-            };
-            let event = &keyed.event;
-            if let Some(exit) = key.strip_prefix(CUMULATIVE_PREFIX) {
-                truncated
-                    .cumulatives
-                    .insert(exit.to_owned(), held(&event.usage));
-                return false;
-            }
-            let Some(rest) = key.strip_prefix(TRUNCATED_PREFIX) else {
-                return true;
-            };
-            if let (Some(session), Some(model), Some(at), Some((mark, exit_key))) = (
-                &event.session_id,
-                &event.model,
-                event.timestamp,
-                rest.split_once(':'),
-            ) {
-                let exit = FirstExit {
-                    at,
-                    counters: held(&event.usage),
-                    mark: mark.parse().ok(),
-                    key: exit_key.to_owned(),
-                };
-                truncated
-                    .first_exits
-                    .entry(session.clone())
-                    .or_default()
-                    .insert(model.clone(), exit);
-            }
-            false
-        });
+    // Pooled across journals: a first exit standing in any journal that
+    // read it as its first stands for every one of them.
+    let mut standing: HashSet<String> = HashSet::new();
+    for (path, events) in per_file.iter() {
+        let Some((events, summary)) = events
+            .as_ref()
+            .and_then(|events| Some((events, events.copilot.as_ref()?)))
+        else {
+            continue;
+        };
+        // In the order read: a copy of an exit cut from its journal no
+        // longer sets the exit's cumulative.
+        truncated.cumulatives.extend(
+            summary
+                .exits
+                .iter()
+                .map(|exit| (exit.key.clone(), exit.counters)),
+        );
+        let Some(session) = journal(path).filter(|_| !summary.first_exits.is_empty()) else {
+            continue;
+        };
+        let keys: HashSet<&str> = events
+            .usage_events
+            .iter()
+            .filter_map(|keyed| keyed.key.as_deref())
+            .collect();
+        standing.extend(
+            summary
+                .first_exits
+                .iter()
+                .filter(|(_, exit)| keys.contains(exit.key.as_str()))
+                .map(|(_, exit)| exit.key.clone()),
+        );
+        let exits = summary.first_exits.iter().cloned().collect();
+        truncated.first_exits.insert(session.to_owned(), exits);
     }
-    truncated
+    if standing.is_empty() {
+        return;
+    }
+    for models in truncated.first_exits.values_mut() {
+        models.retain(|_, exit| standing.contains(&exit.key));
+    }
+    for (path, events) in per_file.iter_mut() {
+        let Some(events) = events.as_mut() else {
+            continue;
+        };
+        let journal = journal(path);
+        events
+            .usage_events
+            .retain(|keyed| !truncated.covers(journal, keyed));
+    }
 }
 
 impl Truncated {
-    /// A journal missing its oldest segment counts everything of a model
-    /// before that model's first exit read in that exit, so copies of the
-    /// session's history held by other journals (a fork's) and dated up to
-    /// it give way: kept, a fork's copy of a receipt or exit from the missing
-    /// segment counted again. The session's own records stay; its receipts
-    /// already came off that exit. A copied exit whose cumulative the first
-    /// exit's falls below is from an accounting epoch before a reset (the
-    /// rule of `collect_shutdown_usage`), so the first exit doesn't hold it.
-    /// A receipt also goes by the session its accounting names: a fork of a
-    /// fork made before the first fork's marker files the copy under the
-    /// first fork. One the exit's watermark holds is inside it however it's
-    /// dated.
-    ///
-    /// Run once the store has settled which exits count: an exit its rows
-    /// superseded holds nothing, and its copies dropped against it lost the
-    /// usage from before the store.
-    pub(super) fn drop_covered_copies(mut self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-        let mut standing: HashSet<String> = HashSet::new();
-        for (path, events) in per_file.iter() {
-            let (Some(models), Some(events)) = (
-                journal(path).and_then(|session| self.first_exits.get(session)),
-                events,
-            ) else {
-                continue;
-            };
-            for key in events
-                .usage_events
-                .iter()
-                .filter_map(|keyed| keyed.key.as_ref())
-            {
-                if models.values().any(|exit| exit.key == *key) {
-                    standing.insert(key.clone());
-                }
-            }
-        }
-        for models in self.first_exits.values_mut() {
-            models.retain(|_, exit| standing.contains(&exit.key));
-        }
-        if standing.is_empty() {
-            return;
-        }
-        for (path, events) in per_file.iter_mut() {
-            let Some(events) = events.as_mut() else {
-                continue;
-            };
-            let journal = journal(path);
-            events
-                .usage_events
-                .retain(|keyed| !self.covers(journal, keyed));
-        }
-    }
-
     /// By the session a receipt names and by the one it's filed under: an
     /// exit holds the copied receipts read before it whatever they name.
     fn covers(&self, journal: Option<&str>, keyed: &KeyedUsageEvent) -> bool {

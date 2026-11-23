@@ -9,46 +9,82 @@ use crate::collector::ident::ident;
 use crate::model::UsageGranularity;
 
 use super::receipts::source_of;
+use super::summaries;
 
-/// Key prefix of the event carrying a fork's own session and the time of
-/// its fork, taken out by `take_fork_times` before anything else reads the
-/// events.
-pub(super) const FORK_PREFIX: &str = "copilot-fork:";
+/// Each fork's session and the time of its fork: from the fork's own
+/// marker, or failing that the parent's.
+pub(super) struct Forks(HashMap<String, OffsetDateTime>);
 
-/// Likewise, from the parent's marker: used only for a fork whose own
-/// marker isn't read, its journal gone.
-pub(super) const FORKED_INTO_PREFIX: &str = "copilot-forked-into:";
-
-/// A session can't have used anything before it existed: a fork's usage
-/// dated up to its fork is a copy of its parent's history, whether or not a
-/// marker named the parent. Only a receipt naming another session as its
-/// source stays, for that source to decide. The store's rows get the same
-/// cut when they are read.
-pub(super) fn drop_before_fork(
-    per_file: &mut [(PathBuf, Option<FileEvents>)],
-    forked: &HashMap<String, OffsetDateTime>,
-) {
-    if forked.is_empty() {
-        return;
+impl Forks {
+    pub(super) fn read(per_file: &[(PathBuf, Option<FileEvents>)]) -> Self {
+        let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
+        let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
+        for summary in summaries(per_file) {
+            for (forks, found) in [
+                (&mut own, &summary.forks),
+                (&mut named, &summary.forked_into),
+            ] {
+                for (session, time) in found {
+                    forks
+                        .entry(session.clone())
+                        .and_modify(|at| *at = (*at).max(*time))
+                        .or_insert(*time);
+                }
+            }
+        }
+        for (fork, at) in named {
+            own.entry(fork).or_insert(at);
+        }
+        Self(own)
     }
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let (Some(session), Some(time)) =
-                (keyed.event.session_id.as_deref(), keyed.event.timestamp)
-            else {
-                return true;
-            };
-            let named_elsewhere = keyed.event.granularity == UsageGranularity::Call
-                && keyed
-                    .key
+
+    /// A session can't have used anything before it existed: a fork's
+    /// record dated up to its fork is a copy of its parent's history,
+    /// whether or not a marker named the parent. The store's rows and the
+    /// exit marks get the same cut.
+    pub(super) fn copied(&self, session: &str, time: OffsetDateTime) -> bool {
+        self.0.get(session).is_some_and(|fork| time <= *fork)
+    }
+
+    /// Only a receipt naming another session as its source stays, for that
+    /// source to decide.
+    pub(super) fn drop_copies(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+        if self.0.is_empty() {
+            return;
+        }
+        for events in per_file
+            .iter_mut()
+            .filter_map(|(_, events)| events.as_mut())
+        {
+            // Only the rest: the reset rule reads the cumulatives before this cut.
+            for exit in events
+                .copilot
+                .iter_mut()
+                .flat_map(|summary| &mut summary.exits)
+            {
+                if exit
+                    .session
                     .as_deref()
-                    .and_then(source_of)
-                    .is_some_and(|source| source != session);
-            named_elsewhere || forked.get(session).is_none_or(|fork| time > *fork)
-        });
+                    .is_some_and(|session| self.copied(session, exit.at))
+                {
+                    exit.rest = None;
+                }
+            }
+            events.usage_events.retain(|keyed| {
+                let (Some(session), Some(time)) =
+                    (keyed.event.session_id.as_deref(), keyed.event.timestamp)
+                else {
+                    return true;
+                };
+                let named_elsewhere = keyed.event.granularity == UsageGranularity::Call
+                    && keyed
+                        .key
+                        .as_deref()
+                        .and_then(source_of)
+                        .is_some_and(|source| source != session);
+                named_elsewhere || !self.copied(session, time)
+            });
+        }
     }
 }
 
@@ -114,43 +150,6 @@ fn session_ref(text: &str) -> Option<(&str, &str)> {
     };
     let valid = !id.is_empty() && !id.contains(char::is_whitespace);
     Some((ident(id).filter(|_| valid)?, rest))
-}
-
-/// Each fork's session and the time of its fork, taken out of the events:
-/// from the fork's own marker, or failing that the parent's.
-pub(super) fn take_fork_times(
-    per_file: &mut [(PathBuf, Option<FileEvents>)],
-) -> HashMap<String, OffsetDateTime> {
-    let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
-    let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let key = keyed.key.as_deref().unwrap_or_default();
-            let forks = if key.starts_with(FORK_PREFIX) {
-                &mut own
-            } else if key.starts_with(FORKED_INTO_PREFIX) {
-                &mut named
-            } else {
-                return true;
-            };
-            if let (Some(session), Some(time)) =
-                (keyed.event.session_id.clone(), keyed.event.timestamp)
-            {
-                forks
-                    .entry(session)
-                    .and_modify(|at| *at = (*at).max(time))
-                    .or_insert(time);
-            }
-            false
-        });
-    }
-    for (fork, at) in named {
-        own.entry(fork).or_insert(at);
-    }
-    own
 }
 
 #[cfg(test)]
@@ -939,6 +938,118 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 130);
+    }
+
+    /// One journal holding the same shutdown twice, the second copy dated
+    /// before the journal's start: that copy goes, and the exit that stands
+    /// counts what its own receipts left of it, not what the copy's did.
+    #[test]
+    fn a_shutdown_read_twice_counts_the_rest_of_the_copy_that_stands() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "solo",
+            &lines(&[
+                fork_start("solo", "2026-07-27T10:00:00.000Z"),
+                receipt("2026-07-27T10:05:00.000Z", "solo", 1, 27, 3),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:10:00.000Z", 90, 10),
+                    r#"{"solo":1}"#,
+                ),
+                receipt("2026-07-27T09:50:00.000Z", "solo", 2, 18, 2),
+                marked(
+                    &shutdown("e-1", "2026-07-27T09:55:00.000Z", 135, 15),
+                    r#"{"solo":2}"#,
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
+    }
+
+    /// Two truncated journals whose first exits share an id: the copy left
+    /// with nothing to count still holds the fork's history, because the
+    /// parent's copy of that exit stands.
+    #[test]
+    fn a_first_exit_standing_in_any_journal_covers_its_copies() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 90, 10),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                journal_link("fork", "2026-07-27T10:20:00.000Z"),
+                receipt("2026-07-27T10:30:00.000Z", "fork", 1, 90, 10),
+                marked(
+                    &shutdown("e-2", "2026-07-27T11:00:00.000Z", 90, 10),
+                    r#"{"fork":1}"#,
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "nested",
+            &lines(&[
+                fork_start("nested", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 45, 5),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from fork as nested.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// The review's case: a copy of an exit read again in a block an
+    /// unreadable marker then discards leaves the copy that stands with its
+    /// own cumulative, which the parent's first exit holds.
+    #[test]
+    fn a_discarded_copy_of_an_exit_doesnt_set_its_cumulative() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T11:00:00.000Z"),
+                shutdown("e-p", "2026-07-27T12:00:00.000Z", 90, 10),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                shutdown("x", "2026-07-27T09:00:00.000Z", 45, 5),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:00:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+                shutdown("x", "2026-07-27T10:30:00.000Z", 180, 20),
+                fork_info("m-2", "2026-07-27T11:00:00.000Z", r#"Forked from "broken"#),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
     }
 
     /// A session can't have used anything before it existed: a fork's

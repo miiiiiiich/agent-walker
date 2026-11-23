@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::model::{SourceKind, TokenUsage};
 
 use super::CostStateRow;
-use super::spread::at_least;
+use super::spread::{at_least, subtract};
 use super::transcript::Call;
 
 struct Discount<'a> {
@@ -184,26 +184,4 @@ fn made_after_shared(calls: &[Call], base: &CostStateRow, fork_keys: &HashSet<&s
         .filter_map(|call| call.timestamp)
         .filter(|&at| at > last_shared && base.covers(at))
         .count()
-}
-
-fn subtract(usage: &mut TokenUsage, carried: &TokenUsage) {
-    let less = |field: &mut u64, by: u64| *field = field.saturating_sub(by);
-    less(&mut usage.input_tokens, carried.input_tokens);
-    less(&mut usage.output_tokens, carried.output_tokens);
-    less(
-        &mut usage.cache_creation_input_tokens,
-        carried.cache_creation_input_tokens,
-    );
-    less(
-        &mut usage.cache_read_input_tokens,
-        carried.cache_read_input_tokens,
-    );
-    less(
-        &mut usage.cache_creation_ephemeral_5m_input_tokens,
-        carried.cache_creation_ephemeral_5m_input_tokens,
-    );
-    less(
-        &mut usage.cache_creation_ephemeral_1h_input_tokens,
-        carried.cache_creation_ephemeral_1h_input_tokens,
-    );
 }

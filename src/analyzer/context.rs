@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use time::{Date, Duration, OffsetDateTime, UtcOffset};
 
-use crate::cost::pricing_for;
+use crate::cost::{pricing_for, write_split};
 use crate::model::{
     Collection, ContextBand, ContextReason, ContextSummary, Provider, SourceKind, UsageEvent,
     UsageGranularity,
@@ -113,20 +113,8 @@ struct CallAccount {
 fn account_call(event: &UsageEvent) -> CallAccount {
     let usage = &event.usage;
     let m = multipliers(event.model.as_deref());
-    // The 5m/1h split comes from untrusted logs; the same validation as
-    // `cost::estimate`: a missing, broken, or overflowing split prices every
-    // write at the 5m rate, so this panel and COST agree on the same row.
-    let split = usage
-        .cache_creation_ephemeral_5m_input_tokens
-        .checked_add(usage.cache_creation_ephemeral_1h_input_tokens);
-    let (short_writes, long_writes) = match split {
-        Some(split) if split > 0 && split <= usage.cache_creation_input_tokens => (
-            usage.cache_creation_ephemeral_5m_input_tokens
-                + (usage.cache_creation_input_tokens - split),
-            usage.cache_creation_ephemeral_1h_input_tokens,
-        ),
-        _ => (usage.cache_creation_input_tokens, 0),
-    };
+    // COST's split, so this panel and COST agree on the same row.
+    let (short_writes, long_writes) = write_split(usage);
     // Counters come from untrusted logs: a poisoned row saturates instead
     // of wrapping (release) or panicking (debug).
     let uncached = usage

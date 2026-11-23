@@ -195,7 +195,7 @@ fn replace_loaded(snapshot: Option<Snapshot>) {
     }
 }
 
-fn normalize(model_name: &str) -> String {
+pub(crate) fn normalize(model_name: &str) -> String {
     let lower = model_name.to_ascii_lowercase();
     let no_deploy = lower
         .split_once('[')
@@ -291,32 +291,25 @@ fn is_date_suffix(suffix: &str) -> bool {
     let (date, revision) = suffix
         .split_once("-v")
         .map_or((suffix, None), |(date, revision)| (date, Some(revision)));
-    is_date(date.as_bytes()) && revision.is_none_or(is_revision)
+    calendar_date(date.as_bytes()).is_some() && revision.is_none_or(is_revision)
 }
 
 /// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD` that is a day on the calendar, so a
 /// four-digit size (`-4096`) or a day the month lacks (`20260231`) is not
 /// taken for one. A yearless date is checked in a leap year, so `0229` is one.
-fn is_date(text: &[u8]) -> bool {
+fn calendar_date(text: &[u8]) -> Option<time::Date> {
     const LEAP_YEAR: [u8; 4] = *b"2000";
     let (year, month, day) = match text {
         [m1, m2, d1, d2] => (LEAP_YEAR, [*m1, *m2], [*d1, *d2]),
         [y1, y2, y3, y4, m1, m2, d1, d2] | [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] => {
             ([*y1, *y2, *y3, *y4], [*m1, *m2], [*d1, *d2])
         }
-        _ => return false,
+        _ => return None,
     };
-    let (Some(year), Some(month), Some(day)) = (number(&year), number(&month), number(&day)) else {
-        return false;
-    };
-    let (Ok(year), Ok(month), Ok(day)) =
-        (i32::try_from(year), u8::try_from(month), u8::try_from(day))
-    else {
-        return false;
-    };
-    time::Month::try_from(month)
-        .and_then(|month| time::Date::from_calendar_date(year, month, day))
-        .is_ok()
+    let year = i32::try_from(number(&year)?).ok()?;
+    let month = time::Month::try_from(u8::try_from(number(&month)?).ok()?).ok()?;
+    let day = u8::try_from(number(&day)?).ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
 }
 
 /// A `v<major>:<minor>` revision, its leading `v` already cut.
@@ -360,25 +353,29 @@ fn priced(
     reason = "Token counts are far below 2^52; estimate precision is dominated by pricing anyway."
 )]
 fn cost_at(rates: &Pricing, usage: &TokenUsage) -> f64 {
-    // The 5m/1h split comes from untrusted logs; if it is absent, broken, or
-    // would overflow, fall back to pricing every write at the 5m rate.
+    let (write_short, write_long) = write_split(usage);
+    usage.input_tokens as f64 * rates.input
+        + usage.output_tokens as f64 * rates.output
+        + usage.cache_read_input_tokens as f64 * rates.cache_read
+        + write_short as f64 * rates.cache_write_5m
+        + write_long as f64 * rates.cache_write_1h
+}
+
+/// The cache writes at the 5m and the 1h rate. The split comes from
+/// untrusted logs; if it is absent, broken, or would overflow, every write
+/// is at the 5m rate.
+pub fn write_split(usage: &TokenUsage) -> (u64, u64) {
     let split = usage
         .cache_creation_ephemeral_5m_input_tokens
         .checked_add(usage.cache_creation_ephemeral_1h_input_tokens);
-    let (write_short, write_long) = match split {
+    match split {
         Some(split) if split > 0 && split <= usage.cache_creation_input_tokens => (
             usage.cache_creation_ephemeral_5m_input_tokens
                 + (usage.cache_creation_input_tokens - split),
             usage.cache_creation_ephemeral_1h_input_tokens,
         ),
         _ => (usage.cache_creation_input_tokens, 0),
-    };
-
-    usage.input_tokens as f64 * rates.input
-        + usage.output_tokens as f64 * rates.output
-        + usage.cache_read_input_tokens as f64 * rates.cache_read
-        + write_short as f64 * rates.cache_write_5m
-        + write_long as f64 * rates.cache_write_1h
+    }
 }
 
 /// Price one usage event, at the rates of the options it was billed with.
@@ -440,6 +437,17 @@ pub(crate) mod tests {
         assert!((real_dot.input - 0.5 / 1e6).abs() < f64::EPSILON);
     }
 
+    fn flat(base: Pricing) -> ModelPricing {
+        ModelPricing {
+            base,
+            long_context: None,
+            priority: None,
+            ultrafast: None,
+            fast: None,
+            us: None,
+        }
+    }
+
     pub(crate) fn install_test_pricing() {
         let per_mtok =
             |input: f64, output: f64, cache_write_5m: f64, cache_write_1h: f64| Pricing {
@@ -449,14 +457,6 @@ pub(crate) mod tests {
                 cache_write_5m: cache_write_5m / 1e6,
                 cache_write_1h: cache_write_1h / 1e6,
             };
-        let flat = |base: Pricing| ModelPricing {
-            base,
-            long_context: None,
-            priority: None,
-            ultrafast: None,
-            fast: None,
-            us: None,
-        };
         let openai = |input: f64, output: f64, cache_read: f64| Pricing {
             input: input / 1e6,
             output: output / 1e6,
@@ -484,15 +484,11 @@ pub(crate) mod tests {
                 (
                     "claude-haiku-5-5".to_owned(),
                     ModelPricing {
-                        base: per_mtok(0.1, 0.5, 0.125, 0.2),
                         long_context: Some(LongContext {
                             above_prompt_tokens: 100_000,
                             rates: per_mtok(0.5, 2.5, 0.625, 1.0),
                         }),
-                        priority: None,
-                        ultrafast: None,
-                        fast: None,
-                        us: None,
+                        ..flat(per_mtok(0.1, 0.5, 0.125, 0.2))
                     },
                 ),
                 (
@@ -504,15 +500,11 @@ pub(crate) mod tests {
                 (
                     "gpt-6.1-sol".to_owned(),
                     ModelPricing {
-                        base: openai(2.0, 10.0, 0.1),
                         long_context: Some(LongContext {
                             above_prompt_tokens: 272_000,
                             rates: openai(4.0, 15.0, 0.2),
                         }),
-                        priority: None,
-                        ultrafast: None,
-                        fast: None,
-                        us: None,
+                        ..flat(openai(2.0, 10.0, 0.1))
                     },
                 ),
                 // Off the real rates, which equal gpt-6.1-sol's: the
@@ -542,20 +534,13 @@ pub(crate) mod tests {
             format: SNAPSHOT_FORMAT,
             models: HashMap::from([(
                 "claude-sonnet-4-5".to_owned(),
-                ModelPricing {
-                    base: Pricing {
-                        input: 3e-6,
-                        output: 1.5e-5,
-                        cache_read: 3e-7,
-                        cache_write_5m: 3.75e-6,
-                        cache_write_1h: 6e-6,
-                    },
-                    long_context: None,
-                    priority: None,
-                    ultrafast: None,
-                    fast: None,
-                    us: None,
-                },
+                flat(Pricing {
+                    input: 3e-6,
+                    output: 1.5e-5,
+                    cache_read: 3e-7,
+                    cache_write_5m: 3.75e-6,
+                    cache_write_1h: 6e-6,
+                }),
             )]),
             resolved: RwLock::default(),
         };

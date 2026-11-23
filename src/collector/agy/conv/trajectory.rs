@@ -26,17 +26,14 @@ pub(in crate::collector::agy) fn trajectory_meta(
     if !store.has_table("trajectory_metadata_blob", &["data"]) {
         return Trajectory::default();
     }
-    let blob: Option<Vec<u8>> = store
-        .query_row(
-            "SELECT data FROM trajectory_metadata_blob LIMIT 1",
-            [],
-            |row| {
-                store.charge(row, 1)?;
-                row.get(0)
-            },
-        )
-        .ok();
-    let Some(blob) = blob else {
+    let Ok(blob) = store.query_row(
+        "SELECT data FROM trajectory_metadata_blob LIMIT 1",
+        [],
+        |row| {
+            store.charge(row, 1)?;
+            row.get::<_, Vec<u8>>(0)
+        },
+    ) else {
         return Trajectory::default();
     };
     let started_ms = message_field(&blob, 2)
@@ -84,13 +81,7 @@ fn file_uri_to_path(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lenf(field: u64, payload: &[u8]) -> Vec<u8> {
-        let mut out = vec![u8::try_from(field << 3 | 2).expect("small field")];
-        out.push(u8::try_from(payload.len()).expect("short payload"));
-        out.extend_from_slice(payload);
-        out
-    }
+    use crate::collector::agy::conv::tests::lenf;
 
     #[test]
     fn windows_file_uri_drops_the_drive_slash() {

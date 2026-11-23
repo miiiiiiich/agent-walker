@@ -6,11 +6,6 @@ use crate::model::{TokenUsage, UsageGranularity};
 
 use super::receipts::source_of;
 
-/// Key prefix of an exit less its journal's own receipts, for the exit keyed
-/// by the rest of the key. Stripped here, before anything else reads the
-/// events.
-pub(super) const REST_PREFIX: &str = "copilot-rest:";
-
 /// One source per session that made calls. On the store, its rows and its
 /// exits count and its receipts don't; otherwise its receipts count and its
 /// exits only for what they didn't carry. A session is on the store with a
@@ -71,28 +66,18 @@ pub(super) fn choose_sources(
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
     {
-        let mut rest: HashMap<String, TokenUsage> = HashMap::new();
-        events.usage_events.retain(|keyed| {
-            let Some(exit) = keyed
-                .key
-                .as_deref()
-                .and_then(|key| key.strip_prefix(REST_PREFIX))
-            else {
-                return true;
-            };
-            if keyed
-                .event
-                .session_id
-                .as_ref()
-                .is_some_and(|sid| !on_store(sid))
-            {
-                rest.insert(exit.to_owned(), keyed.event.usage.clone());
-            }
-            false
-        });
-        for keyed in &mut events.usage_events {
-            if let Some(rest) = keyed.key.as_ref().and_then(|key| rest.get(key)) {
-                keyed.event.usage = rest.clone();
+        if let Some(summary) = &events.copilot {
+            // In the order read, so the last rest standing for a key wins.
+            let rests: HashMap<&str, &TokenUsage> = summary
+                .exits
+                .iter()
+                .filter(|exit| exit.session.as_deref().is_some_and(|sid| !on_store(sid)))
+                .filter_map(|exit| Some((exit.key.as_str(), exit.rest.as_ref()?)))
+                .collect();
+            for keyed in &mut events.usage_events {
+                if let Some(rest) = keyed.key.as_deref().and_then(|key| rests.get(key)) {
+                    keyed.event.usage = (*rest).clone();
+                }
             }
         }
         events

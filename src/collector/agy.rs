@@ -76,9 +76,6 @@ pub fn collect(
 /// so a line naming a subagent conversation is moved to its top-level session
 /// here, the way its generations are.
 fn attribute_subagents(collection: &mut Collection, subagents: &HashMap<String, conv::Subagent>) {
-    if subagents.is_empty() {
-        return;
-    }
     for touch in &mut collection.session_touches {
         if let Some(subagent) = subagents.get(&touch.session_id) {
             touch.session_id.clone_from(&subagent.session_id);

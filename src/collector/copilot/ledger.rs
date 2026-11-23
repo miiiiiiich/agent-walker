@@ -12,52 +12,10 @@ use crate::collector::{FileEvents, KeyedUsageEvent, project_from_cwd};
 use crate::model::{Collection, SessionTouch, SourceKind, UsageEvent, UsageGranularity};
 use crate::timestamp::{parse_rfc3339, plausible};
 
-use super::{MAX_SANE_TOKENS, RawCounters};
+use super::forks::Forks;
+use super::{MAX_SANE_TOKENS, RawCounters, summaries};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
-
-/// Key prefix of a journal's mark of a model's latest exit with usable
-/// counters, taken out by `take_exit_marks` before anything else reads the
-/// events.
-pub(super) const EXIT_PREFIX: &str = "copilot-exit:";
-
-/// Exits by session and model: the latest with usable counters, zero deltas
-/// included.
-pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
-
-/// Each session's and model's latest exit mark, taken out of the events.
-pub(super) fn take_exit_marks(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Exits {
-    let mut exits: Exits = HashMap::new();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            if !keyed
-                .key
-                .as_deref()
-                .is_some_and(|key| key.starts_with(EXIT_PREFIX))
-            {
-                return true;
-            }
-            let event = &keyed.event;
-            if let (Some(sid), Some(model), Some(time)) = (
-                event.session_id.as_ref(),
-                event.model.as_ref(),
-                event.timestamp,
-            ) {
-                exits
-                    .entry(sid.clone())
-                    .or_default()
-                    .entry(model.clone())
-                    .and_modify(|exit| *exit = (*exit).max(time))
-                    .or_insert(time);
-            }
-            false
-        });
-    }
-    exits
-}
 
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
 /// session's first live row on, as a copy of a live one; the store's
@@ -66,11 +24,17 @@ const LIVE_SLACK: Duration = Duration::seconds(60);
 
 #[derive(Default)]
 pub(super) struct CallLedger {
-    pub(super) events: FileEvents,
-    first_call: HashMap<String, OffsetDateTime>,
-    first_live: HashMap<String, OffsetDateTime>,
-    /// Caught-up rows kept beside the live ones: session and key.
-    caught_up: Vec<(String, Option<String>)>,
+    /// The rows' touches and read statistics; their calls join at the end.
+    events: FileEvents,
+    /// Every readable row past its session's fork in the order read, those
+    /// with no tokens too: they still show where a session's calls are kept.
+    rows: Vec<Row>,
+    /// Each session with a readable live row, from 60 s before the first.
+    live_from: HashMap<String, OffsetDateTime>,
+    /// The call keys of the caught-up rows admitted. Rows go by call key, so
+    /// a row sharing one with a caught-up row goes with it, and falls back as
+    /// caught up.
+    caught_up: HashSet<String>,
     /// Sessions that fell back to their exits, which then all count.
     fallback: HashSet<String>,
     /// Sessions with at least one row that couldn't be read.
@@ -79,116 +43,134 @@ pub(super) struct CallLedger {
     unattributed: bool,
 }
 
-struct CaughtUp {
+struct Row {
     session: String,
     time: OffsetDateTime,
-    key: Option<String>,
+    /// Recorded as the call was made, not caught up from a receipt later.
+    live: bool,
+    call: Option<KeyedUsageEvent>,
+}
+
+impl Row {
+    fn key(&self) -> Option<&String> {
+        self.call.as_ref()?.key.as_ref()
+    }
+}
+
+fn keys<'a>(rows: impl Iterator<Item = &'a Row>) -> HashSet<String> {
+    rows.filter_map(Row::key).cloned().collect()
+}
+
+/// A row goes with its call key, as calls go by key: another row holding
+/// the key loses its call too, and stays as evidence of where its
+/// session's calls are kept.
+fn drop_rows(rows: &mut Vec<Row>, gone: impl Fn(&Row) -> bool) {
+    let keys = keys(rows.iter().filter(|row| gone(row)));
+    rows.retain(|row| !gone(row));
+    for row in rows {
+        if row.key().is_some_and(|key| keys.contains(key)) {
+            row.call = None;
+        }
+    }
 }
 
 impl CallLedger {
     /// Copilot's own cut: a caught-up row dated from its session's first
     /// live row (less the slack) on is a copy of a live one.
-    fn admit_catch_up(&mut self, caught_up: Vec<CaughtUp>) {
-        let mut copies: HashSet<String> = HashSet::new();
-        for row in caught_up {
-            let copy = self
-                .first_live
-                .get(&row.session)
-                .is_some_and(|live| row.time >= live.checked_sub(LIVE_SLACK).unwrap_or(*live));
-            if copy {
-                copies.extend(row.key);
-            } else {
-                earliest(&mut self.first_call, &row.session, row.time);
-                self.caught_up.push((row.session, row.key));
-            }
+    fn admit_catch_up(&mut self) {
+        for from in self.live_from.values_mut() {
+            *from = from.checked_sub(LIVE_SLACK).unwrap_or(*from);
         }
-        drop_keys(&mut self.events, &copies);
+        let live_from = &self.live_from;
+        let copy = |row: &Row| {
+            !row.live
+                && live_from
+                    .get(&row.session)
+                    .is_some_and(|from| row.time >= *from)
+        };
+        self.caught_up = keys(self.rows.iter().filter(|row| !row.live && !copy(row)));
+        drop_rows(&mut self.rows, copy);
     }
 
-    /// Superseding a session's snapshots from its readable rows alone would
-    /// lose an unreadable row's usage that a snapshot covers, so such a
-    /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit covering something new for it (`exits`) stay,
-    /// live rows only from 60 s after it: the snapshots cover everything up
-    /// to it, and dropping the later rows would lose every call since that
-    /// exit. Cut per model: cutting every model's rows at one exit took those
-    /// of a model whose counters it lacked.
-    pub(super) fn fall_back_where_incomplete(&mut self, exits: &Exits) {
-        if self.incomplete.is_empty() && !self.unattributed {
-            return;
-        }
-        let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
-        let caught_up: HashSet<&str> = self
-            .caught_up
+    /// Sessions with a readable live row, whose calls the store recorded as
+    /// they were made, and those it knows only through caught-up rows.
+    pub(super) fn sessions(&self) -> (HashSet<String>, HashSet<String>) {
+        let caught_up = self
+            .rows
             .iter()
-            .filter_map(|(_, key)| key.as_deref())
+            .filter(|row| !self.live_from.contains_key(&row.session))
+            .map(|row| row.session.clone())
             .collect();
-        self.events.usage_events.retain(|keyed| {
-            let event = &keyed.event;
-            let (Some(sid), Some(model), Some(time)) = (
-                event.session_id.as_ref(),
-                event.model.as_ref(),
-                event.timestamp,
-            ) else {
-                return true;
-            };
-            // A live row stamped just after the exit can be a call that exit
-            // covers, as on the store side: kept, it counted beside the exit.
-            let live = keyed
-                .key
-                .as_deref()
-                .is_none_or(|key| !caught_up.contains(key));
-            exits
-                .get(sid)
-                .filter(|_| falls_back(sid))
-                .and_then(|models| models.get(model))
-                .is_none_or(|exit| {
-                    let covered_to = if live {
-                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
-                    } else {
-                        *exit
-                    };
-                    time > covered_to
-                })
-        });
-        self.fallback = exits
-            .keys()
-            .filter(|sid| falls_back(sid))
-            .cloned()
-            .collect();
-    }
-
-    /// Sessions with a readable live row: the store recorded their calls as
-    /// they were made.
-    pub(super) fn live_sessions(&self) -> HashSet<String> {
-        self.first_live.keys().cloned().collect()
-    }
-
-    /// Sessions the store knows only through caught-up rows.
-    pub(super) fn caught_up_sessions(&self) -> HashSet<String> {
-        self.caught_up
-            .iter()
-            .filter(|(session, _)| !self.first_live.contains_key(session))
-            .map(|(session, _)| session.clone())
-            .collect()
+        (self.live_from.keys().cloned().collect(), caught_up)
     }
 
     /// Drops the caught-up rows of sessions that take their calls from the
     /// receipts those rows copy, and with them the store's claim to cover
     /// those sessions' exits.
     pub(super) fn ignore_caught_up(&mut self, sessions: &HashSet<String>) {
-        if sessions.is_empty() {
+        drop_rows(&mut self.rows, |row| {
+            !row.live && sessions.contains(&row.session)
+        });
+    }
+
+    /// Superseding a session's snapshots from its readable rows alone would
+    /// lose an unreadable row's usage that a snapshot covers, so such a
+    /// session keeps its snapshots. Of a model's readable rows only those
+    /// after the latest exit covering something new for it stay, live rows
+    /// only from 60 s after it: the snapshots cover everything up to it, and
+    /// dropping the later rows would lose every call since that exit. Cut
+    /// per model: cutting every model's rows at one exit took those of a
+    /// model whose counters it lacked. A fork's exits up to its fork are its
+    /// parent's history, like its usage then.
+    pub(super) fn fall_back_where_incomplete(
+        &mut self,
+        per_file: &[(PathBuf, Option<FileEvents>)],
+        forks: &Forks,
+    ) {
+        if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
-        let keys: HashSet<String> = self
-            .caught_up
-            .iter()
-            .filter(|(session, _)| sessions.contains(session))
-            .filter_map(|(_, key)| key.clone())
+        let mut exits: HashMap<&str, HashMap<&str, OffsetDateTime>> = HashMap::new();
+        for (session, model, time) in summaries(per_file).flat_map(|summary| &summary.exit_marks) {
+            if !forks.copied(session, *time) {
+                exits
+                    .entry(session)
+                    .or_default()
+                    .entry(model)
+                    .and_modify(|exit| *exit = (*exit).max(*time))
+                    .or_insert(*time);
+            }
+        }
+        let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
+        let caught_up = &self.caught_up;
+        self.rows.retain(|row| {
+            let Some((key, model)) = row
+                .call
+                .as_ref()
+                .and_then(|call| Some((call.key.as_ref()?, call.event.model.as_ref()?)))
+            else {
+                return true;
+            };
+            // A live row stamped just after the exit can be a call that exit
+            // covers, as on the store side: kept, it counted beside the exit.
+            exits
+                .get(row.session.as_str())
+                .filter(|_| falls_back(&row.session))
+                .and_then(|models| models.get(model.as_str()))
+                .is_none_or(|exit| {
+                    let covered_to = if caught_up.contains(key) {
+                        *exit
+                    } else {
+                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
+                    };
+                    row.time > covered_to
+                })
+        });
+        self.fallback = exits
+            .keys()
+            .map(|sid| (*sid).to_owned())
+            .filter(|sid| falls_back(sid))
             .collect();
-        drop_keys(&mut self.events, &keys);
-        self.first_call
-            .retain(|session, _| !sessions.contains(session));
     }
 
     /// From a session's first recorded call on, or 60 s before its first
@@ -201,29 +183,35 @@ impl CallLedger {
     /// settled them, and one that counts can sit in a journal whose session
     /// has rows.
     pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+        let mut covered_from: HashMap<String, OffsetDateTime> = HashMap::new();
+        for row in &self.rows {
+            if !self.fallback.contains(&row.session) {
+                let from = self.live_from.get(&row.session).copied();
+                earliest(
+                    &mut covered_from,
+                    &row.session,
+                    from.map_or(row.time, |from| row.time.min(from)),
+                );
+            }
+        }
         let mut superseded: HashSet<String> = HashSet::new();
         for events in per_file
             .iter_mut()
             .filter_map(|(_, events)| events.as_mut())
         {
             events.usage_events.retain(|keyed| {
-                let Some(sid) = keyed.event.session_id.as_ref() else {
+                let Some(from) = keyed
+                    .event
+                    .session_id
+                    .as_ref()
+                    .and_then(|sid| covered_from.get(sid))
+                else {
                     return true;
                 };
-                if keyed.event.granularity == UsageGranularity::Call || self.fallback.contains(sid)
-                {
+                if keyed.event.granularity == UsageGranularity::Call {
                     return true;
                 }
-                let Some(first) = self.first_call.get(sid) else {
-                    return true;
-                };
-                let covered_from = self.first_live.get(sid).map_or(*first, |live| {
-                    (*first).min(live.checked_sub(LIVE_SLACK).unwrap_or(*live))
-                });
-                let before_store = keyed
-                    .event
-                    .timestamp
-                    .is_some_and(|time| time < covered_from);
+                let before_store = keyed.event.timestamp.is_some_and(|time| time < *from);
                 if !before_store && let Some(key) = &keyed.key {
                     superseded.insert(key.clone());
                 }
@@ -237,18 +225,19 @@ impl CallLedger {
             .iter_mut()
             .filter_map(|(_, events)| events.as_mut())
         {
-            drop_keys(events, &superseded);
+            events.usage_events.retain(|keyed| {
+                keyed
+                    .key
+                    .as_ref()
+                    .is_none_or(|key| !superseded.contains(key))
+            });
         }
     }
-}
 
-fn drop_keys(events: &mut FileEvents, keys: &HashSet<String>) {
-    if keys.is_empty() {
-        return;
+    pub(super) fn into_events(mut self) -> FileEvents {
+        self.events.usage_events = self.rows.into_iter().filter_map(|row| row.call).collect();
+        self.events
     }
-    events
-        .usage_events
-        .retain(|keyed| keyed.key.as_ref().is_none_or(|key| !keys.contains(key)));
 }
 
 fn earliest(firsts: &mut HashMap<String, OffsetDateTime>, session: &str, time: OffsetDateTime) {
@@ -294,14 +283,13 @@ struct CallRow {
 }
 
 /// Without both tables there is no ledger, as with a CLI that predates it.
-/// A fork's rows dated up to its fork, in `forked`, aren't read: it can't
-/// have made a call before it existed, so they copy the parent's history,
-/// whether the CLI caught them up from the copied receipts or the store
-/// copied them, and the parent's own records count those calls.
+/// A fork's rows dated up to its fork aren't read: whether the CLI caught
+/// them up from the copied receipts or the store copied them, they repeat
+/// the parent's history, and the parent's own records count those calls.
 pub(super) fn read_call_ledger(
     path: &Path,
     local_offset: UtcOffset,
-    forked: &HashMap<String, OffsetDateTime>,
+    forks: &Forks,
     collection: &mut Collection,
 ) -> Option<CallLedger> {
     if !path.is_file() {
@@ -335,7 +323,6 @@ pub(super) fn read_call_ledger(
         .ok()?;
 
     let mut ledger = CallLedger::default();
-    let mut caught_up: Vec<CaughtUp> = Vec::new();
     for row in rows {
         ledger.events.lines_seen += 1;
         let Ok((session_id, call)) = row else {
@@ -359,36 +346,22 @@ pub(super) fn read_call_ledger(
             }
             continue;
         };
-        if forked
-            .get(&row.session_id)
-            .is_some_and(|fork| timestamp <= *fork)
-        {
+        if forks.copied(&row.session_id, timestamp) {
             continue;
         }
         ledger.events.session_touches.push(SessionTouch {
             timestamp,
             session_id: row.session_id.clone(),
         });
-        let usage = row.counters.to_usage();
-        let key = (usage.token_volume() > 0).then(|| format!("copilot-call:{}", row.id));
-        if row.catch_up {
-            caught_up.push(CaughtUp {
-                session: row.session_id.clone(),
-                time: timestamp,
-                key: key.clone(),
-            });
-        } else {
-            earliest(&mut ledger.first_live, &row.session_id, timestamp);
-            earliest(&mut ledger.first_call, &row.session_id, timestamp);
+        if !row.catch_up {
+            earliest(&mut ledger.live_from, &row.session_id, timestamp);
         }
-        let Some(key) = key else {
-            continue;
-        };
-        ledger.events.usage_events.push(KeyedUsageEvent {
-            key: Some(key),
+        let usage = row.counters.to_usage();
+        let call = (usage.token_volume() > 0).then(|| KeyedUsageEvent {
+            key: Some(format!("copilot-call:{}", row.id)),
             event: UsageEvent {
                 timestamp: Some(timestamp),
-                session_id: Some(row.session_id),
+                session_id: Some(row.session_id.clone()),
                 model: Some(row.model),
                 source_kind: if row.subagent {
                     SourceKind::Subagent
@@ -399,12 +372,18 @@ pub(super) fn read_call_ledger(
                 attribution_skill: None,
                 project: row.cwd.as_deref().and_then(project_from_cwd),
                 usage,
-                granularity: crate::model::UsageGranularity::Call,
+                granularity: UsageGranularity::Call,
                 billing: crate::model::Billing::default(),
             },
         });
+        ledger.rows.push(Row {
+            session: row.session_id,
+            time: timestamp,
+            live: !row.catch_up,
+            call,
+        });
     }
-    ledger.admit_catch_up(caught_up);
+    ledger.admit_catch_up();
     ledger.events.compress_touches(local_offset);
     Some(ledger)
 }
@@ -532,6 +511,71 @@ pub(super) mod tests {
             )
             .expect("usage row should insert");
         }
+    }
+
+    /// A live row sharing its id with a caught-up row reads as caught up
+    /// where a session falls back, so the 60 s after the exit don't take it.
+    #[test]
+    fn a_live_row_sharing_a_caught_up_id_falls_back_as_caught_up() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!("{}\n", shutdown("e-1", "2026-07-28T00:00:00.000Z", 450, 50)),
+        );
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT, cwd TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER, session_id TEXT, turn_index INTEGER, agent_id TEXT, model TEXT,
+                 input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER, reasoning_tokens INTEGER, total_nano_aiu INTEGER,
+                 initiator TEXT, created_at TEXT, event_id TEXT);
+             INSERT INTO sessions VALUES ('s1', '/Users/me/code/app'), ('s2', '/Users/me/code/app');
+             INSERT INTO assistant_usage_events (id, session_id, model, input_tokens,
+                 output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                 created_at, event_id)
+             VALUES (7, 's1', 'gpt-5-mini', 180, 20, 0, 0, 0, '2026-07-28T00:00:30.000Z', NULL),
+                    (7, 's2', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-27T12:00:00.000Z',
+                     'usage-record:7'),
+                    (8, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, 'not a time', NULL);",
+        )
+        .expect("store should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 700);
+    }
+
+    /// The review's case: a store whose table doesn't keep `id` unique, with
+    /// a live and a caught-up row sharing one. The caught-up row is a copy of
+    /// the live one, and its call key takes every row holding it.
+    #[test]
+    fn a_caught_up_copy_takes_every_row_with_its_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT, cwd TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER, session_id TEXT, turn_index INTEGER, agent_id TEXT, model TEXT,
+                 input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER, reasoning_tokens INTEGER, total_nano_aiu INTEGER,
+                 initiator TEXT, created_at TEXT, event_id TEXT);
+             INSERT INTO sessions VALUES ('s1', '/Users/me/code/app');
+             INSERT INTO assistant_usage_events (id, session_id, model, input_tokens,
+                 output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                 created_at, event_id)
+             VALUES (7, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-28T00:00:00.000Z', NULL),
+                    (7, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-28T00:00:00.000Z',
+                     'usage-record:7');",
+        )
+        .expect("store should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 0);
     }
 
     #[test]

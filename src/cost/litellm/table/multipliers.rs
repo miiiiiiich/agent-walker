@@ -1,11 +1,9 @@
 //! Read the multipliers an entry's `provider_specific_entry` lists for
 //! Anthropic's fast mode and US-only inference. Other providers keep strings
 //! and nested objects under the same key; those are skipped unbuilt.
-use std::fmt;
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess};
 
-use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
-
-use super::Scalar;
+use super::{FromObject, Scalar, object_or_default};
 
 /// As listed, in bounds or not; anything but a number counts as unlisted.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -16,48 +14,12 @@ pub(in crate::cost) struct Multipliers {
 
 impl<'de> Deserialize<'de> for Multipliers {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(MultipliersVisitor)
+        object_or_default(deserializer)
     }
 }
 
-struct MultipliersVisitor;
-
-impl<'de> Visitor<'de> for MultipliersVisitor {
-    type Value = Multipliers;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("any JSON value")
-    }
-
-    fn visit_u64<E: Error>(self, _: u64) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_i64<E: Error>(self, _: i64) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_f64<E: Error>(self, _: f64) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_str<E: Error>(self, _: &str) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_bool<E: Error>(self, _: bool) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_unit<E: Error>(self) -> Result<Multipliers, E> {
-        Ok(Multipliers::default())
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Multipliers, A::Error> {
-        IgnoredAny.visit_seq(seq).map(|_| Multipliers::default())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Multipliers, A::Error> {
+impl FromObject for Multipliers {
+    fn read<'de, A: MapAccess<'de>>(mut map: A) -> Result<Self, A::Error> {
         let mut multipliers = Multipliers::default();
         while let Some(key) = map.next_key::<String>()? {
             let slot = match key.as_str() {
