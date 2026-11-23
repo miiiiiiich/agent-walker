@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
@@ -29,10 +30,6 @@ use crate::collector::read::{Line, MAX_LINE_BYTES, next_line};
 use super::fork::in_fork_burst;
 use super::rollout::{open_rollout, thread_id_of};
 use super::usage::token_count_fingerprint;
-
-/// Prefixes a held row's key until `settle` decides it; a held row never
-/// reaches the merge.
-const HELD: &str = "codex-held:";
 
 /// A copied fork child's window rows, held until its shape is known.
 #[derive(Default)]
@@ -90,37 +87,25 @@ impl HeldRows {
     /// A child with a record, or with a row past the fork window, kept its
     /// own timestamps, and the window already told its rows apart.
     pub(super) fn finish(self, events: &mut FileEvents) {
-        if !self.wanted() {
-            return;
-        }
-        let Some(parent) = self.parent else {
-            return;
-        };
-        for (pair, mut event) in self.rows {
-            let Some(key) = event.key.take() else {
-                continue;
-            };
-            event.key = Some(format!("{HELD}{pair}|{}:{parent}{key}", parent.len()));
-            events.usage_events.push(event);
+        if self.wanted()
+            && !self.rows.is_empty()
+            && let Some(parent) = self.parent
+        {
+            events.codex_held = Some(HeldWindow {
+                parent,
+                rows: self.rows,
+            });
         }
     }
 }
 
-struct Held<'a> {
-    pair: &'a str,
-    parent: &'a str,
-    key: &'a str,
-}
-
-fn parse_held(key: &str) -> Option<Held<'_>> {
-    let (pair, rest) = key.strip_prefix(HELD)?.split_once('|')?;
-    let (len, rest) = rest.split_once(':')?;
-    let len: usize = len.parse().ok()?;
-    Some(Held {
-        pair,
-        parent: rest.get(..len)?,
-        key: rest.get(len..)?,
-    })
+/// A file's held rows, each with its `token_count` fingerprint, kept apart
+/// from its events until `settle` decides them, so a held row never reaches
+/// the merge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeldWindow {
+    parent: String,
+    rows: Vec<(String, KeyedUsageEvent)>,
 }
 
 /// What the parent's rollouts hold, once every one of them is read.
@@ -151,14 +136,11 @@ impl Parent {
 /// parent outside the scan, or not read to its end, go, as the window would
 /// have had them.
 pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEvents>)]) {
-    let mut parents: HashMap<String, Parent> = HashMap::new();
-    for events in per_file.iter().filter_map(|(_, events)| events.as_ref()) {
-        for event in &events.usage_events {
-            if let Some(held) = event.key.as_deref().and_then(parse_held) {
-                parents.entry(held.parent.to_owned()).or_default();
-            }
-        }
-    }
+    let mut parents: HashMap<String, Parent> = per_file
+        .iter()
+        .filter_map(|(_, events)| events.as_ref()?.codex_held.as_ref())
+        .map(|held| (held.parent.clone(), Parent::NotInScan))
+        .collect();
     if parents.is_empty() {
         return;
     }
@@ -180,20 +162,17 @@ pub(super) fn settle(files: &[PathBuf], per_file: &mut [(PathBuf, Option<FileEve
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
     {
-        events.usage_events.retain_mut(|event| {
-            let Some(held) = event.key.as_deref().and_then(parse_held) else {
-                return true;
-            };
-            let own = matches!(
-                parents.get(held.parent),
-                Some(Parent::Read(pairs)) if !pairs.contains(held.pair)
+        let Some(held) = events.codex_held.take() else {
+            continue;
+        };
+        if let Some(Parent::Read(pairs)) = parents.get(&held.parent) {
+            events.usage_events.extend(
+                held.rows
+                    .into_iter()
+                    .filter(|(pair, _)| !pairs.contains(pair))
+                    .map(|(_, event)| event),
             );
-            let key = own.then(|| held.key.to_owned());
-            if own {
-                event.key = key;
-            }
-            own
-        });
+        }
     }
 }
 
@@ -396,37 +375,5 @@ mod tests {
 
         assert_eq!(collection.stats.parse_errors, 1);
         assert_eq!(total_volume(&collection), 110, "only the parent's record");
-    }
-
-    #[test]
-    fn held_keys_round_trip_any_parent_id() {
-        let mut held = HeldRows::for_fork_of(Some("a:b|c".to_owned()));
-        held.rows.push((
-            "1:2:3:4:5:6:7:8:9:10:11:12".to_owned(),
-            KeyedUsageEvent {
-                key: Some("codex-usage:v2:x:y".to_owned()),
-                event: crate::model::UsageEvent {
-                    timestamp: None,
-                    session_id: None,
-                    model: None,
-                    source_kind: crate::model::SourceKind::Subagent,
-                    attribution_agent: None,
-                    attribution_skill: None,
-                    project: None,
-                    usage: crate::model::TokenUsage::default(),
-                    granularity: crate::model::UsageGranularity::Call,
-                    billing: crate::model::Billing::default(),
-                },
-            },
-        ));
-        let mut events = FileEvents::default();
-        held.finish(&mut events);
-
-        let key = events.usage_events[0].key.as_deref().expect("held key");
-        let parsed = parse_held(key).expect("held key parses");
-        assert_eq!(parsed.parent, "a:b|c");
-        assert_eq!(parsed.pair, "1:2:3:4:5:6:7:8:9:10:11:12");
-        assert_eq!(parsed.key, "codex-usage:v2:x:y");
-        assert!(parse_held("codex-usage:v2:x:y").is_none());
     }
 }

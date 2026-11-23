@@ -25,6 +25,9 @@ pub struct FileEvents {
     /// Read across files after parsing, so it is kept apart from the events.
     #[serde(default)]
     pub claude_cost_state: super::claude::CostStateLog,
+    /// Decided across files after parsing, like `claude_cost_state`.
+    #[serde(default)]
+    pub codex_held: Option<super::codex::HeldWindow>,
     pub lines_seen: usize,
     pub parse_errors: usize,
 }

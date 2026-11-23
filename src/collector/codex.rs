@@ -26,6 +26,7 @@ mod usage;
 
 use billing::applied_tier;
 use fork::{Origin, in_fork_burst, is_copied_fork, starts_own_history};
+pub use migrated::HeldWindow;
 use migrated::{HeldRows, settle};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
 use tools::{ToolState, collect_tool_event};
