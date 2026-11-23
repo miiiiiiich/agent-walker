@@ -238,11 +238,11 @@ impl SessionState {
                 keyed.event.session_id = Some(parent.clone());
             }
         } else {
-            let mut index = 0;
-            events.usage_events.retain(|keyed| {
-                index += 1;
-                index <= block || keyed.event.granularity != UsageGranularity::Aggregate
-            });
+            // Only the block: looking at every event kept before it, a run of
+            // such markers took quadratic time.
+            let mut copied = events.usage_events.split_off(block);
+            copied.retain(|keyed| keyed.event.granularity != UsageGranularity::Aggregate);
+            events.usage_events.append(&mut copied);
         }
         self.forked = true;
         self.block = events.usage_events.len();

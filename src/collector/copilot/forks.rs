@@ -381,6 +381,33 @@ pub(in crate::collector::copilot) mod tests {
         }
     }
 
+    /// Each unreadable marker looks only at the block it closes: looking at
+    /// every event kept before it, N markers after N receipts took N² steps.
+    #[test]
+    fn unreadable_markers_after_many_receipts_take_linear_time() {
+        use crate::collector::copilot::receipts::tests::receipt;
+        use crate::collector::read::tests::finishes_quickly;
+
+        const N: u64 = 50_000;
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let mut journal = String::new();
+        for sequence in 1..=N {
+            journal.push_str(&receipt("2026-07-27T10:00:00.000Z", "s1", sequence, 1, 1));
+            journal.push('\n');
+        }
+        let unreadable = fork_info("m", "2026-07-27T11:00:00.000Z", r#"Forked from "broken"#);
+        for _ in 0..N {
+            journal.push_str(&unreadable);
+            journal.push('\n');
+        }
+        write_session(temp.path(), "s1", &journal);
+
+        let root = temp.path().to_path_buf();
+        let collection = finishes_quickly(move || collect(&root, None, false, UtcOffset::UTC));
+
+        assert_eq!(total_volume(&collection), 2 * N);
+    }
+
     /// A parent known only by caught-up rows, its journal gone, keeps them:
     /// the forks' copies, now the parent's, don't make it a session with
     /// receipts at hand, or every call the forks didn't copy would be lost.
