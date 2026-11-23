@@ -16,45 +16,31 @@ use super::{MAX_SANE_TOKENS, RawCounters};
 
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
-/// Key prefix of a journal's mark of a model's latest exit with usable
-/// counters, taken out by `take_exit_marks` before anything else reads the
-/// events.
-pub(super) const EXIT_PREFIX: &str = "copilot-exit:";
-
 /// Exits by session and model: the latest with usable counters, zero deltas
 /// included.
 pub(super) type Exits = HashMap<String, HashMap<String, OffsetDateTime>>;
 
-/// Each session's and model's latest exit mark, taken out of the events.
-pub(super) fn take_exit_marks(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Exits {
+/// Each session's and model's latest exit mark. A fork's marks up to its
+/// fork are its parent's history, like its usage then.
+pub(super) fn exit_marks(
+    per_file: &[(PathBuf, Option<FileEvents>)],
+    forked: &HashMap<String, OffsetDateTime>,
+) -> Exits {
     let mut exits: Exits = HashMap::new();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
+    for (session, model, time) in per_file
+        .iter()
+        .filter_map(|(_, events)| events.as_ref()?.copilot.as_ref())
+        .flat_map(|summary| &summary.exit_marks)
     {
-        events.usage_events.retain(|keyed| {
-            if !keyed
-                .key
-                .as_deref()
-                .is_some_and(|key| key.starts_with(EXIT_PREFIX))
-            {
-                return true;
-            }
-            let event = &keyed.event;
-            if let (Some(sid), Some(model), Some(time)) = (
-                event.session_id.as_ref(),
-                event.model.as_ref(),
-                event.timestamp,
-            ) {
-                exits
-                    .entry(sid.clone())
-                    .or_default()
-                    .entry(model.clone())
-                    .and_modify(|exit| *exit = (*exit).max(time))
-                    .or_insert(time);
-            }
-            false
-        });
+        if forked.get(session).is_some_and(|fork| time <= fork) {
+            continue;
+        }
+        exits
+            .entry(session.clone())
+            .or_default()
+            .entry(model.clone())
+            .and_modify(|exit| *exit = (*exit).max(*time))
+            .or_insert(*time);
     }
     exits
 }

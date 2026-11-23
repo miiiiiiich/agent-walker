@@ -53,7 +53,7 @@ pub fn collect(
     if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
-    let exits = ledger::take_exit_marks(&mut per_file);
+    let exits = ledger::exit_marks(&per_file, &forked);
     let (live, caught_up) = ledger
         .as_ref()
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
@@ -181,7 +181,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         }
     }
 
-    session.mark_latest_exits(session_id.as_ref(), &mut events);
+    session.mark_latest_exits(session_id.as_ref());
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
     events.copilot = Some(JournalSummary {
         forks: session.fork_times,
@@ -193,6 +193,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             .filter(|_| session_id.is_some())
             .collect(),
         cumulatives: session.cumulatives,
+        exit_marks: session.exit_marks,
     });
     events.compress_touches(local_offset);
     Some(events)
@@ -213,31 +214,9 @@ pub struct JournalSummary {
     /// Each counted exit's cumulative, by its key: the exit counts only what's
     /// new.
     cumulatives: HashMap<String, RawCounters>,
-}
-
-/// An event carrying data from parsing to reconciliation, stripped before
-/// anything is counted.
-fn helper_event(
-    key: String,
-    session_id: Option<String>,
-    model: Option<String>,
-    at: OffsetDateTime,
-) -> KeyedUsageEvent {
-    KeyedUsageEvent {
-        key: Some(key),
-        event: UsageEvent {
-            timestamp: Some(at),
-            session_id,
-            model,
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: None,
-            usage: TokenUsage::default(),
-            granularity: UsageGranularity::Aggregate,
-            billing: crate::model::Billing::default(),
-        },
-    }
+    /// Session, model and time of each model's latest exit that covered
+    /// something new, for the store fallback to cut that model's rows at.
+    exit_marks: Vec<(String, String, OffsetDateTime)>,
 }
 
 #[derive(Default)]
@@ -270,6 +249,7 @@ struct SessionState {
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
+    exit_marks: Vec<(String, String, OffsetDateTime)>,
 }
 
 impl SessionState {
@@ -281,13 +261,12 @@ impl SessionState {
     /// When the marker names no parent read here, the copied exits go: kept
     /// as the fork's, one could count beside the parent's own records. The
     /// copied receipts stay, each naming its parent in its accounting.
-    fn close_copied_block(
-        &mut self,
-        marker: &forks::ForkMarker,
-        session_id: Option<&String>,
-        events: &mut FileEvents,
-    ) {
-        self.mark_latest_exits(session_id, events);
+    fn close_copied_block(&mut self, marker: &forks::ForkMarker, events: &mut FileEvents) {
+        if marker.parent.is_some() {
+            self.mark_latest_exits(marker.parent.as_ref());
+        } else {
+            self.latest_exits.clear();
+        }
         let block = self.block.min(events.usage_events.len());
         if let Some(parent) = &marker.parent {
             for keyed in &mut events.usage_events[block..] {
@@ -305,17 +284,16 @@ impl SessionState {
         self.block = events.usage_events.len();
     }
 
-    /// One mark per model at its latest exit covering something new, for the
-    /// store fallback to cut that model's rows at. Marked at every exit, a
-    /// run of unchanged exits kept an event per model per exit.
-    fn mark_latest_exits(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
-        for (model, at) in std::mem::take(&mut self.latest_exits) {
-            events.usage_events.push(helper_event(
-                format!("{}{model}", ledger::EXIT_PREFIX),
-                session_id.cloned(),
-                Some(model),
-                at,
-            ));
+    /// The marks of the exits read since the last marker go to the session
+    /// whose history they are.
+    fn mark_latest_exits(&mut self, owner: Option<&String>) {
+        let latest = std::mem::take(&mut self.latest_exits);
+        if let Some(owner) = owner {
+            self.exit_marks.extend(
+                latest
+                    .into_iter()
+                    .map(|(model, at)| (owner.clone(), model, at)),
+            );
         }
     }
 
@@ -338,6 +316,7 @@ impl SessionState {
         if let Some(session) = session_id {
             self.fork_times.push((session.clone(), start));
         }
+        self.exit_marks.retain(|(_, _, at)| *at >= start);
         events.usage_events.retain(|keyed| {
             keyed.event.granularity != UsageGranularity::Aggregate
                 || keyed.event.timestamp.is_none_or(|time| time >= start)
@@ -355,7 +334,7 @@ impl SessionState {
             self.forked_into.push((fork, at));
         }
         if let Some(marker) = forks::fork_marker(value) {
-            self.close_copied_block(&marker, session_id, events);
+            self.close_copied_block(&marker, events);
             // A marker that doesn't name the fork is still this journal's.
             if let (Some(fork), Some(at)) =
                 (marker.child.or_else(|| session_id.cloned()), timestamp)
@@ -840,6 +819,7 @@ mod tests {
                 },
             )],
             cumulatives: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters)]),
+            exit_marks: vec![("parent".to_owned(), "gpt-5-mini".to_owned(), at)],
         };
         let events = FileEvents {
             copilot: Some(summary),
