@@ -6,14 +6,9 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::collector::{FileEvents, KeyedUsageEvent};
-use crate::model::TokenUsage;
 
 use super::RawCounters;
 use super::receipts::identity_of;
-
-/// Key prefix of the event carrying an exit's cumulative, for the exit keyed
-/// by the rest of the key: the exit itself counts only what's new.
-const CUMULATIVE_PREFIX: &str = "copilot-cumulative:";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct FirstExit {
@@ -36,38 +31,6 @@ pub(super) fn own_mark(exit: &Value, session_id: Option<&String>) -> Option<u64>
     }
 }
 
-pub(super) fn cumulative(exit: &KeyedUsageEvent, counters: RawCounters) -> Option<KeyedUsageEvent> {
-    let key = exit.key.as_ref()?;
-    let mut event = exit.event.clone();
-    event.usage = carried(counters);
-    Some(KeyedUsageEvent {
-        key: Some(format!("{CUMULATIVE_PREFIX}{key}")),
-        event,
-    })
-}
-
-/// Raw, unlike a counted usage, so the reset rule reads what Copilot wrote.
-fn carried(counters: RawCounters) -> TokenUsage {
-    TokenUsage {
-        input_tokens: counters.input,
-        output_tokens: counters.output,
-        reasoning_output_tokens: counters.reasoning,
-        cache_read_input_tokens: counters.cache_read,
-        cache_creation_input_tokens: counters.cache_write,
-        ..TokenUsage::default()
-    }
-}
-
-fn held(usage: &TokenUsage) -> RawCounters {
-    RawCounters {
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        cache_read: usage.cache_read_input_tokens,
-        cache_write: usage.cache_creation_input_tokens,
-        reasoning: usage.reasoning_output_tokens,
-    }
-}
-
 #[derive(Default)]
 pub(super) struct Truncated {
     /// Per session and model, the first exit read in the session's
@@ -76,40 +39,32 @@ pub(super) struct Truncated {
     cumulatives: HashMap<String, RawCounters>,
 }
 
-/// Takes the cumulatives out of the events before anything counts them.
-pub(super) fn take(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Truncated {
-    let mut truncated = Truncated::default();
-    for (path, events) in per_file.iter_mut() {
-        let Some(events) = events.as_mut() else {
-            continue;
-        };
-        if let (Some(session), Some(summary)) = (journal(path), &events.copilot) {
-            for (model, exit) in &summary.first_exits {
-                truncated
-                    .first_exits
-                    .entry(session.to_owned())
-                    .or_default()
-                    .insert(model.clone(), exit.clone());
-            }
-        }
-        events.usage_events.retain(|keyed| {
-            let Some(exit) = keyed
-                .key
-                .as_deref()
-                .and_then(|key| key.strip_prefix(CUMULATIVE_PREFIX))
-            else {
-                return true;
-            };
-            truncated
-                .cumulatives
-                .insert(exit.to_owned(), held(&keyed.event.usage));
-            false
-        });
-    }
-    truncated
-}
-
 impl Truncated {
+    pub(super) fn read(per_file: &[(PathBuf, Option<FileEvents>)]) -> Self {
+        let mut truncated = Self::default();
+        for (path, events) in per_file {
+            let Some(summary) = events.as_ref().and_then(|events| events.copilot.as_ref()) else {
+                continue;
+            };
+            if let Some(session) = journal(path) {
+                for (model, exit) in &summary.first_exits {
+                    truncated
+                        .first_exits
+                        .entry(session.to_owned())
+                        .or_default()
+                        .insert(model.clone(), exit.clone());
+                }
+            }
+            truncated.cumulatives.extend(
+                summary
+                    .cumulatives
+                    .iter()
+                    .map(|(key, counters)| (key.clone(), *counters)),
+            );
+        }
+        truncated
+    }
+
     /// A journal missing its oldest segment counts everything of a model
     /// before that model's first exit read in that exit, so copies of the
     /// session's history held by other journals (a fork's) and dated up to

@@ -46,7 +46,7 @@ pub fn collect(
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::fork_times(&per_file);
-    let truncated = truncation::take(&mut per_file);
+    let truncated = truncation::Truncated::read(&per_file);
     forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
     let mut ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
@@ -192,6 +192,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             .filter_map(|(model, exit)| Some((model, exit?)))
             .filter(|_| session_id.is_some())
             .collect(),
+        cumulatives: session.cumulatives,
     });
     events.compress_touches(local_offset);
     Some(events)
@@ -209,6 +210,9 @@ pub struct JournalSummary {
     /// With the journal's oldest segment gone, each model's first exit read
     /// that counted something.
     first_exits: Vec<(String, truncation::FirstExit)>,
+    /// Each counted exit's cumulative, by its key: the exit counts only what's
+    /// new.
+    cumulatives: HashMap<String, RawCounters>,
 }
 
 /// An event carrying data from parsing to reconciliation, stripped before
@@ -262,6 +266,7 @@ struct SessionState {
     truncated: bool,
     /// Those first exits, once read; none when it had nothing to count.
     first_exits: BTreeMap<String, Option<truncation::FirstExit>>,
+    cumulatives: HashMap<String, RawCounters>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -459,6 +464,9 @@ impl SessionState {
         };
         let mark = truncation::own_mark(value, line.session_id);
         for (model, counters, key) in exits {
+            if let Some(key) = &key {
+                self.cumulatives.insert(key.clone(), counters);
+            }
             if self.truncated {
                 self.first_exits.entry(model.clone()).or_insert_with(|| {
                     key.map(|key| truncation::FirstExit {
@@ -629,14 +637,10 @@ fn collect_shutdown_usage(
                 event: exit_usage(line, Some(model), None, delta.minus(covered.own).to_usage()),
             });
         }
-        let exit = KeyedUsageEvent {
+        events.usage_events.push(KeyedUsageEvent {
             key,
             event: exit_usage(line, Some(model), project, usage),
-        };
-        events
-            .usage_events
-            .extend(truncation::cumulative(&exit, current));
-        events.usage_events.push(exit);
+        });
     }
     advanced
 }
@@ -835,6 +839,7 @@ mod tests {
                     key: "copilot:e-1:gpt-5-mini".to_owned(),
                 },
             )],
+            cumulatives: HashMap::from([("copilot:e-1:gpt-5-mini".to_owned(), counters)]),
         };
         let events = FileEvents {
             copilot: Some(summary),
