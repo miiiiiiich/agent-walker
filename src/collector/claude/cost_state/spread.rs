@@ -91,7 +91,7 @@ fn log_per_session(per_file: &[(PathBuf, Option<FileEvents>)]) -> HashMap<&str, 
 /// loses a counter. A restart can outgrow the previous total and still lack
 /// the models it has not used yet; judged by volume alone, it read as carried
 /// and their excess was lost.
-pub(super) fn restarts(rows: &[CostStateRow]) -> Vec<bool> {
+fn restarts(rows: &[CostStateRow]) -> Vec<bool> {
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
