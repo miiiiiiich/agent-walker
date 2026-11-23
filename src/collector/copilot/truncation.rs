@@ -147,10 +147,10 @@ impl Truncated {
     /// already came off that exit. A copied exit whose cumulative the first
     /// exit's falls below is from an accounting epoch before a reset (the
     /// rule of `collect_shutdown_usage`), so the first exit doesn't hold it.
-    /// A receipt goes by the session its accounting names, not the one it's
-    /// filed under: a fork of a fork made before the first fork's marker
-    /// files the copy under the first fork. One the exit's watermark holds
-    /// is inside it however it's dated.
+    /// A receipt also goes by the session its accounting names: a fork of a
+    /// fork made before the first fork's marker files the copy under the
+    /// first fork. One the exit's watermark holds is inside it however it's
+    /// dated.
     ///
     /// Run once the store has settled which exits count: an exit its rows
     /// superseded holds nothing, and its copies dropped against it lost the
@@ -191,36 +191,35 @@ impl Truncated {
         }
     }
 
+    /// By the session a receipt names and by the one it's filed under: an
+    /// exit holds the copied receipts read before it whatever they name.
     fn covers(&self, journal: Option<&str>, keyed: &KeyedUsageEvent) -> bool {
         let event = &keyed.event;
+        let (Some(model), Some(time)) = (event.model.as_deref(), event.timestamp) else {
+            return false;
+        };
+        let copied = keyed.key.as_ref().and_then(|key| self.cumulatives.get(key));
+        let holds = |session: &str, sequence: Option<u64>| {
+            let Some(exit) = self
+                .first_exits
+                .get(session)
+                .and_then(|models| models.get(model))
+                .filter(|_| journal != Some(session))
+            else {
+                return false;
+            };
+            let within = time <= exit.at
+                || sequence
+                    .zip(exit.mark)
+                    .is_some_and(|(sequence, mark)| sequence <= mark);
+            within && copied.is_none_or(|copied| !exit.counters.any_less_than(*copied))
+        };
         let identity = keyed.key.as_deref().and_then(identity_of);
-        let (Some(session), Some(model), Some(time)) = (
-            identity
-                .map(|(source, _)| source)
-                .or(event.session_id.as_deref()),
-            event.model.as_deref(),
-            event.timestamp,
-        ) else {
-            return false;
-        };
-        if journal == Some(session) {
-            return false;
-        }
-        let Some(exit) = self
-            .first_exits
-            .get(session)
-            .and_then(|models| models.get(model))
-        else {
-            return false;
-        };
-        let held =
-            identity.is_some_and(|(_, sequence)| exit.mark.is_some_and(|mark| sequence <= mark));
-        let earlier_epoch = keyed
-            .key
-            .as_ref()
-            .and_then(|key| self.cumulatives.get(key))
-            .is_some_and(|copied| exit.counters.any_less_than(*copied));
-        (time <= exit.at || held) && !earlier_epoch
+        identity.is_some_and(|(source, sequence)| holds(source, Some(sequence)))
+            || event
+                .session_id
+                .as_deref()
+                .is_some_and(|session| holds(session, None))
     }
 }
 

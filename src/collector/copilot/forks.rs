@@ -804,6 +804,77 @@ pub(in crate::collector::copilot) mod tests {
         assert_eq!(total_volume(&collection), 300);
     }
 
+    /// The store's rows from after the parent's exit still in view leave
+    /// that exit standing, so the fork's copy still gives way.
+    #[test]
+    fn a_truncated_parents_exit_before_its_rows_still_covers_the_copy() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T12:00:00.000Z", 45, 5)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 250);
+    }
+
+    /// A copied receipt naming a third session, filed under the truncated
+    /// parent: an exit without watermarks holds every receipt read before
+    /// it, so the parent's exit holds it whatever session it names.
+    #[test]
+    fn a_copied_receipt_naming_another_session_gives_way_to_the_parents_exit() {
+        use crate::collector::copilot::receipts::tests::receipt;
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                receipt("2026-07-27T10:00:00.000Z", "grand", 1, 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
     /// The review's case: the parent's exit still in view counts only
     /// another model, so the fork's copy of the first model's exit is the
     /// only count of it.
