@@ -84,13 +84,7 @@ user.
   doesn't count if any of them is on the store, so neither a copy without
   an accounting identity nor a receipt naming another session counts
   beside a store row. A copied receipt always comes off the fork's exit,
-  since the parent counts that call. What this still undercounts: in
-  a session with a live row, a call only in a receipt (its row unreadable
-  or missing); in a session on its receipts, a call only in a caught-up row
-  whose receipt is gone and that no later exit covers. A row caught up
-  under a fork that has live rows, for a receipt copied from the parent (if
-  the CLI files it there, which is not verified), would count beside the
-  parent's receipts.
+  since the parent counts that call.
 
   A fork's journal opens with a copy of its parent's history, event ids
   and all, then a `session.info` marker reading "Forked from <parent> …
@@ -118,12 +112,24 @@ user.
   the readable rows alone would lose the unreadable row's usage. A model's
   readable rows up to the latest exit with usable counters for that model,
   even one that added nothing, are dropped (that cumulative already covers
-  them); an exit without a model's counters covers none of its rows. A session with no exit keeps
-  all its readable rows. A row that can't be tied to a session at all
-  applies the same fallback to every session. An unreadable row dated
-  after the latest exit can't be counted anywhere.
+  them); an exit without a model's counters covers none of its rows. A
+  session with no exit keeps all its readable rows. A row that can't be
+  tied to a session at all applies the same fallback to every session. An
+  unreadable row dated after the latest exit can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
+
+  When two records can't be told apart as one call or two, one is
+  counted: a call is never counted twice, at the cost of these
+  undercounts. In a session with a live row, a call only in a receipt (its
+  row unreadable or missing), and an exit in the last minute before the
+  first live row whose calls had no row. In a session on its receipts, a
+  call only in a caught-up row whose receipt is gone and that no later
+  exit covers. Any receipt held by a journal on the store, such as one an
+  older fork copied without a marker. A copied exit whose parent can't be
+  named, when the parent's own journal is gone. A parent's calls before
+  its first store row that its receipts carried, when the parent's journal
+  is gone and only a fork's copy of the exit remains.
 
   All three map to the same schema as the other providers:
 
