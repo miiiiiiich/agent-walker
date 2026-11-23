@@ -135,14 +135,6 @@ fn excess_is_spread_over_the_sessions_days_by_volume() {
         assistant("2026-06-06T20:01:00Z", "s1", "m2", "claude-opus-5", 0, 99),
     ];
     write(&temp.path().join("plain"), "s1.jsonl", &lines);
-    write(
-        &temp.path().join("plain"),
-        "s2.jsonl",
-        &[
-            user("2026-06-07T08:00:00Z", "s2", "v1"),
-            assistant("2026-06-07T08:01:00Z", "s2", "n1", "claude-opus-5", 0, 10),
-        ],
-    );
     let mut with_total = lines.to_vec();
     with_total.push(cost_state(
         "s1",
@@ -150,14 +142,16 @@ fn excess_is_spread_over_the_sessions_days_by_volume() {
         &[("claude-opus-5", 0, 2, 0, 398 + 400, 0, 0)],
     ));
     write(&temp.path().join("totalled"), "s1.jsonl", &with_total);
-    write(
-        &temp.path().join("totalled"),
-        "s2.jsonl",
-        &[
-            user("2026-06-07T08:00:00Z", "s2", "v1"),
-            assistant("2026-06-07T08:01:00Z", "s2", "n1", "claude-opus-5", 0, 10),
-        ],
-    );
+    for dir in ["plain", "totalled"] {
+        write(
+            &temp.path().join(dir),
+            "s2.jsonl",
+            &[
+                user("2026-06-07T08:00:00Z", "s2", "v1"),
+                assistant("2026-06-07T08:01:00Z", "s2", "n1", "claude-opus-5", 0, 10),
+            ],
+        );
+    }
 
     let plain = collect(&temp.path().join("plain"), None, false, UtcOffset::UTC);
     let totalled = collect(&temp.path().join("totalled"), None, false, UtcOffset::UTC);
@@ -413,24 +407,7 @@ fn subagent_advisor_and_shared_calls_count_on_the_transcript_side() {
 #[test]
 fn a_forks_carried_total_is_not_counted_again() {
     let temp = TempDir::new().expect("tempdir");
-    write(
-        temp.path(),
-        "parent.jsonl",
-        &[
-            assistant("2026-06-05T09:00:00Z", "pa", "m0", "claude-opus-5", 0, 400),
-            assistant("2026-06-05T09:10:00Z", "pa", "m1", "claude-opus-5", 0, 100),
-            cost_state("pa", 7, &[("claude-opus-5", 0, 2, 0, 530, 0, 0)]),
-        ],
-    );
-    write(
-        temp.path(),
-        "fork.jsonl",
-        &[
-            assistant("2026-06-06T09:00:00Z", "fk", "m1", "claude-opus-5", 0, 100),
-            assistant("2026-06-06T09:05:00Z", "fk", "m9", "claude-opus-5", 0, 50),
-            cost_state("fk", 7, &[("claude-opus-5", 0, 3, 0, 530 + 50 + 20, 0, 0)]),
-        ],
-    );
+    parent_and_fork(temp.path());
     write(
         temp.path(),
         "alongside.jsonl",
@@ -442,13 +419,7 @@ fn a_forks_carried_total_is_not_counted_again() {
 
     let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-    let reads = |session: &str| {
-        added(&collection)
-            .iter()
-            .filter(|event| event.session_id.as_deref() == Some(session))
-            .map(|event| event.usage.cache_read_input_tokens)
-            .sum::<u64>()
-    };
+    let reads = |session: &str| reads_of(&collection, session);
     assert_eq!((reads("pa"), reads("fk"), reads("al")), (30, 20, 10));
 }
 
@@ -482,13 +453,7 @@ fn a_forks_copy_of_a_call_after_the_parents_total_stays_counted_once() {
 
     let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
-    let reads = |session: &str| {
-        added(&collection)
-            .iter()
-            .filter(|event| event.session_id.as_deref() == Some(session))
-            .map(|event| event.usage.cache_read_input_tokens)
-            .sum::<u64>()
-    };
+    let reads = |session: &str| reads_of(&collection, session);
     assert_eq!((reads("pa"), reads("fk")), (30, 20));
 }
 
@@ -861,12 +826,7 @@ fn a_long_sessions_old_subagent_file_is_compared_too() {
             50,
         )],
     );
-    let old = std::time::SystemTime::now() - std::time::Duration::from_hours(48);
-    fs::File::options()
-        .write(true)
-        .open(subagents.join("agent-a1.jsonl"))
-        .and_then(|file| file.set_modified(old))
-        .expect("mtime should be set");
+    age(&subagents.join("agent-a1.jsonl"), 48);
     let floor = std::time::SystemTime::now() - std::time::Duration::from_hours(24);
 
     let collection = collect(temp.path(), Some(floor), false, UtcOffset::UTC);
