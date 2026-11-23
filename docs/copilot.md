@@ -110,12 +110,15 @@ user.
   rows can't be read (a `created_at` that doesn't parse, a value of the
   wrong type), that session keeps all its snapshots: superseding them from
   the readable rows alone would lose the unreadable row's usage. A model's
-  readable rows up to the latest exit with usable counters for that model,
-  even one that added nothing, are dropped (that cumulative already covers
-  them); an exit without a model's counters covers none of its rows. A
-  session with no exit keeps all its readable rows. A row that can't be
-  tied to a session at all applies the same fallback to every session. An
-  unreadable row dated after the latest exit can't be counted anywhere.
+  readable rows up to the latest exit whose total or watermark for that
+  model moved are dropped (that cumulative already covers them), and so are
+  live rows stamped within 60 s after it, which may be a call it covers. An
+  exit repeating both covers nothing new, so a call past its watermark
+  keeps its row; an exit without a model's counters covers none of its
+  rows. A session with no exit keeps all its readable rows. A row that
+  can't be tied to a session at all applies the same fallback to every
+  session. An unreadable row dated after the latest exit can't be counted
+  anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 

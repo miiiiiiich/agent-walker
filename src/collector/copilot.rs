@@ -211,8 +211,8 @@ struct SessionState {
     start: Option<OffsetDateTime>,
     /// Each fork the markers name, and when it was made.
     fork_times: Vec<(String, OffsetDateTime)>,
-    /// Each model's latest exit with usable counters since the last fork
-    /// marker, zero deltas included.
+    /// Each model's latest exit since the last fork marker whose total or
+    /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
 }
 
@@ -248,11 +248,9 @@ impl SessionState {
         self.block = events.usage_events.len();
     }
 
-    /// One mark per model at its latest exit with usable counters, for the
+    /// One mark per model at its latest exit covering something new, for the
     /// store fallback to cut that model's rows at. Marked at every exit, a
-    /// run of unchanged exits kept an event per model per exit; marked only
-    /// where the exit added usage, the cut fell at an earlier exit than the
-    /// one covering a row.
+    /// run of unchanged exits kept an event per model per exit.
     fn mark_latest_exits(&mut self, session_id: Option<&String>, events: &mut FileEvents) {
         for (model, at) in std::mem::take(&mut self.latest_exits) {
             events.usage_events.push(KeyedUsageEvent {
@@ -380,7 +378,7 @@ impl SessionState {
                     &mut self.credit_index,
                     events,
                 );
-                let validated = collect_shutdown_usage(
+                let advanced = collect_shutdown_usage(
                     value,
                     &line,
                     self.project.as_deref(),
@@ -392,7 +390,7 @@ impl SessionState {
                 // The latest time, not the last read: a clock moved back dated
                 // a later exit before one covering a row.
                 if let Some(at) = timestamp {
-                    for model in validated {
+                    for model in advanced {
                         self.latest_exits
                             .entry(model)
                             .and_modify(|latest| *latest = (*latest).max(at))
@@ -414,7 +412,7 @@ struct Line<'a> {
     event_id: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct RawCounters {
     input: u64,
     output: u64,
@@ -476,20 +474,20 @@ fn collect_shutdown_usage(
     shutdown_index: usize,
     events: &mut FileEvents,
 ) -> Vec<String> {
-    let mut validated = Vec::new();
+    let mut advanced = Vec::new();
     // A shutdown the analyzer cannot place in time must not advance the
     // baseline either — otherwise the usage up to it would be subtracted by
     // the NEXT valid shutdown and lost forever, instead of being recovered
     // there in full.
     if line.timestamp.is_none() {
-        return validated;
+        return advanced;
     }
     let Some(metrics) = value
         .get("data")
         .and_then(|data| data.get("modelMetrics"))
         .and_then(Value::as_object)
     else {
-        return validated;
+        return advanced;
     };
     for (model, entry) in metrics {
         let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
@@ -505,7 +503,6 @@ fn collect_shutdown_usage(
         {
             continue;
         }
-        validated.push(model.clone());
         let current = RawCounters {
             input: u64_field(usage, "inputTokens"),
             output: u64_field(usage, "outputTokens"),
@@ -525,6 +522,13 @@ fn collect_shutdown_usage(
         // A copied receipt's call is counted by the session that made it,
         // from its receipts or its store rows, so it always comes off.
         let covered = receipts.take_covered(value, model);
+        // The exit marks its model's fallback cut only if its total or its
+        // watermark moved: marked at an exit repeating both, the cut took a
+        // call its watermark leaves out.
+        let zero = RawCounters::default();
+        if current != previous || covered.copied != zero || covered.own != zero {
+            advanced.push(model.clone());
+        }
         let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
 
@@ -555,7 +559,7 @@ fn collect_shutdown_usage(
             event: exit_usage(line, Some(model), project, usage),
         });
     }
-    validated
+    advanced
 }
 
 fn exit_usage(

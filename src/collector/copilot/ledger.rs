@@ -108,16 +108,21 @@ impl CallLedger {
     /// Superseding a session's snapshots from its readable rows alone would
     /// lose an unreadable row's usage that a snapshot covers, so such a
     /// session keeps its snapshots. Of a model's readable rows only those
-    /// after the latest exit with that model's counters (`exits`, zero deltas
-    /// included) stay: the snapshots cover everything up to it, and dropping
-    /// the later rows would lose every call since that exit. Cut per model:
-    /// cutting every model's rows at one exit took those of a model whose
-    /// counters it lacked.
+    /// after the latest exit covering something new for it (`exits`) stay,
+    /// live rows only from 60 s after it: the snapshots cover everything up
+    /// to it, and dropping the later rows would lose every call since that
+    /// exit. Cut per model: cutting every model's rows at one exit took those
+    /// of a model whose counters it lacked.
     pub(super) fn fall_back_where_incomplete(&mut self, exits: &Exits) {
         if self.incomplete.is_empty() && !self.unattributed {
             return;
         }
         let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
+        let caught_up: HashSet<&str> = self
+            .caught_up
+            .iter()
+            .filter_map(|(_, key)| key.as_deref())
+            .collect();
         self.events.usage_events.retain(|keyed| {
             let event = &keyed.event;
             let (Some(sid), Some(model), Some(time)) = (
@@ -127,11 +132,24 @@ impl CallLedger {
             ) else {
                 return true;
             };
+            // A live row stamped just after the exit can be a call that exit
+            // covers, as on the store side: kept, it counted beside the exit.
+            let live = keyed
+                .key
+                .as_deref()
+                .is_none_or(|key| !caught_up.contains(key));
             exits
                 .get(sid)
                 .filter(|_| falls_back(sid))
                 .and_then(|models| models.get(model))
-                .is_none_or(|exit| time > *exit)
+                .is_none_or(|exit| {
+                    let covered_to = if live {
+                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
+                    } else {
+                        *exit
+                    };
+                    time > covered_to
+                })
         });
         self.fallback = exits
             .keys()
@@ -1708,6 +1726,70 @@ pub(super) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The review's case: a live row stamped half a second after the exit
+    /// covering its call is that call, also when the store is incomplete.
+    #[test]
+    fn a_live_row_just_after_the_fallback_exit_is_its_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T09:59:59.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// The review's case: an exit that repeats the last total and watermark
+    /// covers nothing new, so the call past its watermark keeps its row.
+    #[test]
+    fn an_unchanged_exit_keeps_a_later_call_past_its_watermark() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n{}\n{}\n",
+                receipt("2026-07-27T10:00:00.000Z", "s1", 1, 90, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:30:00.000Z", 90, 10),
+                    r#"{"s1":1}"#
+                ),
+                receipt("2026-07-27T11:00:00.000Z", "s1", 2, 360, 40),
+                marked(
+                    &shutdown("e-2", "2026-07-27T12:00:00.000Z", 90, 10),
+                    r#"{"s1":1}"#
+                ),
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("s1", "2026-07-27T10:00:00.500Z", 90, 10),
+                call("s1", "2026-07-27T11:00:00.500Z", 360, 40),
+            ],
+        );
+        unreadable_row(temp.path(), "s1", "2026-07-27T09:30:00.000Z");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100 + 400);
     }
 
     #[test]
