@@ -418,62 +418,27 @@ impl SessionState {
                     events,
                 );
                 self.read_exit(value, &line, events);
+                self.shutdown_index += 1;
             }
             _ => {}
         }
     }
 
     fn read_exit(&mut self, value: &Value, line: &Line, events: &mut FileEvents) {
-        let exits = self.collect_shutdown_usage(value, line, events);
-        self.shutdown_index += 1;
-        // The latest time, not the last read: a clock moved back dated a
-        // later exit before one covering a row.
-        let Some(at) = line.timestamp else {
-            return;
-        };
-        let mark = truncation::own_mark(value, line.session_id);
-        for (model, counters, key) in exits {
-            if let Some(key) = &key {
-                self.summary.cumulatives.insert(key.clone(), counters);
-            }
-            if self.truncated {
-                self.first_exits.entry(model.clone()).or_insert_with(|| {
-                    key.map(|key| truncation::FirstExit {
-                        at,
-                        counters,
-                        mark,
-                        key,
-                    })
-                });
-            }
-            self.latest_exits
-                .entry(model)
-                .and_modify(|latest| *latest = (*latest).max(at))
-                .or_insert(at);
-        }
-    }
-
-    fn collect_shutdown_usage(
-        &mut self,
-        value: &Value,
-        line: &Line,
-        events: &mut FileEvents,
-    ) -> Vec<(String, RawCounters, Option<String>)> {
-        let mut advanced = Vec::new();
         // A shutdown the analyzer cannot place in time must not advance the
         // baseline either — otherwise the usage up to it would be subtracted by
         // the NEXT valid shutdown and lost forever, instead of being recovered
         // there in full.
-        if line.timestamp.is_none() {
-            return advanced;
-        }
-        let Some(metrics) = value
-            .get("data")
-            .and_then(|data| data.get("modelMetrics"))
-            .and_then(Value::as_object)
-        else {
-            return advanced;
+        let (Some(at), Some(metrics)) = (
+            line.timestamp,
+            value
+                .get("data")
+                .and_then(|data| data.get("modelMetrics"))
+                .and_then(Value::as_object),
+        ) else {
+            return;
         };
+        let mark = truncation::own_mark(value, line.session_id);
         for (model, entry) in metrics {
             let Some(usage) = entry.get("usage").filter(|_| ident(model).is_some()) else {
                 continue;
@@ -523,7 +488,26 @@ impl SessionState {
             };
             let counts = usage.token_volume() > 0;
             if moved {
-                advanced.push((model.clone(), current, key.clone().filter(|_| counts)));
+                let counted = key.clone().filter(|_| counts);
+                if let Some(key) = &counted {
+                    self.summary.cumulatives.insert(key.clone(), current);
+                }
+                if self.truncated {
+                    self.first_exits.entry(model.clone()).or_insert_with(|| {
+                        counted.map(|key| truncation::FirstExit {
+                            at,
+                            counters: current,
+                            mark,
+                            key,
+                        })
+                    });
+                }
+                // The latest time, not the last read: a clock moved back
+                // dated a later exit before one covering a row.
+                self.latest_exits
+                    .entry(model.clone())
+                    .and_modify(|latest| *latest = (*latest).max(at))
+                    .or_insert(at);
             }
             if !counts {
                 continue;
@@ -556,7 +540,6 @@ impl SessionState {
                 },
             });
         }
-        advanced
     }
 }
 
