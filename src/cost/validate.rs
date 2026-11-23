@@ -58,31 +58,15 @@ fn tier_in_bounds(tier: &LongContext) -> bool {
 /// at its base rates.
 pub(super) fn retain_in_bounds(models: &mut HashMap<String, ModelPricing>) {
     models.retain(|_, pricing| {
-        if pricing
-            .long_context
-            .as_ref()
-            .is_some_and(|tier| !tier_in_bounds(tier))
-        {
-            pricing.long_context = None;
-        }
+        pricing.long_context = pricing.long_context.filter(tier_in_bounds);
         for card in [&mut pricing.priority, &mut pricing.ultrafast] {
+            *card = card.filter(|rates| rates_in_bounds(&rates.base));
             if let Some(rates) = card {
-                if rates
-                    .long_context
-                    .as_ref()
-                    .is_some_and(|tier| !tier_in_bounds(tier))
-                {
-                    rates.long_context = None;
-                }
-                if !rates_in_bounds(&rates.base) {
-                    *card = None;
-                }
+                rates.long_context = rates.long_context.filter(tier_in_bounds);
             }
         }
         for multiplier in [&mut pricing.fast, &mut pricing.us] {
-            if multiplier.is_some_and(|multiplier| !multiplier_in_bounds(multiplier)) {
-                *multiplier = None;
-            }
+            *multiplier = multiplier.filter(|multiplier| multiplier_in_bounds(*multiplier));
         }
         rates_in_bounds(&pricing.base)
     });
