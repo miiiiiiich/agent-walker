@@ -147,7 +147,10 @@ user.
   (Copilot writes both), whose copied exit counts beside the parent's
   store rows once the parent's journal is gone; and a fork's first exit
   carrying the parent's total from before the fork with no copied exit to
-  measure from (CLIs that write receipts take the copied ones off it). The
+  measure from (CLIs that write receipts take the copied ones off it); and,
+  for a journal that has lost its oldest segment, a fork's copy of a receipt
+  from the missing part that a clock moved back dated after the first exit
+  read, past its watermark, which a later exit of that journal counts. The
   rule costs these undercounts. In a session with a live row, a call only in a receipt (its
   row unreadable or missing), and an exit in the last minute before the
   first live row whose calls had no row. In a session on its receipts, a
