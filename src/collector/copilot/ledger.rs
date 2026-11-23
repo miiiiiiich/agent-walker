@@ -31,6 +31,10 @@ pub(super) struct CallLedger {
     rows: Vec<Row>,
     /// Each session with a readable live row, from 60 s before the first.
     live_from: HashMap<String, OffsetDateTime>,
+    /// The call keys of the caught-up rows admitted. Rows go by call key, so
+    /// a row sharing one with a caught-up row goes with it, and falls back as
+    /// caught up.
+    caught_up: HashSet<String>,
     /// Sessions that fell back to their exits, which then all count.
     fallback: HashSet<String>,
     /// Sessions with at least one row that couldn't be read.
@@ -47,6 +51,29 @@ struct Row {
     call: Option<KeyedUsageEvent>,
 }
 
+impl Row {
+    fn key(&self) -> Option<&String> {
+        self.call.as_ref()?.key.as_ref()
+    }
+}
+
+fn keys<'a>(rows: impl Iterator<Item = &'a Row>) -> HashSet<String> {
+    rows.filter_map(Row::key).cloned().collect()
+}
+
+/// A row goes with its call key, as calls go by key: another row holding
+/// the key loses its call too, and stays as evidence of where its
+/// session's calls are kept.
+fn drop_rows(rows: &mut Vec<Row>, gone: impl Fn(&Row) -> bool) {
+    let keys = keys(rows.iter().filter(|row| gone(row)));
+    rows.retain(|row| !gone(row));
+    for row in rows {
+        if row.key().is_some_and(|key| keys.contains(key)) {
+            row.call = None;
+        }
+    }
+}
+
 impl CallLedger {
     /// Copilot's own cut: a caught-up row dated from its session's first
     /// live row (less the slack) on is a copy of a live one.
@@ -55,12 +82,14 @@ impl CallLedger {
             *from = from.checked_sub(LIVE_SLACK).unwrap_or(*from);
         }
         let live_from = &self.live_from;
-        self.rows.retain(|row| {
-            row.live
-                || live_from
+        let copy = |row: &Row| {
+            !row.live
+                && live_from
                     .get(&row.session)
-                    .is_none_or(|from| row.time < *from)
-        });
+                    .is_some_and(|from| row.time >= *from)
+        };
+        self.caught_up = keys(self.rows.iter().filter(|row| !row.live && !copy(row)));
+        drop_rows(&mut self.rows, copy);
     }
 
     /// Sessions with a readable live row, whose calls the store recorded as
@@ -79,8 +108,9 @@ impl CallLedger {
     /// receipts those rows copy, and with them the store's claim to cover
     /// those sessions' exits.
     pub(super) fn ignore_caught_up(&mut self, sessions: &HashSet<String>) {
-        self.rows
-            .retain(|row| row.live || !sessions.contains(&row.session));
+        drop_rows(&mut self.rows, |row| {
+            !row.live && sessions.contains(&row.session)
+        });
     }
 
     /// Superseding a session's snapshots from its readable rows alone would
@@ -112,8 +142,13 @@ impl CallLedger {
             }
         }
         let falls_back = |sid: &String| self.unattributed || self.incomplete.contains(sid);
+        let caught_up = &self.caught_up;
         self.rows.retain(|row| {
-            let Some(model) = row.call.as_ref().and_then(|call| call.event.model.as_ref()) else {
+            let Some((key, model)) = row
+                .call
+                .as_ref()
+                .and_then(|call| Some((call.key.as_ref()?, call.event.model.as_ref()?)))
+            else {
                 return true;
             };
             // A live row stamped just after the exit can be a call that exit
@@ -123,10 +158,10 @@ impl CallLedger {
                 .filter(|_| falls_back(&row.session))
                 .and_then(|models| models.get(model.as_str()))
                 .is_none_or(|exit| {
-                    let covered_to = if row.live {
-                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
-                    } else {
+                    let covered_to = if caught_up.contains(key) {
                         *exit
+                    } else {
+                        exit.checked_add(LIVE_SLACK).unwrap_or(*exit)
                     };
                     row.time > covered_to
                 })
@@ -476,6 +511,71 @@ pub(super) mod tests {
             )
             .expect("usage row should insert");
         }
+    }
+
+    /// A live row sharing its id with a caught-up row reads as caught up
+    /// where a session falls back, so the 60 s after the exit don't take it.
+    #[test]
+    fn a_live_row_sharing_a_caught_up_id_falls_back_as_caught_up() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!("{}\n", shutdown("e-1", "2026-07-28T00:00:00.000Z", 450, 50)),
+        );
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT, cwd TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER, session_id TEXT, turn_index INTEGER, agent_id TEXT, model TEXT,
+                 input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER, reasoning_tokens INTEGER, total_nano_aiu INTEGER,
+                 initiator TEXT, created_at TEXT, event_id TEXT);
+             INSERT INTO sessions VALUES ('s1', '/Users/me/code/app'), ('s2', '/Users/me/code/app');
+             INSERT INTO assistant_usage_events (id, session_id, model, input_tokens,
+                 output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                 created_at, event_id)
+             VALUES (7, 's1', 'gpt-5-mini', 180, 20, 0, 0, 0, '2026-07-28T00:00:30.000Z', NULL),
+                    (7, 's2', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-27T12:00:00.000Z',
+                     'usage-record:7'),
+                    (8, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, 'not a time', NULL);",
+        )
+        .expect("store should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 700);
+    }
+
+    /// The review's case: a store whose table doesn't keep `id` unique, with
+    /// a live and a caught-up row sharing one. The caught-up row is a copy of
+    /// the live one, and its call key takes every row holding it.
+    #[test]
+    fn a_caught_up_copy_takes_every_row_with_its_id() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let conn =
+            Connection::open(temp.path().join("session-store.db")).expect("store should open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT, cwd TEXT);
+             CREATE TABLE assistant_usage_events (
+                 id INTEGER, session_id TEXT, turn_index INTEGER, agent_id TEXT, model TEXT,
+                 input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER, reasoning_tokens INTEGER, total_nano_aiu INTEGER,
+                 initiator TEXT, created_at TEXT, event_id TEXT);
+             INSERT INTO sessions VALUES ('s1', '/Users/me/code/app');
+             INSERT INTO assistant_usage_events (id, session_id, model, input_tokens,
+                 output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                 created_at, event_id)
+             VALUES (7, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-28T00:00:00.000Z', NULL),
+                    (7, 's1', 'gpt-5-mini', 90, 10, 0, 0, 0, '2026-07-28T00:00:00.000Z',
+                     'usage-record:7');",
+        )
+        .expect("store should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 0);
     }
 
     #[test]
