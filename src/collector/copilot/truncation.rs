@@ -46,7 +46,7 @@ pub(super) struct Truncated {
 /// segment counted again. The session's own records stay; its receipts
 /// already came off that exit. A copied exit whose cumulative the first
 /// exit's falls below is from an accounting epoch before a reset (the
-/// rule of `collect_shutdown_usage`), so the first exit doesn't hold it.
+/// rule `read_exit` counts exits by), so the first exit doesn't hold it.
 /// A receipt also goes by the session its accounting names: a fork of a
 /// fork made before the first fork's marker files the copy under the
 /// first fork. One the exit's watermark holds is inside it however it's
