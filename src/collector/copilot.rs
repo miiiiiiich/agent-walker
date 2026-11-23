@@ -3,6 +3,7 @@ mod ledger;
 mod receipts;
 mod segments;
 mod sources;
+mod truncation;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
@@ -44,7 +45,7 @@ pub fn collect(
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::take_fork_times(&mut per_file);
-    forks::drop_copies_inside_truncated_exits(&mut per_file);
+    truncation::drop_copies_inside_truncated_exits(&mut per_file);
     forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
     let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
@@ -181,7 +182,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     let truncated = session
         .first_exit
         .zip(session_id.clone())
-        .map(|(at, session)| (forks::TRUNCATED_PREFIX, (session, at)));
+        .map(|(at, session)| (truncation::TRUNCATED_PREFIX, (session, at)));
     let fork_times = session
         .fork_times
         .into_iter()
