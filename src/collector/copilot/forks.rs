@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -15,6 +15,62 @@ pub(super) const FORK_PREFIX: &str = "copilot-fork:";
 /// Likewise, from the parent's marker: used only for a fork whose own
 /// marker isn't read, its journal gone.
 pub(super) const FORKED_INTO_PREFIX: &str = "copilot-forked-into:";
+
+/// Key prefix of the event carrying a session whose journal lost its oldest
+/// segment, and the time of its first exit read.
+pub(super) const TRUNCATED_PREFIX: &str = "copilot-truncated:";
+
+/// A journal missing its oldest segment counts everything before its first
+/// exit read in that exit, so copies of the session's history held by other
+/// journals (a fork's) and dated up to it give way: kept, a fork's copy of a
+/// receipt or exit from the missing segment counted again. The session's
+/// own records stay; its receipts already came off that exit.
+pub(super) fn drop_copies_inside_truncated_exits(per_file: &mut [(PathBuf, Option<FileEvents>)]) {
+    let mut first_exits: HashMap<String, OffsetDateTime> = HashMap::new();
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events.usage_events.retain(|keyed| {
+            if !keyed
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(TRUNCATED_PREFIX))
+            {
+                return true;
+            }
+            if let (Some(session), Some(time)) =
+                (keyed.event.session_id.clone(), keyed.event.timestamp)
+            {
+                first_exits
+                    .entry(session)
+                    .and_modify(|at| *at = (*at).max(time))
+                    .or_insert(time);
+            }
+            false
+        });
+    }
+    if first_exits.is_empty() {
+        return;
+    }
+    for (path, events) in per_file.iter_mut() {
+        let Some(events) = events.as_mut() else {
+            continue;
+        };
+        let journal = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        events.usage_events.retain(|keyed| {
+            let (Some(session), Some(time)) =
+                (keyed.event.session_id.as_deref(), keyed.event.timestamp)
+            else {
+                return true;
+            };
+            journal == Some(session) || first_exits.get(session).is_none_or(|first| time > *first)
+        });
+    }
+}
 
 /// A fork's journal opens with a copy of its parent's history, event ids
 /// and all, then a `session.info` of `infoType` "fork" reading "Forked from
@@ -504,6 +560,87 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110);
+    }
+
+    fn journal_link(session: &str, at: &str) -> String {
+        json!({
+            "type": "session.journal_link",
+            "id": format!("l-{session}"),
+            "timestamp": at,
+            "data": {"version": 1, "sessionId": session, "previousFile": "events.1.jsonl"},
+        })
+        .to_string()
+    }
+
+    /// The review's case: the parent's first segment is gone, so its first
+    /// exit still in view counts everything before it, receipt 1's call
+    /// included; the fork's copy of receipt 1 doesn't count again.
+    #[test]
+    fn a_forks_copy_inside_a_truncated_parents_first_exit_doesnt_count() {
+        use crate::collector::copilot::receipts::tests::{marked, receipt};
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                receipt("2026-07-27T10:30:00.000Z", "parent", 2, 90, 10),
+                marked(
+                    &shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+                    r#"{"parent":2}"#,
+                ),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                receipt("2026-07-27T10:00:00.000Z", "parent", 1, 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// The same with no receipts: the fork's copy of an exit the missing
+    /// segment held is inside the parent's first exit still in view.
+    #[test]
+    fn a_forks_copied_exit_inside_a_truncated_parents_first_exit_doesnt_count() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "parent",
+            &lines(&[
+                journal_link("parent", "2026-07-27T10:20:00.000Z"),
+                shutdown("e-2", "2026-07-27T11:00:00.000Z", 180, 20),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T10:15:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:05:00.000Z", 90, 10),
+                fork_info(
+                    "m-1",
+                    "2026-07-27T10:15:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 200);
     }
 
     /// A parent known only by caught-up rows, its journal gone, keeps them:

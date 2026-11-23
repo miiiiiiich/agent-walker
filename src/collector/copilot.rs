@@ -44,6 +44,7 @@ pub fn collect(
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::take_fork_times(&mut per_file);
+    forks::drop_copies_inside_truncated_exits(&mut per_file);
     let db_path = root.join("session-store.db");
     let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
     if per_file.is_empty() && ledger.is_none() {
@@ -151,9 +152,12 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
     let journal = segments::journal(path, &mut events)?;
-    let mut session = SessionState::default();
+    let mut session = SessionState {
+        truncated: journal.truncated,
+        ..SessionState::default()
+    };
 
-    for file in &journal {
+    for file in &journal.files {
         let reader = match open_regular(file) {
             Ok(reader) => reader,
             Err(_) if file == path => return None,
@@ -173,6 +177,10 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
     session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
+    let truncated = session
+        .first_exit
+        .zip(session_id.clone())
+        .map(|(at, session)| (forks::TRUNCATED_PREFIX, (session, at)));
     let fork_times = session
         .fork_times
         .into_iter()
@@ -181,7 +189,7 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .forked_into
         .into_iter()
         .map(|fork| (forks::FORKED_INTO_PREFIX, fork));
-    for (prefix, (fork, at)) in fork_times.chain(forked_into) {
+    for (prefix, (fork, at)) in fork_times.chain(forked_into).chain(truncated) {
         events.usage_events.push(KeyedUsageEvent {
             key: Some(format!("{prefix}{fork}")),
             event: UsageEvent {
@@ -223,6 +231,11 @@ struct SessionState {
     fork_times: Vec<(String, OffsetDateTime)>,
     /// Each fork a parent's own marker names, and when.
     forked_into: Vec<(String, OffsetDateTime)>,
+    /// The journal's oldest segment is gone, so its first exit read counts
+    /// everything before it.
+    truncated: bool,
+    /// That first exit's time, once read.
+    first_exit: Option<OffsetDateTime>,
     /// Each model's latest exit since the last fork marker whose total or
     /// watermark for it moved.
     latest_exits: BTreeMap<String, OffsetDateTime>,
@@ -413,6 +426,9 @@ impl SessionState {
                     self.shutdown_index,
                     events,
                 );
+                if self.truncated && self.first_exit.is_none() && !advanced.is_empty() {
+                    self.first_exit = timestamp;
+                }
                 // The latest time, not the last read: a clock moved back dated
                 // a later exit before one covering a row.
                 if let Some(at) = timestamp {

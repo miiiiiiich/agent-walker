@@ -17,15 +17,23 @@ const MAX_SEGMENTS: usize = 10_000;
 /// predecessor that is missing or unreadable ends the chain there (an
 /// unreadable one as a parse error), so the journal degrades to the files
 /// after it. `None` when the head itself can't be opened.
-pub(super) fn journal(head: &Path, events: &mut FileEvents) -> Option<Vec<PathBuf>> {
+pub(super) struct Journal {
+    pub(super) files: Vec<PathBuf>,
+    /// The chain ends at a predecessor it names but couldn't follow.
+    pub(super) truncated: bool,
+}
+
+pub(super) fn journal(head: &Path, events: &mut FileEvents) -> Option<Journal> {
     let dir = head.parent()?;
     let mut chain = vec![head.to_path_buf()];
     let mut previous = predecessor(head).ok()?;
     let mut below: Option<u64> = None;
+    let mut truncated = false;
     while let Some((number, name)) = previous.take() {
         // Copilot rejects a chain whose numbers don't fall; following one
         // could loop.
         if below.is_some_and(|below| number >= below) || chain.len() >= MAX_SEGMENTS {
+            truncated = true;
             break;
         }
         let path = dir.join(name);
@@ -35,6 +43,7 @@ pub(super) fn journal(head: &Path, events: &mut FileEvents) -> Option<Vec<PathBu
                 if error.kind() != io::ErrorKind::NotFound {
                     events.parse_errors += 1;
                 }
+                truncated = true;
                 break;
             }
         };
@@ -43,7 +52,10 @@ pub(super) fn journal(head: &Path, events: &mut FileEvents) -> Option<Vec<PathBu
         previous = next;
     }
     chain.reverse();
-    Some(chain)
+    Some(Journal {
+        files: chain,
+        truncated,
+    })
 }
 
 /// Whether `head` names a numbered predecessor, followed or not: its parse
