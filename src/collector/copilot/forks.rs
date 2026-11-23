@@ -6,6 +6,9 @@ use time::OffsetDateTime;
 
 use crate::collector::FileEvents;
 use crate::collector::ident::ident;
+use crate::model::UsageGranularity;
+
+use super::receipts::source_of;
 
 /// Key prefix of the event carrying a fork's own session and the time of
 /// its fork, taken out by `take_fork_times` before anything else reads the
@@ -15,6 +18,39 @@ pub(super) const FORK_PREFIX: &str = "copilot-fork:";
 /// Likewise, from the parent's marker: used only for a fork whose own
 /// marker isn't read, its journal gone.
 pub(super) const FORKED_INTO_PREFIX: &str = "copilot-forked-into:";
+
+/// A session can't have used anything before it existed: a fork's usage
+/// dated up to its fork is a copy of its parent's history, whether or not a
+/// marker named the parent. Only a receipt naming another session as its
+/// source stays, for that source to decide. The store's rows get the same
+/// cut when they are read.
+pub(super) fn drop_before_fork(
+    per_file: &mut [(PathBuf, Option<FileEvents>)],
+    forked: &HashMap<String, OffsetDateTime>,
+) {
+    if forked.is_empty() {
+        return;
+    }
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events.usage_events.retain(|keyed| {
+            let (Some(session), Some(time)) =
+                (keyed.event.session_id.as_deref(), keyed.event.timestamp)
+            else {
+                return true;
+            };
+            let named_elsewhere = keyed.event.granularity == UsageGranularity::Call
+                && keyed
+                    .key
+                    .as_deref()
+                    .and_then(source_of)
+                    .is_some_and(|source| source != session);
+            named_elsewhere || forked.get(session).is_none_or(|fork| time > *fork)
+        });
+    }
+}
 
 /// Key prefix of the event carrying a session whose journal lost its oldest
 /// segment, and the time of its first exit read.
@@ -481,7 +517,13 @@ pub(in crate::collector::copilot) mod tests {
         let temp = TempDir::new().expect("test tempdir should be created");
         let mut journal = String::new();
         for sequence in 1..=N {
-            journal.push_str(&receipt("2026-07-27T10:00:00.000Z", "s1", sequence, 1, 1));
+            journal.push_str(&receipt(
+                "2026-07-27T10:00:00.000Z",
+                "parent",
+                sequence,
+                1,
+                1,
+            ));
             journal.push('\n');
         }
         let unreadable = fork_info("m", "2026-07-27T11:00:00.000Z", r#"Forked from "broken"#);
@@ -641,6 +683,70 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 200);
+    }
+
+    /// A session can't have used anything before it existed: a fork's
+    /// receipt without an accounting identity dated before its start is a
+    /// copy, whether the marker is missing or unreadable.
+    #[test]
+    fn a_forks_records_from_before_it_existed_dont_count() {
+        for marker in [None, Some(r#"Forked from "broken as fork."#)] {
+            let temp = TempDir::new().expect("test tempdir should be created");
+            let bare = json!({
+                "type": "session.usage_record",
+                "id": "u-1",
+                "timestamp": "2026-07-27T10:00:00.000Z",
+                "data": {"usage": {"model": "gpt-5-mini", "inputTokens": 100, "outputTokens": 10, "cacheReadTokens": 0, "cacheWriteTokens": 0, "reasoningTokens": 0}},
+            })
+            .to_string();
+            let mut fork = vec![fork_start("fork", "2026-07-27T12:00:00.000Z"), bare];
+            fork.extend(
+                marker.map(|message| fork_info("m-1", "2026-07-27T12:00:00.000Z", message)),
+            );
+            write_session(temp.path(), "fork", &lines(&fork));
+            write_store(
+                temp.path(),
+                &[call("parent", "2026-07-27T10:00:00.500Z", 100, 10)],
+            );
+
+            let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+            assert_eq!(total_volume(&collection), 110, "{marker:?}");
+        }
+    }
+
+    /// A fork of a marker-less fork: the copy of the first fork's own copied
+    /// exit, relabelled to it, predates that fork and doesn't count.
+    #[test]
+    fn a_copy_dated_before_its_owner_existed_doesnt_count() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "f1",
+            &lines(&[
+                fork_start("f1", "2026-07-27T11:00:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:30:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T12:00:00.000Z", 400, 40),
+            ]),
+        );
+        write_session(
+            temp.path(),
+            "f2",
+            &lines(&[
+                fork_start("f2", "2026-07-27T13:00:00.000Z"),
+                shutdown("e-1", "2026-07-27T10:30:00.000Z", 100, 10),
+                shutdown("e-2", "2026-07-27T12:00:00.000Z", 400, 40),
+                fork_info("m-1", "2026-07-27T13:00:00.000Z", "Forked from f1 as f2."),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[call("parent", "2026-07-27T10:00:00.000Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 440);
     }
 
     /// A parent known only by caught-up rows, its journal gone, keeps them:

@@ -98,7 +98,13 @@ user.
   `sourceSessionId`. A fork can't have made a call before it existed, so
   its store rows dated up to its marker (without a marker naming it, up to
   its start) aren't read: whether the CLI caught them up from the copied
-  receipts or the store copied them, they repeat the parent's history.
+  receipts or the store copied them, they repeat the parent's history. Its
+  journal's own usage dated up to then doesn't count either, except a
+  receipt naming another session as its source. These rules were read
+  from Copilot's fork path for custom session filesystems; the default
+  on-disk fork runs natively and isn't verified, and if it writes no
+  marker, this before-it-existed cut is what keeps each call counted
+  once.
   With the fork's journal gone, the parent's own marker ("Forked this
   session into <fork>.") dates the fork instead; the parent's history stays
   its own. When a journal has lost its oldest segment, its first exit

@@ -45,6 +45,7 @@ pub fn collect(
     let mut per_file = parse_heads(files, use_cache, local_offset);
     let forked = forks::take_fork_times(&mut per_file);
     forks::drop_copies_inside_truncated_exits(&mut per_file);
+    forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
     let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
     if per_file.is_empty() && ledger.is_none() {
