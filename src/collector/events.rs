@@ -28,6 +28,8 @@ pub struct FileEvents {
     /// Decided across files after parsing, like `claude_cost_state`.
     #[serde(default)]
     pub codex_held: Option<super::codex::HeldWindow>,
+    #[serde(default)]
+    pub copilot: Option<super::copilot::JournalSummary>,
     pub lines_seen: usize,
     pub parse_errors: usize,
 }

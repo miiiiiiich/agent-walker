@@ -404,8 +404,8 @@ mod tests {
         let path = postcard::to_stdvec(&PathBuf::from("/a")).unwrap();
 
         // mtime_ns, size, 11 empty event vectors, no cost-state rows, no
-        // Codex held rows, lines_seen, parse_errors.
-        let valid = [one_entry.clone(), path.clone(), vec![0; 17]].concat();
+        // Codex held rows, no Copilot summary, lines_seen, parse_errors.
+        let valid = [one_entry.clone(), path.clone(), vec![0; 18]].concat();
         assert!(
             decode(&valid).is_some(),
             "the crafted layout is a real cache"

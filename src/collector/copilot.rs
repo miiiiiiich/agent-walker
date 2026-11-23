@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -44,7 +45,7 @@ pub fn collect(
     let mut collection = Collection::new(Provider::Copilot, root.to_path_buf());
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
     let mut per_file = parse_heads(files, use_cache, local_offset);
-    let forked = forks::take_fork_times(&mut per_file);
+    let forked = forks::fork_times(&per_file);
     let truncated = truncation::take(&mut per_file);
     forks::drop_before_fork(&mut per_file, &forked);
     let db_path = root.join("session-store.db");
@@ -182,31 +183,32 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
 
     session.mark_latest_exits(session_id.as_ref(), &mut events);
     session.drop_unnamed_copies(session_id.as_ref(), &mut events);
-    if let Some(sid) = &session_id {
-        for (model, exit) in session.first_exits {
-            events
-                .usage_events
-                .extend(exit.map(|exit| truncation::first_exit(sid, model, &exit)));
-        }
-    }
-    let fork_times = session
-        .fork_times
-        .into_iter()
-        .map(|fork| (forks::FORK_PREFIX, fork));
-    let forked_into = session
-        .forked_into
-        .into_iter()
-        .map(|fork| (forks::FORKED_INTO_PREFIX, fork));
-    for (prefix, (fork, at)) in fork_times.chain(forked_into) {
-        events.usage_events.push(helper_event(
-            format!("{prefix}{fork}"),
-            Some(fork),
-            None,
-            at,
-        ));
-    }
+    events.copilot = Some(JournalSummary {
+        forks: session.fork_times,
+        forked_into: session.forked_into,
+        first_exits: session
+            .first_exits
+            .into_iter()
+            .filter_map(|(model, exit)| Some((model, exit?)))
+            .filter(|_| session_id.is_some())
+            .collect(),
+    });
     events.compress_touches(local_offset);
     Some(events)
+}
+
+/// What reconciling the journals needs of each besides its events, cached
+/// with them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JournalSummary {
+    /// Each fork this journal's own markers name (its own session, when it's
+    /// a fork with no marker), and when it was made.
+    forks: Vec<(String, OffsetDateTime)>,
+    /// Each fork a parent's own marker here names, and when.
+    forked_into: Vec<(String, OffsetDateTime)>,
+    /// With the journal's oldest segment gone, each model's first exit read
+    /// that counted something.
+    first_exits: Vec<(String, truncation::FirstExit)>,
 }
 
 /// An event carrying data from parsing to reconciliation, stripped before
@@ -483,7 +485,7 @@ struct Line<'a> {
     event_id: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct RawCounters {
     input: u64,
     output: u64,
@@ -810,6 +812,39 @@ mod tests {
         format!(
             r#"{{"type":"session.shutdown","id":"{id}","timestamp":"{at}","data":{{"modelMetrics":{{"gpt-5-mini":{{"usage":{{"inputTokens":{input},"outputTokens":{output},"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0}}}}}}}}}}"#
         )
+    }
+
+    /// The summary rides in the parse cache with the events.
+    #[test]
+    fn a_journal_summary_survives_the_cache_encoding() {
+        let at = parse_rfc3339("2026-07-27T10:00:00.000Z").expect("time should parse");
+        let counters = RawCounters {
+            input: 90,
+            output: 10,
+            ..RawCounters::default()
+        };
+        let summary = JournalSummary {
+            forks: vec![("fork".to_owned(), at)],
+            forked_into: vec![("other".to_owned(), at)],
+            first_exits: vec![(
+                "gpt-5-mini".to_owned(),
+                truncation::FirstExit {
+                    at,
+                    counters,
+                    mark: Some(2),
+                    key: "copilot:e-1:gpt-5-mini".to_owned(),
+                },
+            )],
+        };
+        let events = FileEvents {
+            copilot: Some(summary),
+            ..FileEvents::default()
+        };
+
+        let bytes = postcard::to_stdvec(&events).expect("events should encode");
+        let decoded: FileEvents = postcard::from_bytes(&bytes).expect("events should decode");
+
+        assert_eq!(decoded.copilot, events.copilot);
     }
 
     /// Cache writes come out of fresh input, so each counts once.

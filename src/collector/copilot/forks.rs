@@ -10,15 +10,6 @@ use crate::model::UsageGranularity;
 
 use super::receipts::source_of;
 
-/// Key prefix of the event carrying a fork's own session and the time of
-/// its fork, taken out by `take_fork_times` before anything else reads the
-/// events.
-pub(super) const FORK_PREFIX: &str = "copilot-fork:";
-
-/// Likewise, from the parent's marker: used only for a fork whose own
-/// marker isn't read, its journal gone.
-pub(super) const FORKED_INTO_PREFIX: &str = "copilot-forked-into:";
-
 /// A session can't have used anything before it existed: a fork's usage
 /// dated up to its fork is a copy of its parent's history, whether or not a
 /// marker named the parent. Only a receipt naming another session as its
@@ -116,36 +107,28 @@ fn session_ref(text: &str) -> Option<(&str, &str)> {
     Some((ident(id).filter(|_| valid)?, rest))
 }
 
-/// Each fork's session and the time of its fork, taken out of the events:
-/// from the fork's own marker, or failing that the parent's.
-pub(super) fn take_fork_times(
-    per_file: &mut [(PathBuf, Option<FileEvents>)],
+/// Each fork's session and the time of its fork: from the fork's own
+/// marker, or failing that the parent's.
+pub(super) fn fork_times(
+    per_file: &[(PathBuf, Option<FileEvents>)],
 ) -> HashMap<String, OffsetDateTime> {
     let mut own: HashMap<String, OffsetDateTime> = HashMap::new();
     let mut named: HashMap<String, OffsetDateTime> = HashMap::new();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
+    for summary in per_file
+        .iter()
+        .filter_map(|(_, events)| events.as_ref()?.copilot.as_ref())
     {
-        events.usage_events.retain(|keyed| {
-            let key = keyed.key.as_deref().unwrap_or_default();
-            let forks = if key.starts_with(FORK_PREFIX) {
-                &mut own
-            } else if key.starts_with(FORKED_INTO_PREFIX) {
-                &mut named
-            } else {
-                return true;
-            };
-            if let (Some(session), Some(time)) =
-                (keyed.event.session_id.clone(), keyed.event.timestamp)
-            {
+        for (forks, found) in [
+            (&mut own, &summary.forks),
+            (&mut named, &summary.forked_into),
+        ] {
+            for (session, time) in found {
                 forks
-                    .entry(session)
-                    .and_modify(|at| *at = (*at).max(time))
-                    .or_insert(time);
+                    .entry(session.clone())
+                    .and_modify(|at| *at = (*at).max(*time))
+                    .or_insert(*time);
             }
-            false
-        });
+        }
     }
     for (fork, at) in named {
         own.entry(fork).or_insert(at);

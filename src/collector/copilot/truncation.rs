@@ -1,26 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use time::OffsetDateTime;
-
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::collector::{FileEvents, KeyedUsageEvent};
 use crate::model::TokenUsage;
 
+use super::RawCounters;
 use super::receipts::identity_of;
-use super::{RawCounters, helper_event};
-
-/// Key prefix of the event carrying a model's first exit read in a journal
-/// that lost its oldest segment: the session, model, time and cumulative,
-/// and after the prefix the exit's watermark for the session's own receipts
-/// and the exit's key.
-const TRUNCATED_PREFIX: &str = "copilot-truncated:";
 
 /// Key prefix of the event carrying an exit's cumulative, for the exit keyed
 /// by the rest of the key: the exit itself counts only what's new.
 const CUMULATIVE_PREFIX: &str = "copilot-cumulative:";
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct FirstExit {
     pub(super) at: OffsetDateTime,
     pub(super) counters: RawCounters,
@@ -39,18 +34,6 @@ pub(super) fn own_mark(exit: &Value, session_id: Option<&String>) -> Option<u64>
         None => Some(u64::MAX),
         Some(marks) => marks.get(session_id?.as_str())?.as_u64(),
     }
-}
-
-pub(super) fn first_exit(session: &str, model: String, exit: &FirstExit) -> KeyedUsageEvent {
-    let mark = exit.mark.map(|mark| mark.to_string()).unwrap_or_default();
-    let mut event = helper_event(
-        format!("{TRUNCATED_PREFIX}{mark}:{}", exit.key),
-        Some(session.to_owned()),
-        Some(model),
-        exit.at,
-    );
-    event.event.usage = carried(exit.counters);
-    event
 }
 
 pub(super) fn cumulative(exit: &KeyedUsageEvent, counters: RawCounters) -> Option<KeyedUsageEvent> {
@@ -93,45 +76,33 @@ pub(super) struct Truncated {
     cumulatives: HashMap<String, RawCounters>,
 }
 
-/// Takes both kinds of event out before anything counts them.
+/// Takes the cumulatives out of the events before anything counts them.
 pub(super) fn take(per_file: &mut [(PathBuf, Option<FileEvents>)]) -> Truncated {
     let mut truncated = Truncated::default();
-    for events in per_file
-        .iter_mut()
-        .filter_map(|(_, events)| events.as_mut())
-    {
-        events.usage_events.retain(|keyed| {
-            let Some(key) = keyed.key.as_deref() else {
-                return true;
-            };
-            let event = &keyed.event;
-            if let Some(exit) = key.strip_prefix(CUMULATIVE_PREFIX) {
-                truncated
-                    .cumulatives
-                    .insert(exit.to_owned(), held(&event.usage));
-                return false;
-            }
-            let Some(rest) = key.strip_prefix(TRUNCATED_PREFIX) else {
-                return true;
-            };
-            if let (Some(session), Some(model), Some(at), Some((mark, exit_key))) = (
-                &event.session_id,
-                &event.model,
-                event.timestamp,
-                rest.split_once(':'),
-            ) {
-                let exit = FirstExit {
-                    at,
-                    counters: held(&event.usage),
-                    mark: mark.parse().ok(),
-                    key: exit_key.to_owned(),
-                };
+    for (path, events) in per_file.iter_mut() {
+        let Some(events) = events.as_mut() else {
+            continue;
+        };
+        if let (Some(session), Some(summary)) = (journal(path), &events.copilot) {
+            for (model, exit) in &summary.first_exits {
                 truncated
                     .first_exits
-                    .entry(session.clone())
+                    .entry(session.to_owned())
                     .or_default()
-                    .insert(model.clone(), exit);
+                    .insert(model.clone(), exit.clone());
             }
+        }
+        events.usage_events.retain(|keyed| {
+            let Some(exit) = keyed
+                .key
+                .as_deref()
+                .and_then(|key| key.strip_prefix(CUMULATIVE_PREFIX))
+            else {
+                return true;
+            };
+            truncated
+                .cumulatives
+                .insert(exit.to_owned(), held(&keyed.event.usage));
             false
         });
     }
