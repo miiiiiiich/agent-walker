@@ -66,12 +66,7 @@ fn rate_card(listed: &Rates, keys: &RateKeys) -> Option<RateCard> {
 /// of bounds, there is no tier, and its calls price at standard rates.
 fn service_card(keys: &RateKeys, standard: &RateKeys) -> Option<RateCard> {
     keys.rates[INPUT]?;
-    let mut listed = standard.rates;
-    for (slot, rate) in keys.rates.iter().enumerate() {
-        if rate.is_some() {
-            listed[slot] = *rate;
-        }
-    }
+    let listed: Rates = std::array::from_fn(|slot| keys.rates[slot].or(standard.rates[slot]));
     rate_card(&listed, keys)
 }
 
