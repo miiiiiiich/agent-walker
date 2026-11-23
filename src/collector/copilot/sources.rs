@@ -6,9 +6,10 @@ use crate::model::{TokenUsage, UsageGranularity};
 
 use super::receipts::source_of;
 
-/// Key prefix of what an exit's own receipts carried, for the exit keyed by
-/// the rest of the key. Stripped here, before anything else reads the events.
-pub(super) const OWN_PREFIX: &str = "copilot-own:";
+/// Key prefix of an exit less its journal's own receipts, for the exit keyed
+/// by the rest of the key. Stripped here, before anything else reads the
+/// events.
+pub(super) const REST_PREFIX: &str = "copilot-rest:";
 
 /// One source per session that made calls. On the store, its rows and its
 /// exits count and its receipts don't; otherwise its receipts count and its
@@ -39,12 +40,12 @@ pub(super) fn choose_sources(
         .iter_mut()
         .filter_map(|(_, events)| events.as_mut())
     {
-        let mut own: HashMap<String, TokenUsage> = HashMap::new();
+        let mut rest: HashMap<String, TokenUsage> = HashMap::new();
         events.usage_events.retain(|keyed| {
             let Some(exit) = keyed
                 .key
                 .as_deref()
-                .and_then(|key| key.strip_prefix(OWN_PREFIX))
+                .and_then(|key| key.strip_prefix(REST_PREFIX))
             else {
                 return true;
             };
@@ -54,13 +55,13 @@ pub(super) fn choose_sources(
                 .as_ref()
                 .is_some_and(|sid| !on_store(sid))
             {
-                own.insert(exit.to_owned(), keyed.event.usage.clone());
+                rest.insert(exit.to_owned(), keyed.event.usage.clone());
             }
             false
         });
         for keyed in &mut events.usage_events {
-            if let Some(carried) = keyed.key.as_ref().and_then(|key| own.get(key)) {
-                take_off(&mut keyed.event.usage, carried);
+            if let Some(rest) = keyed.key.as_ref().and_then(|key| rest.get(key)) {
+                keyed.event.usage = rest.clone();
             }
         }
         events
@@ -84,18 +85,4 @@ pub(super) fn choose_sources(
         .filter(|session| !on_store(session))
         .cloned()
         .collect()
-}
-
-fn take_off(usage: &mut TokenUsage, carried: &TokenUsage) {
-    usage.input_tokens = usage.input_tokens.saturating_sub(carried.input_tokens);
-    usage.output_tokens = usage.output_tokens.saturating_sub(carried.output_tokens);
-    usage.reasoning_output_tokens = usage
-        .reasoning_output_tokens
-        .saturating_sub(carried.reasoning_output_tokens);
-    usage.cache_read_input_tokens = usage
-        .cache_read_input_tokens
-        .saturating_sub(carried.cache_read_input_tokens);
-    usage.cache_creation_input_tokens = usage
-        .cache_creation_input_tokens
-        .saturating_sub(carried.cache_creation_input_tokens);
 }

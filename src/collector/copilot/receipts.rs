@@ -394,6 +394,25 @@ pub(super) mod tests {
         }
     }
 
+    /// An exit's remainder is taken before cache reads are split out of
+    /// input: taken after, an exit that leaves the cache counters out kept
+    /// the receipt's cached input as fresh.
+    #[test]
+    fn an_exits_remainder_is_taken_before_splitting_out_cache_reads() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cached = receipt("2026-07-27T10:00:00.000Z", "s1", 1, 100, 0).replacen(
+            r#""cacheReadTokens":0"#,
+            r#""cacheReadTokens":80"#,
+            1,
+        );
+        let exit = r#"{"type":"session.shutdown","id":"e-1","timestamp":"2026-07-27T11:00:00.000Z","data":{"usageAccountingWatermarks":{"s1":1},"modelMetrics":{"gpt-5-mini":{"usage":{"inputTokens":100,"outputTokens":0}}}}}"#;
+        write(&temp, "s1", &[cached, exit.to_owned()]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 100);
+    }
+
     #[test]
     fn an_undated_receipt_is_left_to_the_next_exit() {
         let temp = TempDir::new().expect("test tempdir should be created");

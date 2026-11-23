@@ -27,7 +27,7 @@ use crate::timestamp::parse_rfc3339;
 
 use ledger::read_call_ledger;
 use receipts::Receipts;
-use sources::{OWN_PREFIX, choose_sources};
+use sources::{REST_PREFIX, choose_sources};
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -399,15 +399,16 @@ fn collect_shutdown_usage(
             (None, None) => None,
         };
         // The journal's own receipts come off only if its session has no
-        // store rows, which parsing can't see: what they carried goes along
-        // for `choose_sources`.
-        let own = covered.own.to_usage();
+        // store rows, which parsing can't see: the exit without them goes
+        // along for `choose_sources`. Taken off after cache reads were split
+        // out of input, an exit without the cache counters kept the
+        // receipts' cached input as fresh.
         if let Some(key) = &key
-            && own.token_volume() > 0
+            && covered.own.to_usage().token_volume() > 0
         {
             events.usage_events.push(KeyedUsageEvent {
-                key: Some(format!("{OWN_PREFIX}{key}")),
-                event: exit_usage(line, Some(model), None, own),
+                key: Some(format!("{REST_PREFIX}{key}")),
+                event: exit_usage(line, Some(model), None, delta.minus(covered.own).to_usage()),
             });
         }
         events.usage_events.push(KeyedUsageEvent {
