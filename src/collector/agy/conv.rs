@@ -150,14 +150,9 @@ fn newest_mtime_ms(db: &Path) -> Option<i64> {
     ["", "-wal", "-shm"]
         .iter()
         .filter_map(|suffix| {
-            let path = if suffix.is_empty() {
-                db.to_path_buf()
-            } else {
-                let mut name = db.as_os_str().to_owned();
-                name.push(suffix);
-                std::path::PathBuf::from(name)
-            };
-            std::fs::metadata(path)
+            let mut name = db.as_os_str().to_owned();
+            name.push(suffix);
+            std::fs::metadata(name)
                 .ok()
                 .and_then(|meta| meta.modified().ok())
                 .and_then(systemtime_to_ms)
