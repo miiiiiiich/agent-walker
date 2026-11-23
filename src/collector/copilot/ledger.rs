@@ -17,7 +17,8 @@ use super::{MAX_SANE_TOKENS, RawCounters};
 const CATCH_UP_PREFIX: &str = "usage-record:";
 
 /// Copilot's own totals drop a caught-up row dated from 60 s before the
-/// session's first live row on, as a copy of a live one.
+/// session's first live row on, as a copy of a live one; the store's
+/// coverage of the session's exits starts there too.
 const LIVE_SLACK: Duration = Duration::seconds(60);
 
 #[derive(Default)]
@@ -147,12 +148,15 @@ impl CallLedger {
             .retain(|session, _| !sessions.contains(session));
     }
 
-    /// From a session's first recorded call on, its rows replace its
-    /// snapshots; earlier snapshots still count, and a session that fell
-    /// back keeps them all. A fork's copy of a superseded snapshot (same
-    /// key) is dropped too, or the parent's calls would count again under
-    /// the fork. Receipts are left alone: `choose_sources` settled them, and
-    /// one that counts can sit in a journal whose session has rows.
+    /// From a session's first recorded call on, or 60 s before its first
+    /// live row if that's earlier, its rows replace its snapshots; earlier
+    /// snapshots still count, and a session that fell back keeps them all.
+    /// From the first live row alone, an exit a moment before it counted
+    /// beside the row of a call it covered. A fork's copy of a superseded
+    /// snapshot (same key) is dropped too, or the parent's calls would count
+    /// again under the fork. Receipts are left alone: `choose_sources`
+    /// settled them, and one that counts can sit in a journal whose session
+    /// has rows.
     pub(super) fn supersede_log_usage(&self, per_file: &mut [(PathBuf, Option<FileEvents>)]) {
         let mut superseded: HashSet<String> = HashSet::new();
         for events in per_file
@@ -170,7 +174,13 @@ impl CallLedger {
                 let Some(first) = self.first_call.get(sid) else {
                     return true;
                 };
-                let before_store = keyed.event.timestamp.is_some_and(|time| time < *first);
+                let covered_from = self.first_live.get(sid).map_or(*first, |live| {
+                    (*first).min(live.checked_sub(LIVE_SLACK).unwrap_or(*live))
+                });
+                let before_store = keyed
+                    .event
+                    .timestamp
+                    .is_some_and(|time| time < covered_from);
                 if !before_store && let Some(key) = &keyed.key {
                     superseded.insert(key.clone());
                 }
@@ -1582,6 +1592,34 @@ pub(super) mod tests {
             &format!(
                 "{}\n",
                 receipt("2026-07-27T10:00:00.000Z", "other", 1, 100, 10)
+            ),
+        );
+        write_store(
+            temp.path(),
+            &[call("s1", "2026-07-27T10:00:00.500Z", 100, 10)],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110);
+    }
+
+    /// An exit just before the session's first live row can cover that
+    /// row's call: the store's coverage starts 60 s before its first live
+    /// row, as Copilot's own totals take it, and the exit gives way.
+    #[test]
+    fn an_exit_just_before_the_first_live_row_gives_way_to_it() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_session(
+            temp.path(),
+            "s1",
+            &format!(
+                "{}\n{}\n",
+                receipt("2026-07-27T09:59:59.000Z", "s1", 1, 100, 10),
+                marked(
+                    &shutdown("e-1", "2026-07-27T10:00:00.000Z", 100, 10),
+                    r#"{"s1":1}"#
+                ),
             ),
         );
         write_store(

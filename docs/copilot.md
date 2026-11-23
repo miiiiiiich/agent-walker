@@ -105,9 +105,12 @@ user.
   them up from the copied receipts or the store copied them, they repeat
   the parent's history.
 
-  From a session's first recorded call on, its rows replace its snapshots;
-  snapshots dated before that call still count (a session resumed across a
-  CLI upgrade keeps the history from before the store existed). A
+  From a session's first recorded call on, or from 60 s before its first
+  live row if that's earlier, its rows replace its snapshots: an exit a
+  moment before the first live row may cover that row's call. Snapshots
+  dated before still count (a session resumed across a CLI upgrade keeps
+  the history from before the store existed); one in that last minute
+  before the store doesn't, even if its calls had no row. A
   caught-up row dated from 60 s before the session's first live row on is
   dropped, as Copilot drops it from its own totals. If any of a session's
   rows can't be read (a `created_at` that doesn't parse, a value of the
