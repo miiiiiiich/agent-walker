@@ -42,13 +42,13 @@ pub fn collect(
 ) -> Collection {
     let mut collection = Collection::new(Provider::Copilot, root.to_path_buf());
     let files = event_files(&root.join("session-state"), mtime_floor, &mut collection);
+    let mut per_file = parse_heads(files, use_cache, local_offset);
+    let forked = forks::take_fork_times(&mut per_file);
     let db_path = root.join("session-store.db");
-    let ledger = read_call_ledger(&db_path, local_offset, &mut collection);
-    if files.is_empty() && ledger.is_none() {
+    let ledger = read_call_ledger(&db_path, local_offset, &forked, &mut collection);
+    if per_file.is_empty() && ledger.is_none() {
         return collection;
     }
-
-    let mut per_file = parse_heads(files, use_cache, local_offset);
     let (live, caught_up) = ledger
         .as_ref()
         .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
@@ -171,6 +171,23 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     }
 
     session.drop_unnamed_copies(&mut events);
+    for (fork, at) in session.fork_times {
+        events.usage_events.push(KeyedUsageEvent {
+            key: Some(format!("{}{fork}", forks::FORK_PREFIX)),
+            event: UsageEvent {
+                timestamp: Some(at),
+                session_id: Some(fork),
+                model: None,
+                source_kind: SourceKind::Main,
+                attribution_agent: None,
+                attribution_skill: None,
+                project: None,
+                usage: TokenUsage::default(),
+                granularity: UsageGranularity::Aggregate,
+                billing: crate::model::Billing::default(),
+            },
+        });
+    }
     events.compress_touches(local_offset);
     Some(events)
 }
@@ -190,6 +207,8 @@ struct SessionState {
     forked: bool,
     /// The journal's own start, which Copilot dates at the fork.
     start: Option<OffsetDateTime>,
+    /// Each fork the markers name, and when it was made.
+    fork_times: Vec<(String, OffsetDateTime)>,
 }
 
 impl SessionState {
@@ -243,13 +262,16 @@ impl SessionState {
         if replayed && kind != Some("session.start") {
             return;
         }
-        if let Some(marker) = forks::fork_marker(value) {
-            self.close_copied_block(&marker, events);
-        }
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
+        if let Some(marker) = forks::fork_marker(value) {
+            self.close_copied_block(&marker, events);
+            if let (Some(child), Some(at)) = (marker.child, timestamp) {
+                self.fork_times.push((child, at));
+            }
+        }
         let line = Line {
             timestamp,
             session_id,

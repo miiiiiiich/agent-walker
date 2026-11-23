@@ -241,9 +241,14 @@ struct CallRow {
 }
 
 /// Without both tables there is no ledger, as with a CLI that predates it.
+/// A fork's rows dated up to its fork, in `forked`, aren't read: it can't
+/// have made a call before it existed, so they copy the parent's history,
+/// whether the CLI caught them up from the copied receipts or the store
+/// copied them, and the parent's own records count those calls.
 pub(super) fn read_call_ledger(
     path: &Path,
     local_offset: UtcOffset,
+    forked: &HashMap<String, OffsetDateTime>,
     collection: &mut Collection,
 ) -> Option<CallLedger> {
     if !path.is_file() {
@@ -301,6 +306,12 @@ pub(super) fn read_call_ledger(
             }
             continue;
         };
+        if forked
+            .get(&row.session_id)
+            .is_some_and(|fork| timestamp <= *fork)
+        {
+            continue;
+        }
         ledger.events.session_touches.push(SessionTouch {
             timestamp,
             session_id: row.session_id.clone(),

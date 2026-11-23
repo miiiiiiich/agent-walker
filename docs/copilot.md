@@ -100,7 +100,10 @@ user.
   don't count: under a marker that doesn't name it in a form read here,
   or, in a journal without a marker, dated before its own start (Copilot
   dates a fork's start at the fork). Copied receipts still go by their
-  `sourceSessionId`.
+  `sourceSessionId`. A fork can't have made a call before it existed, so
+  its store rows dated up to its marker aren't read: whether the CLI caught
+  them up from the copied receipts or the store copied them, they repeat
+  the parent's history.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a

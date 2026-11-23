@@ -1,6 +1,16 @@
-use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
+use serde_json::Value;
+use time::OffsetDateTime;
+
+use crate::collector::FileEvents;
 use crate::collector::ident::ident;
+
+/// Key prefix of the event carrying a fork's own session and the time of
+/// its fork, taken out by `take_fork_times` before anything else reads the
+/// events.
+pub(super) const FORK_PREFIX: &str = "copilot-fork:";
 
 /// A fork's journal opens with a copy of its parent's history, event ids
 /// and all, then a `session.info` of `infoType` "fork" reading "Forked from
@@ -10,6 +20,8 @@ use crate::collector::ident::ident;
 pub(super) struct ForkMarker {
     /// `None` when the marker doesn't name it in a form read here.
     pub(super) parent: Option<String>,
+    /// The fork itself, likewise.
+    pub(super) child: Option<String>,
 }
 
 pub(super) fn fork_marker(value: &Value) -> Option<ForkMarker> {
@@ -24,25 +36,67 @@ pub(super) fn fork_marker(value: &Value) -> Option<ForkMarker> {
         .get("message")?
         .as_str()?
         .strip_prefix("Forked from ")?;
+    let parent = session_ref(named);
+    let child = parent.and_then(|(_, rest)| {
+        let rest = match rest.strip_prefix(" before event ") {
+            Some(event) => &event[event.find(' ')?..],
+            None => rest,
+        };
+        session_ref(rest.strip_prefix(" as ")?)
+    });
     Some(ForkMarker {
-        parent: session_ref(named).map(ToOwned::to_owned),
+        parent: parent.map(|(id, _)| id.to_owned()),
+        child: child.map(|(id, _)| id.to_owned()),
     })
 }
 
-/// The session id a reference starting `text` names. A name is a JSON
-/// string, so it is parsed rather than split: it may hold " as " or quotes.
-fn session_ref(text: &str) -> Option<&str> {
-    let id = if text.starts_with('"') {
+/// The session id a reference starting `text` names, and the text after it.
+/// A name is a JSON string, so it is parsed rather than split: it may hold
+/// " as " or quotes.
+fn session_ref(text: &str) -> Option<(&str, &str)> {
+    let (id, rest) = if text.starts_with('"') {
         let mut values = serde_json::Deserializer::from_str(text).into_iter::<String>();
         values.next()?.ok()?;
         let after = text.get(values.byte_offset()..)?.strip_prefix(" (")?;
-        &after[..after.find(')')?]
+        let end = after.find(')')?;
+        (&after[..end], &after[end + 1..])
     } else {
         let end = text.find([' ', '.']).unwrap_or(text.len());
-        &text[..end]
+        (&text[..end], &text[end..])
     };
     let valid = !id.is_empty() && !id.contains(char::is_whitespace);
-    ident(id).filter(|_| valid)
+    Some((ident(id).filter(|_| valid)?, rest))
+}
+
+/// Each fork's session and the time of its fork, taken out of the events.
+pub(super) fn take_fork_times(
+    per_file: &mut [(PathBuf, Option<FileEvents>)],
+) -> HashMap<String, OffsetDateTime> {
+    let mut forks: HashMap<String, OffsetDateTime> = HashMap::new();
+    for events in per_file
+        .iter_mut()
+        .filter_map(|(_, events)| events.as_mut())
+    {
+        events.usage_events.retain(|keyed| {
+            if !keyed
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(FORK_PREFIX))
+            {
+                return true;
+            }
+            if let (Some(session), Some(time)) =
+                (keyed.event.session_id.clone(), keyed.event.timestamp)
+            {
+                forks
+                    .entry(session)
+                    .and_modify(|at| *at = (*at).max(time))
+                    .or_insert(time);
+            }
+            false
+        });
+    }
+    forks
 }
 
 #[cfg(test)]
@@ -82,26 +136,33 @@ pub(in crate::collector::copilot) mod tests {
         lines.join("\n") + "\n"
     }
 
-    fn marker(message: &str) -> Option<String> {
-        fork_marker(
+    fn marker(message: &str) -> Option<(Option<String>, Option<String>)> {
+        let marker = fork_marker(
             &serde_json::from_str(&fork_info("m", "2026-07-27T12:00:00.000Z", message)).ok()?,
-        )?
-        .parent
+        )?;
+        Some((marker.parent, marker.child))
+    }
+
+    fn named(parent: &str, child: &str) -> (Option<String>, Option<String>) {
+        (Some(parent.to_owned()), Some(child.to_owned()))
     }
 
     #[test]
-    fn a_marker_names_its_parent_by_id_or_by_name() {
-        assert_eq!(marker("Forked from p-1 as f-1.").as_deref(), Some("p-1"));
+    fn a_marker_names_its_parent_and_fork_by_id_or_by_name() {
+        assert_eq!(marker("Forked from p-1 as f-1."), Some(named("p-1", "f-1")));
         assert_eq!(
-            marker("Forked from p-1 before event e-9 as f-1.").as_deref(),
-            Some("p-1")
+            marker("Forked from p-1 before event e-9 as f-1."),
+            Some(named("p-1", "f-1"))
         );
         assert_eq!(
-            marker(r#"Forked from "my \"plan\" as draft" (p-1) as "copy" (f-1)."#).as_deref(),
-            Some("p-1")
+            marker(r#"Forked from "my \"plan\" as draft" (p-1) as "copy" (f-1)."#),
+            Some(named("p-1", "f-1"))
         );
-        assert!(marker("Forked this session into f-1.").is_none());
-        assert_eq!(marker(r#"Forked from "unclosed (p-1) as f-1."#), None);
+        assert_eq!(marker("Forked this session into f-1."), None);
+        assert_eq!(
+            marker(r#"Forked from "unclosed (p-1) as f-1."#),
+            Some((None, None))
+        );
     }
 
     /// The parent's journal is gone but its live row isn't: the fork's copy
@@ -243,6 +304,46 @@ pub(in crate::collector::copilot) mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(total_volume(&collection), 110 + 330);
+    }
+
+    /// The fork can't have recorded a call before it existed, so its store
+    /// rows dated up to its marker copy the parent's history (caught up from
+    /// the copied receipts, or copied in the store): they give way to the
+    /// parent's own receipt.
+    #[test]
+    fn a_forks_rows_from_before_the_fork_dont_count() {
+        use crate::collector::copilot::ledger::tests::set_event_ids;
+        use crate::collector::copilot::receipts::tests::receipt;
+
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let copied = receipt("2026-07-27T10:00:00.000Z", "parent", 1, 100, 10);
+        write_session(temp.path(), "parent", &lines(std::slice::from_ref(&copied)));
+        write_session(
+            temp.path(),
+            "fork",
+            &lines(&[
+                fork_start("fork", "2026-07-27T11:00:00.000Z"),
+                copied,
+                fork_info(
+                    "m-1",
+                    "2026-07-27T11:00:00.000Z",
+                    "Forked from parent as fork.",
+                ),
+                receipt("2026-07-27T12:00:00.000Z", "fork", 1, 400, 40),
+            ]),
+        );
+        write_store(
+            temp.path(),
+            &[
+                call("fork", "2026-07-27T10:00:00.000Z", 100, 10),
+                call("fork", "2026-07-27T12:00:00.500Z", 400, 40),
+            ],
+        );
+        set_event_ids(temp.path(), &[(1, "usage-record:a")]);
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(total_volume(&collection), 110 + 440);
     }
 
     /// A parent known only by caught-up rows, its journal gone, keeps them:
