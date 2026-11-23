@@ -4,6 +4,7 @@
 //! that pricing does not read is skipped while it is parsed.
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
 
 use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
@@ -242,53 +243,72 @@ impl<'de> Visitor<'de> for ScalarVisitor {
     }
 }
 
-/// An entry, or `None` for a value that is not an object.
-struct MaybeEntry(Option<Entry>);
-
-impl<'de> Deserialize<'de> for MaybeEntry {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(EntryVisitor).map(MaybeEntry)
-    }
+/// A value read field by field when it is an object; any other value is
+/// skipped unbuilt and reads as the default.
+trait FromObject: Default {
+    fn read<'de, A: MapAccess<'de>>(map: A) -> Result<Self, A::Error>;
 }
 
-struct EntryVisitor;
+fn object_or_default<'de, D: Deserializer<'de>, T: FromObject>(
+    deserializer: D,
+) -> Result<T, D::Error> {
+    deserializer.deserialize_any(ObjectVisitor(PhantomData))
+}
 
-impl<'de> Visitor<'de> for EntryVisitor {
-    type Value = Option<Entry>;
+struct ObjectVisitor<T>(PhantomData<T>);
+
+impl<'de, T: FromObject> Visitor<'de> for ObjectVisitor<T> {
+    type Value = T;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("any JSON value")
     }
 
-    fn visit_u64<E: Error>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_u64<E: Error>(self, _: u64) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_i64<E: Error>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_i64<E: Error>(self, _: i64) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_f64<E: Error>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_f64<E: Error>(self, _: f64) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_str<E: Error>(self, _: &str) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_str<E: Error>(self, _: &str) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_bool<E: Error>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_bool<E: Error>(self, _: bool) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_unit<E: Error>(self) -> Result<Self::Value, E> {
-        Ok(None)
+    fn visit_unit<E: Error>(self) -> Result<T, E> {
+        Ok(T::default())
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
-        IgnoredAny.visit_seq(seq).map(|_| None)
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<T, A::Error> {
+        IgnoredAny.visit_seq(seq).map(|_| T::default())
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+        T::read(map)
+    }
+}
+
+/// An entry, or `None` for a value that is not an object.
+#[derive(Default)]
+struct MaybeEntry(Option<Entry>);
+
+impl<'de> Deserialize<'de> for MaybeEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        object_or_default(deserializer)
+    }
+}
+
+impl FromObject for MaybeEntry {
+    fn read<'de, A: MapAccess<'de>>(mut map: A) -> Result<Self, A::Error> {
         let mut entry = Entry::default();
         while let Some(key) = map.next_key::<String>()? {
             if key == "mode" {
@@ -318,7 +338,7 @@ impl<'de> Visitor<'de> for EntryVisitor {
                 } => keys.set_tier(slot, label, above_prompt_tokens, rate),
             }
         }
-        Ok(Some(entry))
+        Ok(MaybeEntry(Some(entry)))
     }
 }
 
