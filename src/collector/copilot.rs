@@ -56,7 +56,7 @@ pub fn collect(
     let exits = ledger::exit_marks(&per_file, &forks);
     let (live, caught_up) = ledger
         .as_ref()
-        .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
+        .map(ledger::CallLedger::sessions)
         .unwrap_or_default();
     let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
     if let Some(ledger) = &mut ledger {
@@ -66,7 +66,7 @@ pub fn collect(
     }
     truncated.drop_covered_copies(&mut per_file);
     if let Some(ledger) = ledger {
-        per_file.push((db_path, Some(ledger.events)));
+        per_file.push((db_path, Some(ledger.into_events())));
     }
     merge_into(&mut collection, per_file);
     collection
