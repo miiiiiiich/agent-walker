@@ -154,6 +154,28 @@ pub(super) fn at_least(usage: &TokenUsage, floor: &TokenUsage) -> bool {
             >= floor.cache_creation_ephemeral_1h_input_tokens
 }
 
+pub(super) fn subtract(usage: &mut TokenUsage, carried: &TokenUsage) {
+    let less = |field: &mut u64, by: u64| *field = field.saturating_sub(by);
+    less(&mut usage.input_tokens, carried.input_tokens);
+    less(&mut usage.output_tokens, carried.output_tokens);
+    less(
+        &mut usage.cache_creation_input_tokens,
+        carried.cache_creation_input_tokens,
+    );
+    less(
+        &mut usage.cache_read_input_tokens,
+        carried.cache_read_input_tokens,
+    );
+    less(
+        &mut usage.cache_creation_ephemeral_5m_input_tokens,
+        carried.cache_creation_ephemeral_5m_input_tokens,
+    );
+    less(
+        &mut usage.cache_creation_ephemeral_1h_input_tokens,
+        carried.cache_creation_ephemeral_1h_input_tokens,
+    );
+}
+
 /// Each call belongs to the first run whose total was written after it. The
 /// last run takes the rest, unless later calls were never totalled.
 fn spread_session(
@@ -255,35 +277,17 @@ fn background_or_main(kind: SourceKind) -> SourceKind {
 /// The cache-write split is clamped to the write excess so that a row's
 /// 5m and 1h parts never exceed its writes.
 fn excess(recorded: &TokenUsage, counted: Option<&TokenUsage>) -> TokenUsage {
-    let zero = TokenUsage::default();
-    let counted = counted.unwrap_or(&zero);
-    let over = |recorded: u64, counted: u64| recorded.saturating_sub(counted);
-    let writes = over(
-        recorded.cache_creation_input_tokens,
-        counted.cache_creation_input_tokens,
-    );
-    let long = over(
-        recorded.cache_creation_ephemeral_1h_input_tokens,
-        counted.cache_creation_ephemeral_1h_input_tokens,
-    )
-    .min(writes);
-    let short = over(
-        recorded.cache_creation_ephemeral_5m_input_tokens,
-        counted.cache_creation_ephemeral_5m_input_tokens,
-    )
-    .min(writes - long);
-    TokenUsage {
-        input_tokens: over(recorded.input_tokens, counted.input_tokens),
-        output_tokens: over(recorded.output_tokens, counted.output_tokens),
-        cache_creation_input_tokens: writes,
-        cache_read_input_tokens: over(
-            recorded.cache_read_input_tokens,
-            counted.cache_read_input_tokens,
-        ),
-        cache_creation_ephemeral_5m_input_tokens: short,
-        cache_creation_ephemeral_1h_input_tokens: long,
-        ..TokenUsage::default()
+    let mut excess = recorded.clone();
+    if let Some(counted) = counted {
+        subtract(&mut excess, counted);
     }
+    let writes = excess.cache_creation_input_tokens;
+    let long = excess.cache_creation_ephemeral_1h_input_tokens.min(writes);
+    excess.cache_creation_ephemeral_1h_input_tokens = long;
+    excess.cache_creation_ephemeral_5m_input_tokens = excess
+        .cache_creation_ephemeral_5m_input_tokens
+        .min(writes - long);
+    excess
 }
 
 /// Splits every field by largest remainder so the parts add up to the whole.
