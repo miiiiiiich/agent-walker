@@ -321,18 +321,14 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::collector::opencode::collect;
-    use crate::collector::opencode::fixtures::{V2_SCHEMA, insert_v2, v2_assistant, volumes};
+    use crate::collector::opencode::fixtures::{
+        V2_SCHEMA, insert_v2, v2_assistant, v2_store, volumes,
+    };
 
     #[test]
     fn v2_only_store_reads_assistant_and_compaction_usage() {
         let dir = TempDir::new().expect("tempdir");
-        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
+        let conn = v2_store(&dir.path().join("opencode.db"));
         insert_v2(
             &conn,
             "msg_u",
@@ -388,13 +384,7 @@ mod tests {
     #[test]
     fn assistant_without_tokens_keeps_its_turn_and_tools_but_is_not_a_call() {
         let dir = TempDir::new().expect("tempdir");
-        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
+        let conn = v2_store(&dir.path().join("opencode.db"));
         let aborted = v2_assistant(1_781_542_363_256, 0, Some("bash")).replace(
             r#""output":10,"reasoning":2,"cache":{"read":30,"write":4}"#,
             r#""output":0,"reasoning":0,"cache":{"read":0,"write":0}"#,
@@ -423,13 +413,7 @@ mod tests {
     #[test]
     fn claude_agent_turns_keep_activity_and_tools_but_not_usage() {
         let dir = TempDir::new().expect("tempdir");
-        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
+        let conn = v2_store(&dir.path().join("opencode.db"));
         let via_claude = v2_assistant(1_781_542_363_256, 100, Some("read")).replace(
             r#""model":{"id":"claude-sonnet-4.6","providerID":"anthropic"}"#,
             r#""model":{"id":"opus","providerID":"claude-agent"}"#,
@@ -478,13 +462,7 @@ mod tests {
     #[test]
     fn tool_parts_past_the_read_budget_keep_the_usage() {
         let dir = TempDir::new().expect("tempdir");
-        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
+        let conn = v2_store(&dir.path().join("opencode.db"));
         insert_v2(
             &conn,
             "msg_a",

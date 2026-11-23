@@ -41,6 +41,18 @@ pub(super) fn write_db_at(db: &Path) {
 pub(super) const V2_SCHEMA: &str = "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, fork_session_id TEXT, fork_boundary TEXT, time_created INTEGER NOT NULL);
          CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);";
 
+/// An OpenCode 2 store holding session `s1` in `/somewhere/proj`.
+pub(super) fn v2_store(db: &Path) -> Connection {
+    let conn = Connection::open(db).expect("open temp db");
+    conn.execute_batch(V2_SCHEMA).expect("create schema");
+    conn.execute(
+        "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+        [],
+    )
+    .expect("insert session");
+    conn
+}
+
 pub(super) fn v2_assistant(created_ms: i64, input: u64, tool: Option<&str>) -> String {
     let content = tool.map_or_else(String::new, |name| {
         format!(r#"{{"type":"tool","id":"call-{created_ms}","name":"{name}","state":{{"status":"completed"}},"time":{{"created":{created_ms}}}}}"#)
@@ -75,4 +87,14 @@ pub(super) fn volumes(collection: &Collection) -> Vec<u64> {
         .collect();
     volumes.sort_unstable();
     volumes
+}
+
+pub(super) fn tool_names(collection: &Collection) -> Vec<&str> {
+    let mut tools: Vec<&str> = collection
+        .tool_events
+        .iter()
+        .map(|tool| tool.tool_name.as_str())
+        .collect();
+    tools.sort_unstable();
+    tools
 }

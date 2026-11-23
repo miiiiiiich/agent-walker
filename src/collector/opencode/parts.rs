@@ -101,7 +101,9 @@ mod tests {
 
     use super::*;
     use crate::collector::opencode::collect;
-    use crate::collector::opencode::fixtures::{V2_SCHEMA, insert_v2, v2_assistant, volumes};
+    use crate::collector::opencode::fixtures::{
+        insert_v2, tool_names, v2_assistant, v2_store, volumes,
+    };
 
     const PART_SCHEMA: &str = "CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (message_id, ordinal));";
 
@@ -113,25 +115,9 @@ mod tests {
         .expect("insert session_part");
     }
 
-    fn tool_names(collection: &Collection) -> Vec<&str> {
-        let mut names: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|tool| tool.tool_name.as_str())
-            .collect();
-        names.sort_unstable();
-        names
-    }
-
     fn split_store(dir: &std::path::Path) -> Connection {
-        let conn = Connection::open(dir.join("opencode.db")).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        let conn = v2_store(&dir.join("opencode.db"));
         conn.execute_batch(PART_SCHEMA).expect("create part schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
         conn
     }
 

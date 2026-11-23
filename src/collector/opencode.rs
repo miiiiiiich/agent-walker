@@ -171,18 +171,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::fixtures::{
-        ASSISTANT_MS, V2_SCHEMA, insert_v2, v2_assistant, volumes, write_db, write_db_at,
+        ASSISTANT_MS, insert_v2, tool_names, v2_assistant, v2_store, volumes, write_db, write_db_at,
     };
 
     /// The OpenCode 2 copy of `write_db_at`'s rows: same ids, same tool.
     fn write_migrated_copy(db: &Path) -> Connection {
-        let conn = Connection::open(db).expect("open temp db");
-        conn.execute_batch(V2_SCHEMA).expect("create schema");
-        conn.execute(
-            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
-            [],
-        )
-        .expect("insert session");
+        let conn = v2_store(db);
         insert_v2(
             &conn,
             "m0",
@@ -202,16 +196,6 @@ mod tests {
             &v2_assistant(ASSISTANT_MS, 100, Some("glob")),
         );
         conn
-    }
-
-    fn tool_names(collection: &Collection) -> Vec<&str> {
-        let mut tools: Vec<&str> = collection
-            .tool_events
-            .iter()
-            .map(|tool| tool.tool_name.as_str())
-            .collect();
-        tools.sort_unstable();
-        tools
     }
 
     /// A `session_message` row with a legacy message's id counts once.
