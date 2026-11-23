@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use time::{Date, UtcOffset};
 
-use crate::model::{ActiveTimeSummary, Collection};
+use crate::model::{ActiveTimeSummary, Collection, SourceKind};
 use crate::timestamp::local_date;
 
 pub(super) fn active_time_summary(
@@ -62,7 +62,7 @@ pub(super) fn active_time_summary(
             .timestamp
             .and_then(|timestamp| local_date(timestamp, local_offset))
             .is_some_and(in_window);
-        if !dated {
+        if !dated || event.source_kind == SourceKind::Background {
             continue;
         }
         let usage = &event.usage;

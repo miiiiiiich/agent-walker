@@ -1,12 +1,12 @@
 //! Map `LiteLLM`'s pricing table onto the rates `cost` prices with.
 use std::collections::HashMap;
 
-use super::validate::in_bounds;
-use super::{LongContext, ModelPricing, Pricing};
+use super::validate::{in_bounds, multiplier_in_bounds};
+use super::{LongContext, ModelPricing, Pricing, RateCard};
 
 mod table;
 
-use table::{CACHE_READ, Entry, INPUT, OUTPUT, Rates, Table, WRITE_1H, WRITE_5M};
+use table::{CACHE_READ, Entry, INPUT, OUTPUT, RateKeys, Rates, Table, WRITE_1H, WRITE_5M};
 
 /// A listed rate out of bounds refuses its model (or tier) instead of
 /// counting as unlisted: an unlisted output or cache-read rate prices at $0,
@@ -26,23 +26,53 @@ pub(super) fn models_from_table(
 }
 
 fn model_pricing(entry: &Entry) -> Option<ModelPricing> {
-    if refuses(&entry.rates) {
+    let standard = rate_card(&entry.standard.rates, &entry.standard)?;
+    let multiplier =
+        |listed: Option<f64>| listed.filter(|multiplier| multiplier_in_bounds(*multiplier));
+    Some(ModelPricing {
+        base: standard.base,
+        long_context: standard.long_context,
+        priority: service_card(&entry.priority, &entry.standard),
+        ultrafast: service_card(&entry.ultrafast, &entry.standard),
+        fast: multiplier(entry.multipliers.fast),
+        us: multiplier(entry.multipliers.us),
+    })
+}
+
+/// `listed` holds the card's base rates as listed, `keys` its long-context
+/// tiers.
+fn rate_card(listed: &Rates, keys: &RateKeys) -> Option<RateCard> {
+    if refuses(listed) {
         return None;
     }
-    let listed = |slot: usize| entry.rates[slot];
-    let input = listed(INPUT)?;
-    let (write_short, write_long) = write_rates(input, listed(WRITE_5M), listed(WRITE_1H));
+    let input = listed[INPUT]?;
+    let (write_short, write_long) = write_rates(input, listed[WRITE_5M], listed[WRITE_1H]);
     let base = Pricing {
         input,
-        output: listed(OUTPUT).unwrap_or(0.0),
-        cache_read: listed(CACHE_READ).unwrap_or(0.0),
+        output: listed[OUTPUT].unwrap_or(0.0),
+        cache_read: listed[CACHE_READ].unwrap_or(0.0),
         cache_write_5m: write_short,
         cache_write_1h: write_long,
     };
-    Some(ModelPricing {
+    Some(RateCard {
         base,
-        long_context: long_context(entry, &base),
+        long_context: long_context(listed, keys, &base),
     })
+}
+
+/// A service tier prices by its own keys, long-context ones included. A
+/// rate it leaves out keeps the standard listed value, as a long-context
+/// tier keeps its base. Without an input rate of its own, or with a rate out
+/// of bounds, there is no tier, and its calls price at standard rates.
+fn service_card(keys: &RateKeys, standard: &RateKeys) -> Option<RateCard> {
+    keys.rates[INPUT]?;
+    let mut listed = standard.rates;
+    for (slot, rate) in keys.rates.iter().enumerate() {
+        if rate.is_some() {
+            listed[slot] = *rate;
+        }
+    }
+    rate_card(&listed, keys)
 }
 
 /// A write rate that is missing or 0 falls back to the input rate: write
@@ -60,11 +90,11 @@ fn write_rates(input: f64, short: Option<f64>, long: Option<f64>) -> (f64, f64) 
 /// input rate, by the `write_rates` rule. Of several thresholds only the
 /// lowest at or over the floor is kept: one tier per model keeps pricing a
 /// plain `Copy` value.
-fn long_context(entry: &Entry, base: &Pricing) -> Option<LongContext> {
-    if entry.too_many_tiers {
+fn long_context(listed: &Rates, keys: &RateKeys, base: &Pricing) -> Option<LongContext> {
+    if keys.too_many_tiers {
         return None;
     }
-    let tier = entry
+    let tier = keys
         .tiers
         .iter()
         .filter(|tier| tier.has_input)
@@ -75,11 +105,7 @@ fn long_context(entry: &Entry, base: &Pricing) -> Option<LongContext> {
         return None;
     }
     let input = tier.rates[INPUT]?;
-    let write = |slot: usize| {
-        tier.rates[slot]
-            .filter(|rate| *rate > 0.0)
-            .or(entry.rates[slot])
-    };
+    let write = |slot: usize| tier.rates[slot].filter(|rate| *rate > 0.0).or(listed[slot]);
     let (write_short, write_long) = write_rates(input, write(WRITE_5M), write(WRITE_1H));
     Some(LongContext {
         above_prompt_tokens: tier.above_prompt_tokens,

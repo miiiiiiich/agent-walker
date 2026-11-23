@@ -6,8 +6,9 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{CostTally, TokenUsage, UsageGranularity};
+use crate::model::{Billing, CostTally, TokenUsage, UsageGranularity};
 
+mod billing;
 mod litellm;
 mod remote;
 mod validate;
@@ -21,12 +22,12 @@ static LOADED: OnceLock<RwLock<Option<Snapshot>>> = OnceLock::new();
 /// parses, and trusted for the rest of the day it would misprice until the
 /// next day's fetch, so a mismatch refetches and keeps the file only as the
 /// offline fallback.
-const SNAPSHOT_FORMAT: u32 = 3;
+const SNAPSHOT_FORMAT: u32 = 5;
 
 /// Codex logs only the provider (`openai`, `codex`) for some sessions, and
 /// `codex-auto-review` has no `LiteLLM` key; all of them price as the model
 /// Codex runs by default, so this follows Codex's default.
-const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+const CODEX_DEFAULT_MODEL: &str = "gpt-6.2-sol";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Pricing {
@@ -47,6 +48,18 @@ struct ModelPricing {
     base: Pricing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     long_context: Option<LongContext>,
+    /// `OpenAI`'s Fast (`priority`) and Ultrafast rates; `None` where the
+    /// table lists none, and those calls price at the standard rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<RateCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ultrafast: Option<RateCard>,
+    /// What Anthropic's fast mode and US-only inference multiply the rates
+    /// by; `None` where the table lists none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fast: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    us: Option<f64>,
 }
 
 /// A stored model as written, base rates inline. Read through this rather
@@ -64,6 +77,14 @@ struct StoredModel {
     cache_write_1h: f64,
     #[serde(default)]
     long_context: Option<LongContext>,
+    #[serde(default)]
+    priority: Option<RateCard>,
+    #[serde(default)]
+    ultrafast: Option<RateCard>,
+    #[serde(default)]
+    fast: Option<f64>,
+    #[serde(default)]
+    us: Option<f64>,
 }
 
 impl From<StoredModel> for ModelPricing {
@@ -77,6 +98,10 @@ impl From<StoredModel> for ModelPricing {
                 cache_write_1h: stored.cache_write_1h,
             },
             long_context: stored.long_context,
+            priority: stored.priority,
+            ultrafast: stored.ultrafast,
+            fast: stored.fast,
+            us: stored.us,
         }
     }
 }
@@ -89,7 +114,15 @@ struct LongContext {
     rates: Pricing,
 }
 
-impl ModelPricing {
+/// The rates of one service tier.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct RateCard {
+    base: Pricing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    long_context: Option<LongContext>,
+}
+
+impl RateCard {
     fn rates_for(&self, usage: &TokenUsage) -> Pricing {
         match self.long_context {
             Some(tier) if prompt_tokens(usage) > tier.above_prompt_tokens => tier.rates,
@@ -210,7 +243,7 @@ impl Snapshot {
     }
 
     /// Exact snapshot match first, then the longest snapshot key the name
-    /// extends with a date/version suffix (`claude-sonnet-4-5-20250929` ->
+    /// extends with a date suffix (`claude-sonnet-4-5-20250929` ->
     /// `claude-sonnet-4-5`) or the `-latest` alias (`claude-sonnet-4-5-latest`).
     /// A plain word suffix (`gemini-pro-default`) must not match a shorter
     /// base key. Retry dotted version segments as dashed only as a fallback,
@@ -242,19 +275,84 @@ fn lookup(snapshot: &Snapshot, name: &str) -> Option<ModelPricing> {
         .filter(|(key, _)| {
             name.strip_prefix(key.as_str())
                 .and_then(|rest| rest.strip_prefix('-'))
-                .is_some_and(|suffix| {
-                    suffix == "latest" || suffix.starts_with(|c: char| c.is_ascii_digit())
-                })
+                .is_some_and(|suffix| suffix == "latest" || is_date_suffix(suffix))
         })
         .max_by_key(|(key, _)| key.len())
         .map(|(_, pricing)| *pricing)
 }
 
-/// Price `usage` as one request, so a prompt over the model's long-context
-/// threshold puts the whole request on the long-context rates.
-pub fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
-    let pricing = model_pricing(model_name)?;
-    Some(cost_at(&pricing.rates_for(usage), usage))
+/// A whole date (`20250929`, `2026-10-01`, `0613`), optionally with a
+/// revision (`20250929-v1:0`), names a snapshot of the key's model. Anything
+/// else is another model: the next version (`claude-opus-5-6`) and a variant
+/// that merely starts with digits (`claude-opus-5-4096ctx`) both priced
+/// silently at `claude-opus-5`'s rates, so they stay unpriced until `LiteLLM`
+/// lists them.
+fn is_date_suffix(suffix: &str) -> bool {
+    let (date, revision) = suffix
+        .split_once("-v")
+        .map_or((suffix, None), |(date, revision)| (date, Some(revision)));
+    is_date(date.as_bytes()) && revision.is_none_or(is_revision)
+}
+
+/// `YYYYMMDD`, `YYYY-MM-DD` or `MMDD` that is a day on the calendar, so a
+/// four-digit size (`-4096`) or a day the month lacks (`20260231`) is not
+/// taken for one. A yearless date is checked in a leap year, so `0229` is one.
+fn is_date(text: &[u8]) -> bool {
+    const LEAP_YEAR: [u8; 4] = *b"2000";
+    let (year, month, day) = match text {
+        [m1, m2, d1, d2] => (LEAP_YEAR, [*m1, *m2], [*d1, *d2]),
+        [y1, y2, y3, y4, m1, m2, d1, d2] | [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] => {
+            ([*y1, *y2, *y3, *y4], [*m1, *m2], [*d1, *d2])
+        }
+        _ => return false,
+    };
+    let (Some(year), Some(month), Some(day)) = (number(&year), number(&month), number(&day)) else {
+        return false;
+    };
+    let (Ok(year), Ok(month), Ok(day)) =
+        (i32::try_from(year), u8::try_from(month), u8::try_from(day))
+    else {
+        return false;
+    };
+    time::Month::try_from(month)
+        .and_then(|month| time::Date::from_calendar_date(year, month, day))
+        .is_ok()
+}
+
+/// A `v<major>:<minor>` revision, its leading `v` already cut.
+fn is_revision(revision: &str) -> bool {
+    revision.split_once(':').is_some_and(|(major, minor)| {
+        number(major.as_bytes()).is_some() && number(minor.as_bytes()).is_some()
+    })
+}
+
+fn number(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0_u32, |value, &byte| {
+        byte.is_ascii_digit()
+            .then(|| value.checked_mul(10)?.checked_add(u32::from(byte - b'0')))
+            .flatten()
+    })
+}
+
+/// Only a `Call` can cross a long-context threshold, and a prompt over it
+/// puts the whole request on the long-context rates. An aggregate stays at
+/// base rates rather than billing every request in it at the premium because
+/// their sum is large.
+fn priced(
+    pricing: &ModelPricing,
+    usage: &TokenUsage,
+    granularity: UsageGranularity,
+    billing: Billing,
+) -> f64 {
+    let card = pricing.card(billing.tier);
+    let rates = match granularity {
+        UsageGranularity::Call => card.rates_for(usage),
+        UsageGranularity::Aggregate | UsageGranularity::Remainder => card.base,
+    };
+    cost_at(&rates, usage) * pricing.multiplier(billing)
 }
 
 #[allow(
@@ -283,18 +381,19 @@ fn cost_at(rates: &Pricing, usage: &TokenUsage) -> f64 {
         + write_long as f64 * rates.cache_write_1h
 }
 
-/// Price one usage event. Only a `Call` can cross a long-context threshold:
-/// an aggregate stays at base rates rather than billing every request in it
-/// at the premium because their sum is large.
-pub fn estimate(model_name: &str, usage: &TokenUsage, granularity: UsageGranularity) -> CostTally {
+/// Price one usage event, at the rates of the options it was billed with.
+pub fn estimate(
+    model_name: &str,
+    usage: &TokenUsage,
+    granularity: UsageGranularity,
+    billing: Billing,
+) -> CostTally {
     let volume = usage.token_volume();
     if volume == 0 {
         return CostTally::default();
     }
-    let cost = match granularity {
-        UsageGranularity::Call => usage_cost_usd(model_name, usage),
-        UsageGranularity::Aggregate => pricing_for(model_name).map(|base| cost_at(&base, usage)),
-    };
+    let cost =
+        model_pricing(model_name).map(|pricing| priced(&pricing, usage, granularity, billing));
     match cost {
         Some(priced_usd) => CostTally {
             priced_usd,
@@ -312,6 +411,17 @@ pub(crate) mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// One request at standard options.
+    fn usage_cost_usd(model_name: &str, usage: &TokenUsage) -> Option<f64> {
+        let pricing = model_pricing(model_name)?;
+        Some(priced(
+            &pricing,
+            usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        ))
+    }
 
     #[test]
     fn grok_models_resolve_from_bare_keys() {
@@ -342,6 +452,10 @@ pub(crate) mod tests {
         let flat = |base: Pricing| ModelPricing {
             base,
             long_context: None,
+            priority: None,
+            ultrafast: None,
+            fast: None,
+            us: None,
         };
         let openai = |input: f64, output: f64, cache_read: f64| Pricing {
             input: input / 1e6,
@@ -375,6 +489,10 @@ pub(crate) mod tests {
                             above_prompt_tokens: 100_000,
                             rates: per_mtok(0.5, 2.5, 0.625, 1.0),
                         }),
+                        priority: None,
+                        ultrafast: None,
+                        fast: None,
+                        us: None,
                     },
                 ),
                 (
@@ -391,8 +509,15 @@ pub(crate) mod tests {
                             above_prompt_tokens: 272_000,
                             rates: openai(4.0, 15.0, 0.2),
                         }),
+                        priority: None,
+                        ultrafast: None,
+                        fast: None,
+                        us: None,
                     },
                 ),
+                // Off the real rates, which equal gpt-6.1-sol's: the
+                // provider-only test must tell the two apart.
+                ("gpt-6.2-sol".to_owned(), flat(openai(2.5, 12.0, 0.25))),
                 ("gemini-3.5-flash".to_owned(), flat(openai(1.5, 9.0, 0.15))),
                 (
                     "tiny-input".to_owned(),
@@ -426,6 +551,10 @@ pub(crate) mod tests {
                         cache_write_1h: 6e-6,
                     },
                     long_context: None,
+                    priority: None,
+                    ultrafast: None,
+                    fast: None,
+                    us: None,
                 },
             )]),
             resolved: RwLock::default(),
@@ -476,6 +605,68 @@ pub(crate) mod tests {
         let cost =
             usage_cost_usd("claude-sonnet-4-5-20250929", &usage).expect("sonnet should be priced");
         assert!((cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn matches_dashed_dates_and_versioned_snapshots_by_prefix() {
+        install_test_pricing();
+        for name in [
+            "claude-sonnet-4-5-2026-10-01",
+            "claude-sonnet-4-5-20250929-v1:0",
+            "claude-sonnet-4-5-0613",
+        ] {
+            let pricing = pricing_for(name).unwrap_or_else(|| panic!("{name} should resolve"));
+            assert!((pricing.input - 3.0 / 1e6).abs() < f64::EPSILON, "{name}");
+        }
+    }
+
+    /// A newer version past a listed key, dashed or dotted, with or without a
+    /// variant word, is unpriced rather than priced as the older version.
+    #[test]
+    fn newer_versions_are_not_priced_as_an_older_key() {
+        install_test_pricing();
+        for name in [
+            "claude-fable-5-3",
+            "claude-fable-5.3",
+            "claude-fable-5-3-fast",
+            "claude-opus-4-8-1",
+            "claude-sonnet-4-5-123",
+        ] {
+            assert!(pricing_for(name).is_none(), "{name}");
+        }
+    }
+
+    /// Four leading digits are not a date: a variant that starts with them,
+    /// or a date with anything after it but a revision, is unpriced.
+    #[test]
+    fn only_a_whole_date_extends_a_key() {
+        install_test_pricing();
+        for name in [
+            "claude-fable-5-4096ctx",
+            "claude-fable-5-4096",
+            "claude-fable-5-1332",
+            "claude-sonnet-4-5-20251399",
+            "claude-sonnet-4-5-2026-13-01",
+            "claude-sonnet-4-5-20250929-fast",
+            "claude-sonnet-4-5-2026-10-01-preview",
+            "claude-sonnet-4-5-20250929-v1",
+            "claude-sonnet-4-5-0613-v1:0x",
+            "claude-sonnet-4-5-20260231",
+            "claude-sonnet-4-5-2026-04-31",
+            "claude-sonnet-4-5-20250229",
+            "claude-sonnet-4-5-0230",
+        ] {
+            assert!(pricing_for(name).is_none(), "{name}");
+        }
+        // A yearless date may be the 29th of February.
+        for name in [
+            "claude-sonnet-4-5-20240229",
+            "claude-sonnet-4-5-0229",
+            "claude-sonnet-4-5-2026-04-30",
+            "claude-sonnet-4-5-20261231",
+        ] {
+            assert!(pricing_for(name).is_some(), "{name}");
+        }
     }
 
     #[test]
@@ -547,7 +738,7 @@ pub(crate) mod tests {
         };
         for name in ["codex", "openai", "codex-auto-review"] {
             let cost = usage_cost_usd(name, &usage).expect("provider-only name should price");
-            assert!((cost - 0.2).abs() < 1e-9, "{name}: {cost}");
+            assert!((cost - 0.25).abs() < 1e-9, "{name}: {cost}");
         }
     }
 
@@ -604,9 +795,19 @@ pub(crate) mod tests {
             input_tokens: 1_000_000,
             ..TokenUsage::default()
         };
-        let aggregate = estimate("claude-haiku-5-5", &usage, UsageGranularity::Aggregate);
+        let aggregate = estimate(
+            "claude-haiku-5-5",
+            &usage,
+            UsageGranularity::Aggregate,
+            Billing::default(),
+        );
         assert!((aggregate.priced_usd - 0.1).abs() < 1e-12);
-        let call = estimate("claude-haiku-5-5", &usage, UsageGranularity::Call);
+        let call = estimate(
+            "claude-haiku-5-5",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         assert!((call.priced_usd - 0.5).abs() < 1e-12);
     }
 
@@ -634,11 +835,21 @@ pub(crate) mod tests {
             ..TokenUsage::default()
         };
 
-        let priced = estimate("claude-opus-4-8", &usage, UsageGranularity::Call);
+        let priced = estimate(
+            "claude-opus-4-8",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         assert!(priced.is_complete());
         assert!((priced.usd().unwrap_or(0.0) - 5.0).abs() < 1e-9);
 
-        let unpriced = estimate("model-nobody-priced", &usage, UsageGranularity::Call);
+        let unpriced = estimate(
+            "model-nobody-priced",
+            &usage,
+            UsageGranularity::Call,
+            Billing::default(),
+        );
         let mut mixed = CostTally::default();
         mixed.add(&priced);
         mixed.add(&unpriced);
@@ -655,6 +866,7 @@ pub(crate) mod tests {
             "model-nobody-priced",
             &TokenUsage::default(),
             UsageGranularity::Call,
+            Billing::default(),
         );
         assert!(empty.is_complete());
     }

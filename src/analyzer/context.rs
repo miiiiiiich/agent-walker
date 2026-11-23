@@ -114,7 +114,7 @@ fn account_call(event: &UsageEvent) -> CallAccount {
     let usage = &event.usage;
     let m = multipliers(event.model.as_deref());
     // The 5m/1h split comes from untrusted logs; the same validation as
-    // `usage_cost_usd`: a missing, broken, or overflowing split prices every
+    // `cost::estimate`: a missing, broken, or overflowing split prices every
     // write at the 5m rate, so this panel and COST agree on the same row.
     let split = usage
         .cache_creation_ephemeral_5m_input_tokens
@@ -294,6 +294,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             granularity: crate::model::UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 

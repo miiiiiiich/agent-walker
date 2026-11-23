@@ -4,7 +4,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::collector::{FileEvents, KeyedRateLimitSample, KeyedUsageEvent};
-use crate::model::{RateLimitSample, TokenUsage, UsageEvent};
+use crate::model::{Billing, RateLimitSample, TokenUsage, UsageEvent};
 
 use super::fork::Origin;
 use super::{string_path, u64_field};
@@ -12,11 +12,15 @@ use super::{string_path, u64_field};
 /// Per-line attribution shared by the two usage sources.
 pub(super) struct UsageContext<'a> {
     pub(super) timestamp: Option<OffsetDateTime>,
+    /// The session the event is attributed to.
     pub(super) session_id: Option<&'a String>,
+    /// The id the event's dedupe key is built from (see `parse_file`).
+    pub(super) key_session_id: Option<&'a String>,
     pub(super) model: Option<&'a String>,
     pub(super) project: Option<&'a str>,
     pub(super) origin: &'a Origin,
     pub(super) line_index: usize,
+    pub(super) billing: Billing,
 }
 
 impl UsageContext<'_> {
@@ -31,6 +35,7 @@ impl UsageContext<'_> {
             project: self.project.map(ToOwned::to_owned),
             usage,
             granularity: crate::model::UsageGranularity::Call,
+            billing: self.billing,
         }
     }
 }
@@ -67,7 +72,7 @@ pub(super) fn collect_usage_record(
     };
     let key = match string_path(value, &["payload", "response_id"]) {
         Some(response_id) => Some(format!("codex-usage:v3:{response_id}")),
-        None => context.session_id.and_then(|sid| {
+        None => context.key_session_id.and_then(|sid| {
             positional_key("codex-record", sid, context.timestamp, context.line_index)
         }),
     };
@@ -89,7 +94,7 @@ pub(super) fn collect_usage_event(
     if string_path(value, &["payload", "type"]).as_deref() != Some("token_count") {
         return;
     }
-    let session_id = context.session_id;
+    let session_id = context.key_session_id;
     collect_rate_limit_sample(
         value,
         context.timestamp,
@@ -114,12 +119,8 @@ pub(super) fn collect_usage_event(
     // Key by session, last vector, and cumulative vector to collapse replay
     // and unchanged re-emissions (GH-36). Without cumulative usage, positional
     // keys deduplicate whole-file copies only.
-    let key = match (session_id, total_usage(value)) {
-        (Some(sid), Some(cum)) => Some(format!(
-            "codex-usage:v2:{sid}:{last}:{cum}",
-            last = usage_fingerprint(last_usage),
-            cum = usage_fingerprint(cum),
-        )),
+    let key = match (session_id, token_count_fingerprint(value)) {
+        (Some(sid), Some(pair)) => Some(format!("codex-usage:v2:{sid}:{pair}")),
         (Some(sid), None) => positional_key("codex", sid, context.timestamp, context.line_index),
         _ => None,
     };
@@ -175,6 +176,25 @@ fn collect_rate_limit_sample(
             used_percent: used_percent.clamp(0.0, 100.0),
         },
     });
+}
+
+/// A `token_count`'s last and cumulative usage, which every copy of the row
+/// in another rollout repeats.
+pub(super) fn token_count_fingerprint(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let last = payload.get("info")?.get("last_token_usage")?;
+    let cum = total_usage(value)?;
+    Some(format!(
+        "{}:{}",
+        usage_fingerprint(last),
+        usage_fingerprint(cum)
+    ))
 }
 
 fn total_usage(value: &Value) -> Option<&Value> {

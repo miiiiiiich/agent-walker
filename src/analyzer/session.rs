@@ -209,6 +209,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             granularity: UsageGranularity::Call,
+            billing: crate::model::Billing::default(),
         }
     }
 

@@ -7,7 +7,18 @@ both written by the agentic GitHub Copilot CLI (`@github/copilot`; not the
 retired `gh copilot` extension):
 
 - `session-state/<uuid>/events.jsonl` — one directory per session, the
-  session's event stream.
+  session's event stream. Newer CLIs rotate a long stream: the old file is
+  archived as `events.<n>.jsonl`, and the new head's first record
+  (`session.journal_link`) names it. agent-walker follows those links back
+  from `events.jsonl`, only to a bare `events.<n>.jsonl` with a lower number
+  in the same directory, and reads the chain oldest first as one stream, so
+  each exit still counts once. The replay checkpoint a new head opens with
+  (records marked `checkpoint`) copies what the archive already holds and is
+  skipped, apart from the session's start. A missing predecessor ends the
+  chain there; an unreadable one also counts as a parse error. A head that
+  links back is parsed again on every run rather than taken from the parse
+  cache, which checks only the head's size and modification time, so a
+  predecessor that appears or changes later is still read.
 - `session-store.db` — the CLI's SQLite session store. Its
   `assistant_usage_events` table holds one row per model call (CLI 1.0.69 and
   later). The DB is opened **read-only**, like the OpenCode store.
@@ -39,34 +50,64 @@ user.
 
 ## What's captured
 
-- **Token usage**, from two sources with a fixed precedence:
+- **Token usage**, from three sources:
   - **Per-call rows** in `assistant_usage_events` (`input_tokens` /
     `output_tokens` / `cache_read_tokens` / `cache_write_tokens` /
     `reasoning_tokens`, `model`, `created_at`), each dated at its own call.
     They cover sessions that never exit cleanly, and calls made by
     sub-agents (`agent_id` set) are attributed as subagent work.
+  - **Per-call receipts**: newer CLIs append a `session.usage_record` to the
+    event stream for each model call (`data.usage`: `model`, `inputTokens` /
+    `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` /
+    `reasoningTokens`), dated at the call and keyed by its accounting
+    identity (`sourceSessionId` + `sequence`), so a fork's copy counts once.
+    A call from a sub-agent (`agentId` set, or `initiator` `sub-agent`) is
+    attributed as subagent work.
   - **Shutdown snapshots**: the `session.shutdown` event the CLI appends on
     clean exit carries per-model cumulative totals for the whole session
     (`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` /
     `reasoningTokens`). Each shutdown is counted as the delta since the
-    previous one, dated at its own exit time.
+    previous one, dated at its own exit time, less the receipts it covers
+    that count (below). Its `usageAccountingWatermarks` name, per source
+    session, the highest receipt it covers; a receipt past the mark is left
+    for the next exit, and so is a receipt whose model the exit carries no
+    usable counters for.
+
+  Each session that made calls takes them from one source, never a mix of
+  the two. A session with a readable live row is on the store: its rows and
+  exits count and its receipts don't. Otherwise its receipts count, and its
+  exits only for what the receipts didn't carry; the rows the CLI caught
+  up from its log (`event_id` starting `usage-record:`) copy those receipts
+  and don't count, unless its journal holds no receipts (it is gone), and
+  then they are the only record and count as its store rows. A receipt
+  goes by its `sourceSessionId`, so a fork's copies of a parent's receipts
+  follow the parent, and a copied receipt always comes off the fork's
+  exit, since the parent counts that call. What this still undercounts: in
+  a session with a live row, a call only in a receipt (its row unreadable
+  or missing); in a session on its receipts, a call only in a caught-up row
+  whose receipt is gone and that no later exit covers. A row caught up
+  under a fork that has live rows, for a receipt copied from the parent (if
+  the CLI files it there, which is not verified), would count beside the
+  parent's receipts.
 
   From a session's first recorded call on, its rows replace its snapshots;
   snapshots dated before that call still count (a session resumed across a
-  CLI upgrade keeps the history from before the store existed). If any of a
-  session's rows can't be read (a `created_at` that doesn't parse, a value of
-  the wrong type), that session keeps its snapshots: superseding them from the
-  readable rows alone would lose the unreadable row's usage. Its readable
-  rows up to its latest snapshot are dropped (the snapshots already cover
-  them); rows after it still count, so calls since the last clean exit
-  aren't lost. A session without any snapshot keeps all its readable rows. A
-  row that can't be tied to a session at all applies the same fallback to
-  every session with snapshots. An unreadable row dated after the latest
-  snapshot can't be counted anywhere.
+  CLI upgrade keeps the history from before the store existed). A
+  caught-up row dated from 60 s before the session's first live row on is
+  dropped, as Copilot drops it from its own totals. If any of a session's
+  rows can't be read (a `created_at` that doesn't parse, a value of the
+  wrong type), that session keeps all its snapshots: superseding them from
+  the readable rows alone would lose the unreadable row's usage. A model's
+  readable rows up to the latest exit with usable counters for that model
+  are dropped (that cumulative already covers them); an exit without a
+  model's counters covers none of its rows. A session with no exit keeps
+  all its readable rows. A row that can't be tied to a session at all
+  applies the same fallback to every session. An unreadable row dated
+  after the latest exit can't be counted anywhere.
   `created_at` is RFC 3339; the column default (SQLite `datetime('now')`,
   UTC without a zone suffix) is read as well.
 
-  Both sources map to the same schema as the other providers:
+  All three map to the same schema as the other providers:
 
   ```
   tokens = (input − cache_read − cache_write) + output + cache_read + cache_write
@@ -99,8 +140,8 @@ user.
 
 - **Forks** (`/fork`) copy the parent's events, ids and timestamps intact,
   into the new session's stream. Shutdowns, checkpoints, tool calls and turns
-  are therefore keyed by the event `id` (a UUID), so a copy collapses into the
-  parent's original. A copied shutdown that the parent's per-call rows
+  are therefore keyed by the event `id` (a UUID), and receipts by their
+  accounting identity, so a copy collapses into the parent's original. A copied shutdown that the parent's per-call rows
   already replace is dropped from the fork too.
 - **Resumed sessions**: `--resume` appends to the same session, and each
   later clean exit appends another shutdown with cumulative totals. Every
@@ -112,16 +153,24 @@ user.
 
 ## Caveats
 
-- **Without the session store, sessions that never exit cleanly have no
-  token data**: the event stream carries token totals only at shutdown. A
-  crashed or still-open session then contributes activity and credits, but
-  no tokens, until it eventually exits.
+- **Without the session store or receipts, sessions that never exit cleanly
+  have no token data**: an older CLI's event stream carries token totals
+  only at shutdown. A crashed or still-open session then contributes
+  activity and credits, but no tokens, until it eventually exits.
 - **Day-level granularity of snapshot-only sessions is only as fine as your
   exit habits**: everything between two clean exits lands on the later
   exit's day. Per-call rows have no such limit.
-- Newer CLIs also put per-model token snapshots on `session.usage_checkpoint`
-  (`providerModelMetrics`). They are not read yet: no local log carries them,
-  so how they line up with the shutdown totals and the per-call rows is
-  unverified.
+- The per-model token snapshots newer CLIs put on `session.usage_checkpoint`
+  (`providerModelMetrics`, `accountingSnapshot`) are not read: they cover the
+  same calls as the receipts before them. Receipts add tokens only; credits
+  still come from the `totalNanoAiu` ledger.
+- A compaction's own usage (`session.compaction_complete`'s
+  `compactionTokensUsed`) is not read. Whether a compaction call also writes
+  a receipt is unverified (the receipt's `interactionType` lists
+  `conversation-compaction`), so reading both could count it twice. Usage
+  no receipt carries still counts in the next exit's remainder.
+- A caught-up row is not matched to its receipt by id: the `event_id` after
+  `usage-record:` has no documented format. The two are kept apart by date,
+  as above.
 - Premium-request counts are not surfaced; tokens, API-equivalent cost, and
   the credit ledger are.

@@ -31,6 +31,10 @@ impl Provider {
 pub enum SourceKind {
     Main,
     Subagent,
+    /// A harness's always-on helper (the claude-mem observer). Its calls are
+    /// usage and cost, but not the person's activity: no sessions, active
+    /// days, hourly profile or working time.
+    Background,
 }
 
 /// Input excludes cache reads and writes. Reasoning is included in output;

@@ -83,26 +83,31 @@ pub(super) fn parse_messages(
         }
 
         let usage = token_usage(&value);
-        collection.usage_events.push(UsageEvent {
-            timestamp: Some(timestamp),
-            session_id: Some(session_id.clone()),
-            model: value
-                .get("modelID")
-                .and_then(Value::as_str)
-                .and_then(ident)
-                .map(ToOwned::to_owned),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: value
-                .pointer("/path/cwd")
-                .and_then(Value::as_str)
-                .and_then(project_from_cwd),
-            // OpenCode records a per-message cost, but like every provider we
-            // price from LiteLLM for consistency (see docs/opencode).
-            usage,
-            granularity: crate::model::UsageGranularity::Call,
-        });
+        // An aborted or failed turn leaves an assistant row with no tokens;
+        // counted, it padded the call count the way Claude and Codex never do.
+        if usage.token_volume() > 0 {
+            collection.usage_events.push(UsageEvent {
+                timestamp: Some(timestamp),
+                session_id: Some(session_id.clone()),
+                model: value
+                    .get("modelID")
+                    .and_then(Value::as_str)
+                    .and_then(ident)
+                    .map(ToOwned::to_owned),
+                source_kind: SourceKind::Main,
+                attribution_agent: None,
+                attribution_skill: None,
+                project: value
+                    .pointer("/path/cwd")
+                    .and_then(Value::as_str)
+                    .and_then(project_from_cwd),
+                // OpenCode records a per-message cost, but like every provider we
+                // price from LiteLLM for consistency (see docs/opencode).
+                usage,
+                granularity: crate::model::UsageGranularity::Call,
+                billing: crate::model::Billing::default(),
+            });
+        }
 
         if let Some(completed_ms) = value.pointer("/time/completed").and_then(Value::as_i64) {
             collection.duration_events.push(DurationEvent {
@@ -256,6 +261,24 @@ mod tests {
         assert_eq!(collection.duration_events[0].duration_ms, expected);
 
         assert_eq!(collection.session_touches.len(), 2);
+    }
+
+    #[test]
+    fn message_without_tokens_is_not_a_call() {
+        let dir = TempDir::new().expect("tempdir");
+        write_db(dir.path());
+        insert_message(
+            dir.path(),
+            "m2",
+            ASSISTANT_DONE_MS,
+            r#"{"role":"assistant","modelID":"qwen3:8b","tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1781542436778,"completed":1781542437778},"finish":"error"}"#,
+        );
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(collection.usage_events.len(), 1);
+        assert_eq!(collection.duration_events.len(), 2);
+        assert_eq!(collection.session_touches.len(), 3);
     }
 
     #[test]

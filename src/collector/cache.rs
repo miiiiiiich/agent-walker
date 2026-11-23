@@ -13,7 +13,7 @@ use crate::owned_file;
 
 /// Parsing, attribution, or encoding changes require a version bump so cached
 /// events are never read with old semantics.
-const CACHE_VERSION: u32 = 25;
+const CACHE_VERSION: u32 = 26;
 
 /// Far above what months of heavy use encode to; bounds what a crafted or
 /// runaway file can make a load read into memory.
@@ -403,8 +403,9 @@ mod tests {
         let one_entry = [header.clone(), vec![1]].concat();
         let path = postcard::to_stdvec(&PathBuf::from("/a")).unwrap();
 
-        // mtime_ns, size, 11 empty event vectors, lines_seen, parse_errors.
-        let valid = [one_entry.clone(), path.clone(), vec![0; 15]].concat();
+        // mtime_ns, size, 11 empty event vectors, no cost-state rows,
+        // lines_seen, parse_errors.
+        let valid = [one_entry.clone(), path.clone(), vec![0; 16]].concat();
         assert!(
             decode(&valid).is_some(),
             "the crafted layout is a real cache"

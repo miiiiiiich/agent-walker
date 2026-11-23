@@ -29,6 +29,18 @@ pub(super) fn plain_rollout_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The thread a rollout belongs to, from its name as Codex writes it:
+/// `rollout-<YYYY-MM-DDThh-mm-ss>-<thread id>[_<rollout id>].jsonl`. Codex
+/// itself finds a thread's rollouts by this name.
+pub(super) fn thread_id_of(path: &Path) -> Option<String> {
+    let plain = plain_rollout_path(path);
+    let name = plain.file_name()?.to_str()?;
+    let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let ids = core.get(20..).filter(|_| core.get(19..20) == Some("-"))?;
+    let thread = ids.split_once('_').map_or(ids, |(thread, _)| thread);
+    (!thread.is_empty()).then(|| thread.to_owned())
+}
+
 /// Plain beats compressed, as in Codex. The frame header's content size is
 /// not compared: it is whatever the file claims, and a forged one would drop
 /// the plain file's usage.
@@ -56,7 +68,7 @@ pub(super) fn open_rollout(path: &Path) -> Option<Box<dyn BufRead>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
 
     use tempfile::TempDir;
@@ -228,9 +240,9 @@ mod tests {
                 token_count_line("2026-06-01T00:00:03Z", &usage_json(100, 0, 10), 110),
             ],
         );
-        let archived_day = temp.path().join("archived_sessions/2026/06/01");
-        fs::create_dir_all(&archived_day).expect("test dirs should be created");
-        fs::write(archived_day.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
+        let archived = temp.path().join("archived_sessions");
+        fs::create_dir_all(&archived).expect("test dirs should be created");
+        fs::write(archived.join("rollout-z.jsonl.zst"), COMPRESSED_ZST)
             .expect("fixture should be written");
         assert!(fs::metadata(&plain).expect("plain exists").len() < COMPRESSED_ZST.len() as u64);
 
@@ -243,7 +255,12 @@ mod tests {
 
     /// A zstd frame of raw and run-length blocks: `prefix`, `run` copies of
     /// `byte`, then `suffix`, at four bytes per 128 KiB of run.
-    fn run_length_frame(prefix: &[u8], byte: u8, run: usize, suffix: &[u8]) -> Vec<u8> {
+    pub(in crate::collector::codex) fn run_length_frame(
+        prefix: &[u8],
+        byte: u8,
+        run: usize,
+        suffix: &[u8],
+    ) -> Vec<u8> {
         const BLOCK: usize = 128 << 10;
         fn header(frame: &mut Vec<u8>, size: usize, kind: u32, last: bool) {
             let size = u32::try_from(size).expect("block size fits");

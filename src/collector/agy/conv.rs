@@ -1,10 +1,13 @@
 //! With no public schema, read the wire format directly and pull only the needed fields.
-//! The field map was cross-checked against the `tokscale` project.
+//! Field numbers follow the usage message in the protobuf descriptor embedded in
+//! the agy binary, cross-checked against the `tokscale` project (its #1610 /
+//! #1611 identified `#1` as the model enum). `#1` is not a token count: reading
+//! it as system-prompt tokens added the enum value to every row's input.
 //! Because the numbers are unofficial and could shift on an Antigravity update,
 //! every row is self-verified against the precomputed output total `#3` (fields:
-//! `#3` output total, `#9` text, `#10` thinking, `#11` response id): it must
-//! equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped and
-//! counted as a parse error. A row that omits `#3` can't be verified, so it's
+//! `#3` output total, `#9` thinking, `#10` response text, `#11` response id): it
+//! must equal `#9 + #10`. A mismatch means the layout drifted → the row is dropped
+//! and counted as a parse error. A row that omits `#3` can't be verified, so it's
 //! skipped too, but quietly (some healthy rows omit it — not an error).
 
 use std::collections::HashMap;
@@ -14,18 +17,32 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::collector::ident::ident;
 use crate::collector::project_from_cwd;
 use crate::collector::store::{Store, open_store, read_deadline};
 use crate::model::{ScanStats, SourceKind, TokenUsage, UsageEvent};
 use crate::timestamp::{from_unix_millis, to_local};
+
+use label::{display_name_label, selected_models, served_model_label};
+use proto::{message_field, proto_timestamp_ms, string_field, varint_field};
+use trajectory::trajectory_meta;
+
+pub(in crate::collector::agy) use trajectory::Subagent;
+
+mod label;
+mod proto;
+mod trajectory;
+
+pub(super) struct Usage {
+    pub(super) events: Vec<UsageEvent>,
+    pub(super) subagents: HashMap<String, Subagent>,
+}
 
 pub(super) fn collect_usage(
     stores: &[PathBuf],
     mtime_floor: Option<SystemTime>,
     local_offset: UtcOffset,
     stats: &mut ScanStats,
-) -> Vec<UsageEvent> {
+) -> Usage {
     let floor = mtime_floor.and_then(systemtime_to_ms);
     let mut dbs = Vec::new();
     for store in stores {
@@ -45,6 +62,7 @@ pub(super) fn collect_usage(
     }
 
     let mut generations = Generations::default();
+    let mut subagents = HashMap::new();
     let deadline = read_deadline();
     for db in dbs {
         let newest = newest_mtime_ms(&db);
@@ -57,15 +75,18 @@ pub(super) fn collect_usage(
         {
             continue;
         }
-        parse_db(&db, newest, deadline, local_offset, stats, &mut generations);
+        let read = parse_db(&db, newest, deadline, local_offset, stats, &mut generations);
+        if let Some((conversation_id, subagent)) = read {
+            subagents.insert(conversation_id, subagent);
+        }
     }
     // Apply the window only after every copy has been weighed: filtering per row
     // lets an out-of-window copy (dated from its conversation start) claim the
     // id and shadow an in-window copy from the other store.
-    generations
+    let events = generations
         .rows
         .into_iter()
-        .map(|(_, event)| event)
+        .map(|(_, event)| attributed(event, &subagents))
         .filter(|event| {
             !floor.is_some_and(|floor| {
                 event
@@ -73,7 +94,20 @@ pub(super) fn collect_usage(
                     .is_some_and(|ts| ts.unix_timestamp_nanos() / 1_000_000 < i128::from(floor))
             })
         })
-        .collect()
+        .collect();
+    Usage { events, subagents }
+}
+
+/// Attributed once every copy is read, by the conversation a row leaves
+/// `parse_gen` under: only one store's copy may name the parent, and when the
+/// other copy won on time its row stayed Main in a session of its own.
+fn attributed(mut event: UsageEvent, subagents: &HashMap<String, Subagent>) -> UsageEvent {
+    if let Some(subagent) = event.session_id.as_ref().and_then(|id| subagents.get(id)) {
+        event.session_id = Some(subagent.session_id.clone());
+        event.source_kind = SourceKind::Subagent;
+        event.attribution_agent.clone_from(&subagent.name);
+    }
+    event
 }
 
 /// How a row's time was found, weakest first.
@@ -138,43 +172,46 @@ fn parse_db(
     local_offset: UtcOffset,
     stats: &mut ScanStats,
     generations: &mut Generations,
-) {
+) -> Option<(String, Subagent)> {
     // Skipped unopened: there is nothing to read yet, and a 0-byte file is still
     // in rollback-journal mode, where our read lock would block agy's first write.
     if std::fs::metadata(db).is_ok_and(|meta| meta.len() == 0) {
-        return;
+        return None;
     }
     let Some(store) = open_store(db, deadline) else {
         stats.unreadable_files += 1;
-        return;
+        return None;
     };
     stats.files_seen += 1;
-    let session_id = db
+    let conversation_id = db
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("antigravity")
         .to_owned();
-    let (session_ts, project) = trajectory_meta(&store);
+    let trajectory = trajectory_meta(&store, &conversation_id);
     // Fallback chain for a row's time: its own stamp → its step's created-at →
     // the conversation's created-at → the DB file mtime (so a missing timestamp
     // dates the event near when the file was written, never 1970).
-    let fallback = if session_ts > 0 {
-        (TimeSource::ConversationStart, session_ts)
+    let fallback = if trajectory.started_ms > 0 {
+        (TimeSource::ConversationStart, trajectory.started_ms)
     } else {
         (TimeSource::FileMtime, db_mtime_ms.unwrap_or(0))
     };
+    let subagent = trajectory
+        .subagent
+        .map(|subagent| (conversation_id.clone(), subagent));
 
     if !store.has_table("gen_metadata", &["idx", "data"]) {
-        return;
+        return subagent;
     }
     let Ok(mut stmt) = store.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx") else {
-        return;
+        return subagent;
     };
     let Ok(rows) = stmt.query_map([], |row| {
         store.charge(row, 2)?;
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     }) else {
-        return;
+        return subagent;
     };
     let mut blobs = Vec::new();
     for row in rows {
@@ -189,8 +226,8 @@ fn parse_db(
         }
     }
     let conversation = Conversation {
-        session_id: &session_id,
-        project: project.as_deref(),
+        id: &conversation_id,
+        project: trajectory.project.as_deref(),
         fallback,
         selected_models: selected_models(&blobs),
         step_times_ms: step_times_by_response(&store),
@@ -205,6 +242,7 @@ fn parse_db(
             ParseGen::Drift => stats.parse_errors += 1,
         }
     }
+    subagent
 }
 
 enum ParseGen {
@@ -220,7 +258,10 @@ struct Generation {
 }
 
 struct Conversation<'a> {
-    session_id: &'a str,
+    /// The DB file name. Id-less rows are keyed by it, not by the session: a
+    /// subagent shares its parent's session, and the same row index in both
+    /// would collide and drop one row's tokens.
+    id: &'a str,
     project: Option<&'a str>,
     fallback: (TimeSource, i64),
     selected_models: Vec<String>,
@@ -244,11 +285,11 @@ fn parse_gen(
     // and combine with saturating arithmetic so totals never wrap negative.
     let v = |field: u64| varint_field(usage, field).unwrap_or(0);
     let to_u64 = |x: u64| x.min(i64::MAX as u64);
-    let system = to_u64(v(1));
-    let new_input = to_u64(v(2));
+    let input = to_u64(v(2));
+    let cache_write = to_u64(v(4));
     let cache_read = to_u64(v(5));
-    let output_text = to_u64(v(9));
-    let thinking = to_u64(v(10));
+    let thinking = to_u64(v(9));
+    let output_text = to_u64(v(10));
 
     match varint_field(usage, 3) {
         Some(total) if to_u64(total) == output_text.saturating_add(thinking) => {}
@@ -256,16 +297,12 @@ fn parse_gen(
         None => return ParseGen::Empty,
     }
 
-    let input = system.saturating_add(new_input);
-    if input == 0 && output_text == 0 && cache_read == 0 && thinking == 0 {
+    if input == 0 && output_text == 0 && cache_read == 0 && cache_write == 0 && thinking == 0 {
         return ParseGen::Empty;
     }
 
     let response_id = string_field(usage, 11).filter(|id| !id.trim().is_empty());
-    let key = response_id.map_or_else(
-        || format!("{}#{idx}", conversation.session_id),
-        ToOwned::to_owned,
-    );
+    let key = response_id.map_or_else(|| format!("{}#{idx}", conversation.id), ToOwned::to_owned);
 
     let (source, timestamp_ms) = message_field(chat_model, 9)
         .and_then(|node| message_field(node, 4))
@@ -280,20 +317,18 @@ fn parse_gen(
         .unwrap_or(conversation.fallback);
     let timestamp = ms_to_offset(timestamp_ms, local_offset);
 
-    // Prefer the display name (#21, e.g. "Gemini 3.5 Flash (High)") — it's the
-    // product-accurate label and prices correctly (the internal id #19 is a
-    // cryptic, version-mismatched codename like "gemini-3-flash-a"). Rows
-    // without it fall back to #19, reconciled with the selected model so a
-    // routing tag doesn't split one model into several unpriced labels.
-    let is_non_empty = |text: &&str| !text.trim().is_empty();
+    // Prefer the display name (#21, e.g. "Gemini 3.5 Flash (High)") — it names
+    // the selection, while the internal id #19 can be a cryptic,
+    // version-mismatched codename like "gemini-3-flash-a". Rows without it
+    // fall back to #19, reconciled with the selected model so a routing tag
+    // doesn't split one model into several unpriced labels.
     let model = string_field(chat_model, 21)
-        .filter(is_non_empty)
+        .and_then(display_name_label)
         .or_else(|| {
             string_field(chat_model, 19)
-                .filter(is_non_empty)
-                .map(|served| served_model_label(served, &conversation.selected_models))
-        })
-        .map(ToOwned::to_owned);
+                .filter(|served| !served.trim().is_empty())
+                .map(|served| served_model_label(served, &conversation.selected_models).to_owned())
+        });
 
     let usage = TokenUsage {
         input_tokens: input,
@@ -301,12 +336,13 @@ fn parse_gen(
         // as the OpenCode collector); reasoning is kept separately for display.
         output_tokens: output_text.saturating_add(thinking),
         reasoning_output_tokens: thinking,
+        cache_creation_input_tokens: cache_write,
         cache_read_input_tokens: cache_read,
         ..TokenUsage::default()
     };
     let event = UsageEvent {
         timestamp,
-        session_id: Some(conversation.session_id.to_owned()),
+        session_id: Some(conversation.id.to_owned()),
         model,
         source_kind: SourceKind::Main,
         attribution_agent: None,
@@ -314,43 +350,9 @@ fn parse_gen(
         project: conversation.project.and_then(project_from_cwd),
         usage,
         granularity: crate::model::UsageGranularity::Call,
+        billing: crate::model::Billing::default(),
     };
     ParseGen::Event(Box::new(Generation { key, source, event }))
-}
-
-/// The label is the selected model minus its last segment (the mode: `-high`,
-/// `-tiered`, …), taken only when the served id is that base or the base plus
-/// one segment (`gemini-3.8-flash-n` under `gemini-3.8-flash-high` →
-/// `gemini-3.8-flash`). Matching the tags themselves (`-n`, `-trial`, …) was
-/// rejected: they are relabelled server-side and a list goes stale on the next
-/// one. An id that lines up with no selection stays as served rather than being
-/// guessed into another model.
-fn served_model_label<'a>(served: &'a str, selected: &[String]) -> &'a str {
-    let selection_base = |base: &str| selected.iter().any(|id| parent_id(id) == Some(base));
-    if selection_base(served) {
-        return served;
-    }
-    match parent_id(served) {
-        Some(base) if selection_base(base) => base,
-        _ => served,
-    }
-}
-
-fn parent_id(id: &str) -> Option<&str> {
-    id.rsplit_once('-').map(|(head, _)| head)
-}
-
-fn selected_models(blobs: &[(i64, Vec<u8>)]) -> Vec<String> {
-    let mut models: Vec<String> = blobs
-        .iter()
-        .filter_map(|(_, blob)| message_field(blob, 3))
-        .filter_map(|config| string_field(config, 28))
-        .filter(|id| !id.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    models.sort_unstable();
-    models.dedup();
-    models
 }
 
 /// Keyed by response id, not matched by position: some conversations hold
@@ -387,45 +389,6 @@ fn step_times_by_response(store: &Store) -> HashMap<String, i64> {
     times
 }
 
-fn trajectory_meta(store: &Store) -> (i64, Option<String>) {
-    if !store.has_table("trajectory_metadata_blob", &["data"]) {
-        return (0, None);
-    }
-    let blob: Option<Vec<u8>> = store
-        .query_row(
-            "SELECT data FROM trajectory_metadata_blob LIMIT 1",
-            [],
-            |row| {
-                store.charge(row, 1)?;
-                row.get(0)
-            },
-        )
-        .ok();
-    let Some(blob) = blob else {
-        return (0, None);
-    };
-    let ts = message_field(&blob, 2)
-        .and_then(proto_timestamp_ms)
-        .filter(|&ms| plausible_ms(ms))
-        .unwrap_or(0);
-    // A path, held to the path bound by `project_from_cwd`, not the id bound.
-    let project = message_field(&blob, 1)
-        .and_then(|folder| message_field(folder, 1))
-        .and_then(|uri| std::str::from_utf8(uri).ok())
-        .map(file_uri_to_path);
-    (ts, project)
-}
-
-fn file_uri_to_path(uri: &str) -> String {
-    let path = uri.trim_start_matches("file://");
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' && bytes[1].is_ascii_alphabetic() {
-        path[1..].to_owned()
-    } else {
-        path.to_owned()
-    }
-}
-
 fn systemtime_to_ms(time: SystemTime) -> Option<i64> {
     let nanos = time.duration_since(UNIX_EPOCH).ok()?.as_millis();
     i64::try_from(nanos).ok()
@@ -437,100 +400,8 @@ fn ms_to_offset(ms: i64, local_offset: UtcOffset) -> Option<OffsetDateTime> {
 
 /// A stamp past the plausible range is treated like a missing one, so the
 /// row falls back to the next source instead of going undated.
-fn plausible_ms(ms: i64) -> bool {
+pub(in crate::collector::agy) fn plausible_ms(ms: i64) -> bool {
     ms > 0 && from_unix_millis(ms).is_some()
-}
-
-fn proto_timestamp_ms(ts: &[u8]) -> Option<i64> {
-    let seconds = i64::try_from(varint_field(ts, 1)?).ok()?;
-    let nanos = i64::try_from(varint_field(ts, 2).unwrap_or(0)).ok()?;
-    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
-}
-
-enum Wire<'a> {
-    Varint(u64),
-    Len(&'a [u8]),
-}
-
-struct ProtoReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> ProtoReader<'a> {
-    fn read_varint(&mut self) -> Option<u64> {
-        let mut result = 0u64;
-        let mut shift = 0u32;
-        loop {
-            let byte = *self.buf.get(self.pos)?;
-            self.pos += 1;
-            result |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                return Some(result);
-            }
-            shift += 7;
-            if shift >= 64 {
-                return None;
-            }
-        }
-    }
-
-    fn next_field(&mut self) -> Option<(u64, Wire<'a>)> {
-        if self.pos >= self.buf.len() {
-            return None;
-        }
-        let tag = self.read_varint()?;
-        let wire = match tag & 0x7 {
-            0 => Wire::Varint(self.read_varint()?),
-            1 => {
-                self.pos = self.pos.checked_add(8).filter(|&p| p <= self.buf.len())?;
-                return Some((tag >> 3, Wire::Varint(0))); // fixed64, value unused
-            }
-            2 => {
-                let len = usize::try_from(self.read_varint()?).ok()?;
-                let end = self.pos.checked_add(len).filter(|&p| p <= self.buf.len())?;
-                let bytes = &self.buf[self.pos..end];
-                self.pos = end;
-                Wire::Len(bytes)
-            }
-            5 => {
-                self.pos = self.pos.checked_add(4).filter(|&p| p <= self.buf.len())?;
-                return Some((tag >> 3, Wire::Varint(0))); // fixed32, value unused
-            }
-            _ => return None,
-        };
-        Some((tag >> 3, wire))
-    }
-}
-
-fn message_field(buf: &[u8], field: u64) -> Option<&[u8]> {
-    let mut reader = ProtoReader { buf, pos: 0 };
-    while let Some((found, wire)) = reader.next_field() {
-        if found == field
-            && let Wire::Len(bytes) = wire
-        {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-fn varint_field(buf: &[u8], field: u64) -> Option<u64> {
-    let mut reader = ProtoReader { buf, pos: 0 };
-    while let Some((found, wire)) = reader.next_field() {
-        if found == field
-            && let Wire::Varint(value) = wire
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn string_field(buf: &[u8], field: u64) -> Option<&str> {
-    message_field(buf, field)
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(ident)
 }
 
 #[cfg(test)]
@@ -570,25 +441,25 @@ pub(super) mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn gen_blob(
-        system: u64,
+        model_enum: u64,
         input: u64,
         cache: u64,
-        output: u64,
+        text: u64,
         think: u64,
         total: Option<u64>,
         resp_id: &str,
     ) -> Vec<u8> {
         let mut usage = Vec::new();
-        usage.extend(varint(1, system));
+        usage.extend(varint(1, model_enum));
         usage.extend(varint(2, input));
         if let Some(total) = total {
             usage.extend(varint(3, total));
         }
         usage.extend(varint(5, cache));
-        usage.extend(varint(9, output));
-        usage.extend(varint(10, think));
+        usage.extend(varint(9, think));
+        usage.extend(varint(10, text));
         usage.extend(lenf(11, resp_id.as_bytes()));
-        let mut chat = Vec::new();
+        let mut chat = varint(3, model_enum);
         chat.extend(lenf(4, &usage));
         chat.extend(lenf(19, b"gemini-3-flash"));
         lenf(1, &chat)
@@ -596,7 +467,7 @@ pub(super) mod tests {
 
     fn conversation(fallback_ts_ms: i64) -> Conversation<'static> {
         Conversation {
-            session_id: "s1",
+            id: "s1",
             project: None,
             fallback: (TimeSource::ConversationStart, fallback_ts_ms),
             selected_models: Vec::new(),
@@ -623,11 +494,38 @@ pub(super) mod tests {
             ..conversation(1_700_000_000_000)
         };
         let e = event_of(parse_gen(&blob, 0, &conversation, UtcOffset::UTC));
-        assert_eq!(e.usage.input_tokens, 1632); // 1132 + 500
+        assert_eq!(e.usage.input_tokens, 500);
         assert_eq!(e.usage.cache_read_input_tokens, 16000);
+        assert_eq!(e.usage.cache_creation_input_tokens, 0);
         assert_eq!(e.usage.output_tokens, 340); // 300 + 40 (thinking folded in)
         assert_eq!(e.usage.reasoning_output_tokens, 40);
         assert_eq!(e.model.as_deref(), Some("gemini-3-flash"));
+    }
+
+    #[test]
+    fn model_enum_alone_is_empty() {
+        let blob = gen_blob(1532, 0, 0, 0, 0, Some(0), "r1");
+        assert!(matches!(parse(&blob), ParseGen::Empty));
+    }
+
+    #[test]
+    fn cache_write_counts_as_cache_creation() {
+        let mut usage = varint(1, 1532);
+        usage.extend(varint(2, 100));
+        usage.extend(varint(3, 10));
+        usage.extend(varint(4, 7000));
+        usage.extend(varint(10, 10));
+        usage.extend(lenf(11, b"r1"));
+        let e = event_of(parse(&lenf(1, &lenf(4, &usage))));
+        assert_eq!(e.usage.input_tokens, 100);
+        assert_eq!(e.usage.cache_creation_input_tokens, 7000);
+        assert_eq!(e.usage.token_volume(), 7110);
+
+        let mut only_write = varint(3, 0);
+        only_write.extend(varint(4, 7000));
+        only_write.extend(lenf(11, b"r2"));
+        let e = event_of(parse(&lenf(1, &lenf(4, &only_write))));
+        assert_eq!(e.usage.cache_creation_input_tokens, 7000);
     }
 
     #[test]
@@ -643,7 +541,46 @@ pub(super) mod tests {
         chat.extend(lenf(21, b"Gemini 3.5 Flash (High)"));
         let blob = lenf(1, &chat);
         let e = event_of(parse(&blob));
-        assert_eq!(e.model.as_deref(), Some("Gemini 3.5 Flash (High)"));
+        assert_eq!(e.model.as_deref(), Some("gemini-3.5-flash"));
+    }
+
+    #[test]
+    fn rows_with_and_without_a_display_name_share_one_label() {
+        let mut with_name = served_only_gen_blob("gemini-3.8-flash-tiered", "r1", None);
+        let chat = message_field(&with_name, 1).expect("generation").to_vec();
+        let mut named = chat.clone();
+        named.extend(lenf(21, b"Gemini 3.8 Flash (Low)"));
+        with_name = lenf(1, &named);
+        let without_name = served_only_gen_blob("gemini-3.8-flash-tiered", "r2", None);
+        let conversation = Conversation {
+            selected_models: vec!["gemini-3.8-flash-tiered".to_owned()],
+            ..conversation(1)
+        };
+        let labels: Vec<_> = [with_name, without_name]
+            .iter()
+            .map(|blob| event_of(parse_gen(blob, 0, &conversation, UtcOffset::UTC)).model)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("gemini-3.8-flash".to_owned()),
+                Some("gemini-3.8-flash".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn blank_or_unusable_display_name_falls_back_to_the_served_id() {
+        for display in [&b" (Medium)"[..], b"Gemini private-repo\t(High)"] {
+            let mut usage = varint(3, 10);
+            usage.extend(varint(10, 10));
+            usage.extend(lenf(11, b"r1"));
+            let mut chat = lenf(4, &usage);
+            chat.extend(lenf(19, b"gemini-4-argon"));
+            chat.extend(lenf(21, display));
+            let e = event_of(parse(&lenf(1, &chat)));
+            assert_eq!(e.model.as_deref(), Some("gemini-4-argon"));
+        }
     }
 
     #[test]
@@ -677,15 +614,6 @@ pub(super) mod tests {
         assert!(matches!(parse(&blob), ParseGen::Empty));
     }
 
-    #[test]
-    fn windows_file_uri_drops_the_drive_slash() {
-        assert_eq!(
-            file_uri_to_path("file:///C:/Users/me/repo"),
-            "C:/Users/me/repo"
-        );
-        assert_eq!(file_uri_to_path("file:///Users/me/repo"), "/Users/me/repo");
-    }
-
     fn timestamp(ms: i64) -> Vec<u8> {
         let secs = u64::try_from(ms / 1000).expect("test timestamp should be positive");
         let mut ts = varint(1, secs);
@@ -701,7 +629,7 @@ pub(super) mod tests {
         selected: Option<&str>,
     ) -> Vec<u8> {
         let mut usage = Vec::new();
-        usage.extend(varint(1, 1000));
+        usage.extend(varint(1, 1532));
         usage.extend(varint(2, 200));
         usage.extend(varint(3, 70));
         usage.extend(varint(5, 4000));
@@ -730,49 +658,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn routing_tag_resolves_to_the_selected_model() {
-        let selected = vec![
-            "gemini-3.8-flash-high".to_owned(),
-            "gemini-4-argon-medium".to_owned(),
-        ];
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-n", &selected),
-            "gemini-3.8-flash"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash", &selected),
-            "gemini-3.8-flash"
-        );
-        assert_eq!(
-            served_model_label("gemini-4-argon-trial", &selected),
-            "gemini-4-argon"
-        );
-        // The app serves under the selected id itself, mode segment included.
-        let app = vec!["gemini-3.8-flash-tiered".to_owned()];
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-tiered", &app),
-            "gemini-3.8-flash"
-        );
-    }
-
-    #[test]
-    fn served_id_unrelated_to_the_selection_stays_as_served() {
-        let selected = vec!["gemini-3.8-flash-high".to_owned()];
-        assert_eq!(
-            served_model_label("gemini-default", &selected),
-            "gemini-default"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-lite-n", &selected),
-            "gemini-3.8-flash-lite-n"
-        );
-        assert_eq!(
-            served_model_label("gemini-3.8-flash-n", &[]),
-            "gemini-3.8-flash-n"
-        );
-    }
-
-    #[test]
     fn served_only_row_dates_from_its_step_and_ignores_context_metadata() {
         let blob = served_only_gen_blob("gemini-3.8-flash-n", "r1", None);
         let conversation = Conversation {
@@ -786,11 +671,11 @@ pub(super) mod tests {
             Some(1_790_000_000)
         );
         assert_eq!(e.model.as_deref(), Some("gemini-3.8-flash"));
-        assert_eq!(e.usage.input_tokens, 1200);
+        assert_eq!(e.usage.input_tokens, 200);
         assert_eq!(e.usage.output_tokens, 70);
-        assert_eq!(e.usage.reasoning_output_tokens, 20);
+        assert_eq!(e.usage.reasoning_output_tokens, 50);
         assert_eq!(e.usage.cache_read_input_tokens, 4000);
-        assert_eq!(e.usage.token_volume(), 5270);
+        assert_eq!(e.usage.token_volume(), 4270);
     }
 
     #[test]
@@ -868,6 +753,29 @@ pub(super) mod tests {
         gens: &[Vec<u8>],
         steps: &[Vec<u8>],
     ) {
+        write_trajectory_conversation(path, &lenf(2, &timestamp(started_ms)), gens, steps);
+    }
+
+    pub(in crate::collector::agy) fn subagent_trajectory(
+        started_ms: i64,
+        parent: &str,
+        root: &str,
+        name: &str,
+    ) -> Vec<u8> {
+        let mut blob = lenf(2, &timestamp(started_ms));
+        blob.extend(lenf(5, parent.as_bytes()));
+        blob.extend(lenf(6, root.as_bytes()));
+        blob.extend(lenf(8, &lenf(1, name.as_bytes())));
+        blob.extend(varint(17, 1));
+        blob
+    }
+
+    pub(in crate::collector::agy) fn write_trajectory_conversation(
+        path: &Path,
+        trajectory: &[u8],
+        gens: &[Vec<u8>],
+        steps: &[Vec<u8>],
+    ) {
         write_conversation(path, gens);
         let conn = Connection::open(path).expect("fixture db should open");
         conn.execute_batch(
@@ -877,7 +785,7 @@ pub(super) mod tests {
         .expect("fixture schema should be created");
         conn.execute(
             "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
-            [lenf(2, &timestamp(started_ms))],
+            [trajectory],
         )
         .expect("trajectory row should insert");
         for (idx, metadata) in (0_i64..).zip(steps) {
@@ -918,7 +826,7 @@ pub(super) mod tests {
 
         for stores in [[cli.clone(), app.clone()], [app.clone(), cli.clone()]] {
             let mut stats = ScanStats::default();
-            let events = collect_usage(&stores, Some(floor), UtcOffset::UTC, &mut stats);
+            let events = collect_usage(&stores, Some(floor), UtcOffset::UTC, &mut stats).events;
             let times: Vec<_> = events
                 .iter()
                 .map(|e| e.timestamp.map(OffsetDateTime::unix_timestamp))
@@ -937,7 +845,7 @@ pub(super) mod tests {
         }
         let gen_row = |rid: &str| served_only_gen_blob("gemini-3.8-flash", rid, None);
         // A row with no response id can only be matched by conversation + row index.
-        let unkeyed = gen_blob(10, 0, 0, 5, 0, Some(5), "");
+        let unkeyed = gen_blob(1532, 10, 0, 5, 0, Some(5), "");
         // The app's copy of c1 has moved one generation further than the CLI's.
         write_conversation(
             &stores[0].join("conversations").join("c1.db"),
@@ -953,13 +861,125 @@ pub(super) mod tests {
         );
 
         let mut stats = ScanStats::default();
-        let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats);
+        let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats).events;
 
         assert_eq!(stats.files_seen, 3);
         assert_eq!(stats.parse_errors, 0);
         assert_eq!(events.len(), 5, "c1 rows once each, plus r3 and r4");
         let input: u64 = events.iter().map(|e| e.usage.input_tokens).sum();
-        assert_eq!(input, 10 + 4 * 1200);
+        assert_eq!(input, 10 + 4 * 200);
+    }
+
+    #[test]
+    fn subagent_rows_join_the_top_level_session_and_keep_their_own_keys() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let dir = temp.path().join("conversations");
+        std::fs::create_dir_all(&dir).expect("conversations dir should be created");
+        let started_ms = 1_780_000_000_000;
+        // Neither row has a response id, so both are keyed by DB name + index 0.
+        let unkeyed = gen_blob(1532, 10, 0, 5, 0, Some(5), "");
+        let mut top = lenf(2, &timestamp(started_ms));
+        top.extend(lenf(6, b"parent"));
+        write_trajectory_conversation(
+            &dir.join("parent.db"),
+            &top,
+            std::slice::from_ref(&unkeyed),
+            &[],
+        );
+        write_trajectory_conversation(
+            &dir.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            std::slice::from_ref(&unkeyed),
+            &[],
+        );
+
+        let mut stats = ScanStats::default();
+        let usage = collect_usage(
+            &[temp.path().to_path_buf()],
+            None,
+            UtcOffset::UTC,
+            &mut stats,
+        );
+
+        let rows: Vec<_> = usage
+            .events
+            .iter()
+            .map(|e| {
+                (
+                    e.session_id.as_deref(),
+                    e.source_kind,
+                    e.attribution_agent.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("parent"), SourceKind::Subagent, Some("research")),
+                (Some("parent"), SourceKind::Main, None),
+            ]
+        );
+        assert_eq!(
+            usage
+                .subagents
+                .get("child")
+                .map(|sub| sub.session_id.as_str()),
+            Some("parent")
+        );
+        assert!(!usage.subagents.contains_key("parent"));
+    }
+
+    /// Only one copy of a subagent conversation may name its parent, and the
+    /// other can win on time or, on a tie, by being read first: the row still
+    /// counts as the subagent's, in the parent's session.
+    #[test]
+    fn a_subagent_row_is_attributed_whichever_copy_wins() {
+        let temp = tempfile::TempDir::new().expect("test tempdir should be created");
+        let started_ms = 1_780_000_000_000;
+        let row = served_only_gen_blob("gemini-3.8-flash", "r1", None);
+        for (case, steps) in [
+            ("stronger", vec![step_metadata(started_ms + 60_000, "r1")]),
+            ("tie", Vec::new()),
+        ] {
+            let plain = temp.path().join(case).join("plain");
+            let marked = temp.path().join(case).join("marked");
+            for store in [&plain, &marked] {
+                std::fs::create_dir_all(store.join("conversations"))
+                    .expect("conversations dir should be created");
+            }
+            write_dated_conversation(
+                &plain.join("conversations").join("child.db"),
+                started_ms,
+                std::slice::from_ref(&row),
+                &steps,
+            );
+            write_trajectory_conversation(
+                &marked.join("conversations").join("child.db"),
+                &subagent_trajectory(started_ms, "parent", "parent", "research"),
+                std::slice::from_ref(&row),
+                &[],
+            );
+
+            for stores in [[plain.clone(), marked.clone()], [marked, plain]] {
+                let mut stats = ScanStats::default();
+                let events = collect_usage(&stores, None, UtcOffset::UTC, &mut stats).events;
+                let rows: Vec<_> = events
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.session_id.as_deref(),
+                            e.source_kind,
+                            e.attribution_agent.as_deref(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    rows,
+                    [(Some("parent"), SourceKind::Subagent, Some("research"))],
+                    "{case}, store order {stores:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1021,7 +1041,8 @@ pub(super) mod tests {
             None,
             UtcOffset::UTC,
             &mut stats,
-        );
+        )
+        .events;
         drop(writer);
 
         assert_eq!(stats.files_seen, 1);

@@ -73,7 +73,9 @@ legacy `part.state` shape is unchanged.
   (legacy) or of `session_message` rows of type `assistant` (OpenCode 2), both
   `tokens.input` / `output` / `reasoning` / `cache.read` / `cache.write`.
   OpenCode 2 records a compaction request's usage only on its `compaction`
-  row, so those rows count too. Mapped to the same schema as Claude / Codex:
+  row, so those rows count too. A row with no tokens at all (an aborted or
+  failed turn) is not counted as a call, as with Claude / Codex; its activity,
+  duration and tools still count. Mapped to the same schema as Claude / Codex:
 
   ```
   tokens = input + output + cache_read + cache_creation(=cache.write)
@@ -91,7 +93,12 @@ legacy `part.state` shape is unchanged.
   → the TURN LENGTH section.
 - **Tools** from `part` rows of `type:"tool"` (the `tool` field: `glob` / `read` /
   `edit` / `bash` / an MCP name), or from an OpenCode 2 assistant message's
-  `content` items of `type:"tool"` (the `name` field).
+  `content` items of `type:"tool"` (the `name` field). Newer OpenCode 2 builds
+  write an assistant message's content as `session_part` rows instead, leaving
+  `content` empty; a message with such rows takes its tools from its rows of
+  `type` `tool` only, never from both, the way OpenCode itself reads it.
+  Those rows are read after every message, so tool payloads that use up the
+  store's 1 GiB read budget cost tools, not the messages' usage and turns.
 - **Sessions / activity / hourly** from message timestamps (`time.created`).
 
 ## Forks
@@ -104,6 +111,17 @@ rows the same way and skips the fork's rows at or below it, so only the turns
 the fork generated itself count under the fork. Nested forks resolve against
 their own parent fork. When the parent or its boundary row is gone, every row
 of the fork is kept: the copies may be the only surviving record.
+
+## Claude Agent provider
+
+OpenCode 2's Claude Agent provider (`model.providerID` `claude-agent`) runs
+the installed Claude Code, which writes its own transcript of every primary
+turn. Those turns already count on the Claude tab with the full model id, so
+their OpenCode `assistant` rows add no usage; their activity, durations and
+tools still count here. Compaction and other side calls run without a Claude
+transcript (`--no-session-persistence`), so their rows keep their usage. Once
+Claude Code deletes a transcript (after 30 days by default, see the Claude
+docs' history retention), its turns count on neither tab.
 
 So OpenCode reaches near-parity with Claude / Codex: tokens, cost, model,
 project, tools, sessions, durations, and hourly — all from the local DB.
@@ -122,7 +140,13 @@ the pricing database, so their tokens count but their cost stays unpriced
   the next run.
 - A live DB whose WAL still needs recovery and has no `-shm` present can't be
   opened read-only; that DB is skipped rather than touched.
-- Session title generation adds its usage to the `session_v2` totals only,
-  with no message row, so it isn't counted (a small request once per session).
-  The `session_v2` / `session` aggregates themselves are never read: they are
-  cumulative and can't be dated per turn.
+- Background requests made outside the conversation can't be counted:
+  session titles, and `session.generate` calls (cache-warming pings, `/goal`
+  checks, plugins). With the local CLI no per-request record of them is on
+  disk. They have no message row, and their `session.usage.recorded` events
+  reach the `event` table only when the host turns on event persistence,
+  which the local CLI server doesn't. Their usage lands only in the session's
+  totals. Warming pings every few minutes while it is on, so this can be far
+  more than one small request per session. The `session_v2` / `session`
+  aggregates themselves are never read: they are cumulative and can't be
+  dated per turn.

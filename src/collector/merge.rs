@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use tracing::debug;
 
 use super::events::FileEvents;
-use crate::model::{Collection, UsageEvent};
+use crate::model::{Collection, ServiceTier, UsageEvent};
 
 /// Fill missing metadata on `target` from `source`. Duplicate keyed usage
 /// lines can carry different metadata (a streaming fragment has the tokens
@@ -34,6 +34,12 @@ fn fill_usage_metadata(target: &mut UsageEvent, source: &UsageEvent) {
     if target.project.is_none() {
         target.project.clone_from(&source.project);
     }
+    // Copies of one call share its billing; a copy that does not record it
+    // reads as standard and would price the call below what it cost.
+    if target.billing.tier == ServiceTier::Standard {
+        target.billing.tier = source.billing.tier;
+    }
+    target.billing.us_only |= source.billing.us_only;
 }
 
 /// Earlier of two optional timestamps; a lone `Some` beats `None`. Used on
@@ -345,9 +351,14 @@ mod tests {
                         ..TokenUsage::default()
                     },
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: crate::model::Billing::default(),
                 },
             };
-        let small_early = event(early, 10, None, Some("proj"));
+        let mut small_early = event(early, 10, None, Some("proj"));
+        small_early.event.billing = crate::model::Billing {
+            tier: ServiceTier::Fast,
+            us_only: true,
+        };
         let large_late = event(late, 20, Some("claude"), None);
 
         let mut collection = Collection::new(Provider::Claude, PathBuf::new());
@@ -375,5 +386,7 @@ mod tests {
         assert_eq!(merged.timestamp, Some(early)); // earliest timestamp wins
         assert_eq!(merged.model.as_deref(), Some("claude")); // metadata from both
         assert_eq!(merged.project.as_deref(), Some("proj"));
+        assert_eq!(merged.billing.tier, ServiceTier::Fast);
+        assert!(merged.billing.us_only);
     }
 }

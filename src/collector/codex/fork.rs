@@ -25,11 +25,25 @@ pub(super) fn in_fork_burst(fork: OffsetDateTime, at: OffsetDateTime) -> bool {
     at.unix_timestamp() >= fork.unix_timestamp() && at - fork < Duration::SECOND
 }
 
+/// A row at or past `subagent_history_start_ordinal` is the child's own,
+/// even stamped inside the fork window. The mark only exempts rows from the
+/// window, never replaces it: Codex's rollout migration rewrote some children
+/// with the mark past their last row, which would make every row a copy.
+pub(super) fn starts_own_history(row: &Value, own_history_start: Option<u64>) -> bool {
+    own_history_start
+        .zip(row.get("ordinal").and_then(Value::as_u64))
+        .is_some_and(|(start, ordinal)| ordinal >= start)
+}
+
 /// Read from the first `session_meta` only: a fork child's second one is the
 /// parent's copy and would make the child a main session.
 #[derive(Default)]
 pub(super) struct Origin {
     pub(super) agent: Option<String>,
+    /// The session a subagent's work belongs to, its root thread's, as
+    /// Claude Code files a subagent's transcript under its parent session.
+    /// `None` for a main thread, a user's fork included: it is a session.
+    pub(super) session: Option<String>,
 }
 
 impl Origin {
@@ -49,7 +63,8 @@ impl Origin {
                 .and_then(ident)
                 .map(ToOwned::to_owned)
         };
-        Self { agent }
+        let session = agent.as_ref().and_then(|_| root_session(payload));
+        Self { agent, session }
     }
 
     pub(super) fn source_kind(&self) -> SourceKind {
@@ -59,6 +74,22 @@ impl Origin {
             SourceKind::Main
         }
     }
+}
+
+/// `session_id` names the root thread. Older CLIs wrote the thread's own id
+/// there; their subagents run one level deep, so the parent is the root.
+fn root_session(payload: &Value) -> Option<String> {
+    let own = string_path(payload, &["id"]);
+    string_path(payload, &["session_id"])
+        .filter(|root| Some(root) != own.as_ref())
+        .or_else(|| {
+            string_path(
+                payload,
+                &["source", "subagent", "thread_spawn", "parent_thread_id"],
+            )
+        })
+        .or_else(|| string_path(payload, &["parent_thread_id"]))
+        .or_else(|| string_path(payload, &["forked_from_id"]))
 }
 
 /// The SUBAGENTS row: a spawned thread's role (its nicknames are random per
@@ -93,6 +124,8 @@ mod tests {
     use tempfile::TempDir;
     use time::UtcOffset;
     use time::format_description::well_known::Rfc3339;
+
+    use std::path::Path;
 
     use super::*;
     use crate::collector::codex::collect;
@@ -243,34 +276,41 @@ mod tests {
     #[test]
     fn subagent_rollouts_are_attributed_by_their_own_session_source() {
         let temp = TempDir::new().expect("test tempdir should be created");
-        let usage = usage_json(100, 0, 10);
         let cases = [
             (
                 "a",
                 r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p","depth":1,"agent_nickname":"Nick","agent_role":"explorer"}}}"#,
                 Some("explorer"),
+                "p",
             ),
             (
                 "b",
                 r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p","depth":1,"agent_nickname":"Nick","agent_role":null}}}"#,
                 Some("default"),
+                "p",
             ),
-            ("c", r#"{"subagent":"review"}"#, Some("review")),
+            ("c", r#"{"subagent":"review"}"#, Some("review"), "c"),
             (
                 "d",
                 r#"{"subagent":{"other":"guardian"}}"#,
                 Some("guardian"),
+                "d",
             ),
-            ("e", r#"{"internal":"guardian"}"#, Some("guardian")),
-            ("f", r#""exec""#, None),
-            ("g", r#"{"custom":"host-app"}"#, None),
+            ("e", r#"{"internal":"guardian"}"#, Some("guardian"), "e"),
+            ("f", r#""exec""#, None, "f"),
+            ("g", r#"{"custom":"host-app"}"#, None, "g"),
         ];
-        for (id, source, _) in &cases {
+        for (offset, (id, source, _, _)) in (0u64..).zip(&cases) {
             write_lines(
                 &temp.path().join(format!("rollout-{id}.jsonl")),
                 &[
                     meta_line("2026-06-01T00:00:00Z", id, source, ""),
-                    record_line("2026-06-01T00:00:03Z", id, &format!("resp_{id}"), &usage),
+                    record_line(
+                        "2026-06-01T00:00:03Z",
+                        id,
+                        &format!("resp_{id}"),
+                        &usage_json(100 + offset, 0, 10),
+                    ),
                     format!(
                         r#"{{"timestamp":"2026-06-01T00:00:04Z","type":"response_item","payload":{{"type":"function_call","call_id":"call_{id}","name":"apply_patch","arguments":"{{}}"}}}}"#
                     ),
@@ -281,13 +321,14 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.usage_events.len(), cases.len());
-        for (id, _, agent) in &cases {
+        for (offset, (id, _, agent, session)) in (0u64..).zip(&cases) {
             let event = collection
                 .usage_events
                 .iter()
-                .find(|event| event.session_id.as_deref() == Some(*id))
+                .find(|event| event.usage.token_volume() == 110 + offset)
                 .expect("each rollout reports its usage");
             assert_eq!(event.attribution_agent.as_deref(), *agent, "rollout {id}");
+            assert_eq!(event.session_id.as_deref(), Some(*session), "rollout {id}");
             let expected = if agent.is_some() {
                 SourceKind::Subagent
             } else {
@@ -297,10 +338,188 @@ mod tests {
             let tool = collection
                 .tool_events
                 .iter()
-                .find(|event| event.session_id.as_deref() == Some(*id))
+                .find(|event| event.session_id.as_deref() == Some(*session))
                 .expect("each rollout reports its tool");
             assert_eq!(tool.source_kind, expected, "rollout {id}");
         }
+    }
+
+    fn spawn_source(parent: &str, depth: u8) -> String {
+        format!(
+            r#"{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{parent}","depth":{depth},"agent_role":"worker"}}}}}}"#
+        )
+    }
+
+    /// A rollout opening with `metas`, then one call, tool and turn of
+    /// `volume` tokens (the turn lasts `volume` ms, to find it again).
+    fn write_turn(path: &Path, metas: &[String], ts: &str, thread: &str, volume: u64) {
+        let mut lines = metas.to_vec();
+        lines.extend([
+            record_line(ts, thread, &format!("resp_{volume}"), &usage_json(volume - 10, 0, 10)),
+            format!(
+                r#"{{"timestamp":"{ts}","type":"response_item","payload":{{"type":"function_call","call_id":"call_{volume}","name":"apply_patch","arguments":"{{}}"}}}}"#
+            ),
+            format!(
+                r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"task_complete","turn_id":"t_{volume}","duration_ms":{volume}}}}}"#
+            ),
+        ]);
+        write_lines(path, &lines);
+    }
+
+    /// Each call's (session, project), its turn's session, and the sessions
+    /// touched and holding tools.
+    fn attribution(
+        collection: &Collection,
+        volume: u64,
+    ) -> (Option<&str>, Option<&str>, Option<&str>) {
+        let call = collection
+            .usage_events
+            .iter()
+            .find(|event| event.usage.token_volume() == volume)
+            .expect("each rollout reports its call");
+        let turn = collection
+            .duration_events
+            .iter()
+            .find(|event| event.duration_ms == volume)
+            .expect("each rollout reports its turn");
+        (
+            call.session_id.as_deref(),
+            call.project.as_deref(),
+            turn.session_id.as_deref(),
+        )
+    }
+
+    fn sessions_with_activity(collection: &Collection) -> (Vec<&str>, Vec<&str>) {
+        let mut touched: Vec<&str> = collection
+            .session_touches
+            .iter()
+            .map(|touch| touch.session_id.as_str())
+            .collect();
+        touched.sort_unstable();
+        touched.dedup();
+        let mut with_tools: Vec<&str> = collection
+            .tool_events
+            .iter()
+            .filter_map(|event| event.session_id.as_deref())
+            .collect();
+        with_tools.sort_unstable();
+        with_tools.dedup();
+        (touched, with_tools)
+    }
+
+    /// A subagent's work lands in the session it serves: the root thread
+    /// `session_id` names, or its parent where an older CLI wrote its own id
+    /// there or no `session_id` at all.
+    #[test]
+    fn subagents_join_their_root_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        write_turn(
+            &temp.path().join("rollout-nested.jsonl"),
+            &[meta_line(
+                "2026-06-01T00:10:00Z",
+                "nested",
+                &spawn_source("child", 2),
+                r#","session_id":"root""#,
+            )],
+            "2026-06-01T00:10:05Z",
+            "nested",
+            110,
+        );
+        write_turn(
+            &temp.path().join("rollout-old.jsonl"),
+            &[meta_line(
+                "2026-06-01T00:20:00Z",
+                "old",
+                &spawn_source("root", 1),
+                r#","session_id":"old""#,
+            )],
+            "2026-06-01T00:20:05Z",
+            "old",
+            120,
+        );
+        write_turn(
+            &temp.path().join("rollout-guard.jsonl"),
+            &[meta_line(
+                "2026-06-01T00:30:00Z",
+                "guard",
+                r#"{"subagent":{"other":"guardian"}}"#,
+                r#","parent_thread_id":"root""#,
+            )],
+            "2026-06-01T00:30:05Z",
+            "guard",
+            130,
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        for volume in [110, 120, 130] {
+            assert_eq!(
+                attribution(&collection, volume),
+                (Some("root"), Some("tmp/p"), Some("root")),
+                "call {volume}"
+            );
+        }
+        assert_eq!(
+            sessions_with_activity(&collection),
+            (vec!["root"], vec!["root"])
+        );
+    }
+
+    /// A subagent fork takes the project of its parent's copied meta; a
+    /// user's fork is a session of its own and keeps where it was opened.
+    #[test]
+    fn user_forks_keep_their_own_session_and_project() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let copied_parent = |ts: &str| {
+            format!(
+                r#"{{"timestamp":"{ts}","type":"session_meta","payload":{{"id":"root","cwd":"/tmp/parent","source":"cli","model_provider":"openai","session_id":"root"}}}}"#
+            )
+        };
+        write_turn(
+            &temp.path().join("rollout-subfork.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T01:00:00Z",
+                    "subfork",
+                    &spawn_source("root", 1),
+                    r#","forked_from_id":"root","session_id":"root""#,
+                ),
+                copied_parent("2026-06-01T01:00:00Z"),
+            ],
+            "2026-06-01T01:00:05Z",
+            "subfork",
+            140,
+        );
+        write_turn(
+            &temp.path().join("rollout-userfork.jsonl"),
+            &[
+                meta_line(
+                    "2026-06-01T02:00:00Z",
+                    "userfork",
+                    r#""cli""#,
+                    r#","forked_from_id":"root","session_id":"userfork""#,
+                ),
+                copied_parent("2026-06-01T02:00:00Z"),
+            ],
+            "2026-06-01T02:00:05Z",
+            "userfork",
+            150,
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(
+            attribution(&collection, 140),
+            (Some("root"), Some("tmp/parent"), Some("root"))
+        );
+        assert_eq!(
+            attribution(&collection, 150),
+            (Some("userfork"), Some("tmp/p"), Some("userfork"))
+        );
+        assert_eq!(
+            sessions_with_activity(&collection),
+            (vec!["root", "userfork"], vec!["root", "userfork"])
+        );
     }
 
     /// The spawned child's copy of its parent opens with the parent's own
@@ -414,6 +633,67 @@ mod tests {
         let collection = collect(temp.path(), None, false, UtcOffset::UTC);
 
         assert_eq!(collection.usage_events.len(), 2);
+        assert_eq!(total_volume(&collection), 130 + 66);
+    }
+
+    /// Codex stamps each row with its ordinal; `subagent_history_start_ordinal`
+    /// is the first of the child's own. Its rows there count even inside the
+    /// fork second, the copies before it do not. A mark past the last row (a
+    /// migrated child) leaves the window in charge.
+    #[test]
+    fn history_start_ordinal_keeps_rows_the_child_wrote_in_the_fork_window() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let numbered = |lines: Vec<String>| -> Vec<String> {
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, line)| line.replacen('{', &format!(r#"{{"ordinal":{ordinal},"#), 1))
+                .collect()
+        };
+        let spawn = r#"{"subagent":{"thread_spawn":{"parent_thread_id":"p1","depth":1}}}"#;
+        let turn_context = |ts: &str, turn: &str, effort: &str| {
+            format!(
+                r#"{{"timestamp":"{ts}","type":"turn_context","payload":{{"model":"gpt-5.5","effort":"{effort}","approval_policy":"never","turn_id":"{turn}"}}}}"#
+            )
+        };
+        write_lines(
+            &temp.path().join("rollout-c1.jsonl"),
+            &numbered(vec![
+                meta_line(
+                    "2026-06-01T01:00:00Z",
+                    "c1",
+                    spawn,
+                    r#","forked_from_id":"p1","subagent_history_start_ordinal":3"#,
+                ),
+                meta_line("2026-06-01T01:00:00Z", "p1", r#""cli""#, ""),
+                turn_context("2026-06-01T01:00:00Z", "t1", "high"),
+                turn_context("2026-06-01T01:00:00.200Z", "t9", "xhigh"),
+                token_count_line("2026-06-01T01:00:00.300Z", &usage_json(90, 10, 40), 380),
+            ]),
+        );
+        write_lines(
+            &temp.path().join("rollout-m1.jsonl"),
+            &numbered(vec![
+                meta_line(
+                    "2026-06-01T02:00:00Z",
+                    "m1",
+                    spawn,
+                    r#","forked_from_id":"p1","subagent_history_start_ordinal":99"#,
+                ),
+                token_count_line("2026-06-01T02:00:00Z", &usage_json(100, 40, 10), 110),
+                token_count_line("2026-06-01T02:00:30Z", &usage_json(60, 0, 6), 176),
+            ]),
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let efforts: Vec<&str> = collection
+            .effort_events
+            .iter()
+            .map(|event| event.effort.as_str())
+            .collect();
+        assert_eq!(efforts, vec!["xhigh"]);
+        assert_eq!(collection.permission_events.len(), 1);
         assert_eq!(total_volume(&collection), 130 + 66);
     }
 

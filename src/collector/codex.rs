@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -12,18 +13,22 @@ use crate::collector::read::Lines;
 use crate::collector::{
     FileEvents, list_files_matching, merge_into, parse_files_cached, project_from_cwd,
 };
-use crate::model::{Collection, Provider, SessionTouch};
+use crate::model::{Billing, Collection, Provider, SessionTouch, SourceKind};
 use crate::timestamp::parse_rfc3339;
 
+mod billing;
 mod fork;
+mod migrated;
 mod rollout;
 mod tools;
 mod turns;
 mod usage;
 
-use fork::{Origin, in_fork_burst, is_copied_fork};
+use billing::applied_tier;
+use fork::{Origin, in_fork_burst, is_copied_fork, starts_own_history};
+use migrated::{HeldRows, settle};
 use rollout::{is_rollout_file, open_rollout, plain_rollout_path, supersedes};
-use tools::collect_tool_event;
+use tools::{ToolState, collect_tool_event};
 use turns::{
     PaceState, TurnItems, collect_duration_event, collect_effort_event, collect_interrupt_event,
     collect_pace_event, collect_permission_event,
@@ -52,21 +57,25 @@ pub fn collect(
         .parent()
         .map(|parent| parent.join("archived_sessions"));
 
-    // Parse one physical file per relative plain path (docs/codex.md) so
-    // Codex durations (emitted without keys) and session touches are not
-    // duplicated during merging.
-    let mut chosen: HashMap<PathBuf, PathBuf> = HashMap::new();
+    // Parse one physical file per plain file name (docs/codex.md) so Codex
+    // durations (emitted without keys) and session touches are not
+    // duplicated during merging. `archived_sessions/` keeps no date
+    // directories, so a relative path never matched the `sessions/` copy of
+    // the same rollout; the name carries its start time and thread id.
+    let mut chosen: HashMap<OsString, PathBuf> = HashMap::new();
     for dir in std::iter::once(root).chain(archived.as_deref()) {
         if !dir.exists() {
             continue;
         }
         for path in list_files_matching(dir, &is_rollout_file, mtime_floor, &mut collection.stats) {
-            let rel = plain_rollout_path(path.strip_prefix(dir).unwrap_or(&path));
-            match chosen.get_mut(&rel) {
+            let Some(name) = plain_rollout_path(&path).file_name().map(ToOwned::to_owned) else {
+                continue;
+            };
+            match chosen.get_mut(&name) {
                 Some(existing) if supersedes(&path, existing) => *existing = path,
                 Some(_) => {}
                 None => {
-                    chosen.insert(rel, path);
+                    chosen.insert(name, path);
                 }
             }
         }
@@ -77,9 +86,11 @@ pub fn collect(
     let mut files: Vec<PathBuf> = chosen.into_values().collect();
     files.sort();
 
-    let per_file = parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
-        parse_file(path, local_offset)
-    });
+    let mut per_file =
+        parse_files_cached(use_cache.then_some("codex"), &files, local_offset, |path| {
+            parse_file(path, local_offset)
+        });
+    settle(&files, &mut per_file);
     merge_into(&mut collection, per_file);
     collection
 }
@@ -94,16 +105,25 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     // same whichever representation is on disk this run.
     let logical_path = plain_rollout_path(path);
     let mut events = FileEvents::default();
-    let mut current_session_id = fallback_session_id(&logical_path);
+    // Events carry the session the thread works for; keys carry the latest
+    // `session_meta`'s id, so a fork child's rows after its parent's copied
+    // meta key under the parent and a copy the skip misses still collapses
+    // with the parent's original.
+    let mut session_id = fallback_session_id(&logical_path);
+    let mut key_session_id = session_id.clone();
     let mut pace_state = PaceState::default();
     let mut turn_items = TurnItems::default();
+    let mut tool_state = ToolState::default();
     let mut current_model = None;
     let mut current_project = None;
     let mut session_meta_count = 0usize;
     let mut fork_instant: Option<OffsetDateTime> = None;
+    let mut own_history_start: Option<u64> = None;
     let mut own_thread_id: Option<String> = None;
     let mut origin = Origin::default();
     let mut recorded_usage: HashSet<String> = HashSet::new();
+    let mut billing = Billing::default();
+    let mut held_rows = HeldRows::default();
 
     while let Some((line_index, line)) = lines.next(&mut events) {
         let Some(value) = parse_line(line, &mut events) else {
@@ -116,20 +136,34 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             session_meta_count += 1;
             if session_meta_count == 1 {
                 own_thread_id = string_path(&value, &["payload", "id"]);
+                own_history_start =
+                    u64_path(&value, &["payload", "subagent_history_start_ordinal"]);
                 origin = Origin::from_session_meta(&value);
+                session_id = origin
+                    .session
+                    .clone()
+                    .or_else(|| own_thread_id.clone())
+                    .or(session_id);
                 if is_copied_fork(&value) {
                     fork_instant = timestamp;
+                    held_rows =
+                        HeldRows::for_fork_of(string_path(&value, &["payload", "forked_from_id"]));
                 }
             } else if session_meta_count == 2 {
                 fork_instant = timestamp;
             }
-            current_session_id = string_path(&value, &["payload", "id"]).or(current_session_id);
+            key_session_id = string_path(&value, &["payload", "id"]).or(key_session_id);
             current_model = session_model(&value).or(current_model);
-            current_project = value
-                .pointer("/payload/cwd")
-                .and_then(Value::as_str)
-                .filter(|cwd| !cwd.is_empty())
-                .and_then(project_from_cwd);
+            // A session's project is where it was opened. A subagent's work
+            // belongs to its parent's session, so the parent's copied meta
+            // sets it; a user's fork keeps its own.
+            if session_meta_count == 1 || origin.agent.is_some() {
+                current_project = value
+                    .pointer("/payload/cwd")
+                    .and_then(Value::as_str)
+                    .filter(|cwd| !cwd.is_empty())
+                    .and_then(project_from_cwd);
+            }
         }
         // Fork/spawn copies rewrite timestamps to the fork instant and shift
         // line positions (GH-36). Skip the replay burst even without a parent
@@ -142,47 +176,64 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
             && string_path(&value, &["payload", "thread_id"]) == own_thread_id;
         let in_replay_burst = !own_session_meta
             && !own_record
+            && !starts_own_history(&value, own_history_start)
             && fork_instant
                 .zip(timestamp)
                 .is_some_and(|(fork, ts)| in_fork_burst(fork, ts));
+        if !own_session_meta {
+            held_rows.note(&value, fork_instant, timestamp);
+        }
         if value.get("type").and_then(Value::as_str) == Some("turn_context") {
             current_model = string_path(&value, &["payload", "model"]).or(current_model);
             if !in_replay_burst {
                 collect_effort_event(
                     &value,
                     timestamp,
-                    current_session_id.as_ref(),
+                    key_session_id.as_ref(),
                     line_index,
                     &mut events,
                 );
                 collect_permission_event(
                     &value,
                     timestamp,
-                    current_session_id.as_ref(),
+                    key_session_id.as_ref(),
                     line_index,
                     &mut events,
                 );
             }
         }
+        // Read before the replay skip: a fork child's own settings row is
+        // stamped inside the fork window, and skipped, its calls would lose
+        // their tier.
+        if let Some(tier) = applied_tier(&value, own_thread_id.as_deref()) {
+            billing.tier = tier;
+        }
+        let usage_context = UsageContext {
+            timestamp,
+            session_id: session_id.as_ref(),
+            key_session_id: key_session_id.as_ref(),
+            model: current_model.as_ref(),
+            project: current_project.as_deref(),
+            origin: &origin,
+            line_index,
+            billing,
+        };
         if in_replay_burst {
+            if held_rows.wanted() {
+                let mut counted = FileEvents::default();
+                collect_usage_event(&value, &usage_context, &recorded_usage, &mut counted);
+                held_rows.hold(&value, counted);
+            }
             continue;
         }
 
-        if let (Some(timestamp), Some(session_id)) = (timestamp, current_session_id.as_ref()) {
+        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
             events.session_touches.push(SessionTouch {
                 timestamp,
                 session_id: session_id.clone(),
             });
         }
 
-        let usage_context = UsageContext {
-            timestamp,
-            session_id: current_session_id.as_ref(),
-            model: current_model.as_ref(),
-            project: current_project.as_deref(),
-            origin: &origin,
-            line_index,
-        };
         collect_usage_record(
             &value,
             &usage_context,
@@ -195,29 +246,34 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         collect_duration_event(
             &value,
             timestamp,
-            current_session_id.as_ref(),
+            session_id.as_ref(),
             &mut turn_items,
             &mut events,
         );
-        collect_interrupt_event(&value, timestamp, current_session_id.as_ref(), &mut events);
-        collect_pace_event(
-            &value,
-            timestamp,
-            current_session_id.as_ref(),
-            &mut pace_state,
-            &mut events,
-        );
+        collect_interrupt_event(&value, timestamp, key_session_id.as_ref(), &mut events);
+        // A subagent's prompts come from the agent that runs it, not a person.
+        if origin.source_kind() == SourceKind::Main {
+            collect_pace_event(
+                &value,
+                timestamp,
+                key_session_id.as_ref(),
+                &mut pace_state,
+                &mut events,
+            );
+        }
         collect_tool_event(
             &value,
             timestamp,
-            current_session_id.as_ref(),
+            session_id.as_ref(),
             &origin,
             &logical_path,
             line_index,
+            &mut tool_state,
             &mut events,
         );
     }
 
+    held_rows.finish(&mut events);
     events.compress_touches(local_offset);
     Some(events)
 }
@@ -350,18 +406,21 @@ mod tests {
     }
 
     /// A session present in *both* dirs (a stale `sessions/` copy left after an
-    /// archive) must not double-count — the keyed events dedupe it to one turn.
+    /// archive) is parsed once. Codex archives into `archived_sessions/`
+    /// without date directories; its duration has no key to dedupe it later.
     #[test]
     fn dedups_session_present_in_sessions_and_archive() {
         let temp = TempDir::new().expect("test tempdir should be created");
         let sessions_day = temp.path().join("sessions/2026/06/01");
-        let archived_day = temp.path().join("archived_sessions/2026/06/01");
+        let archived_day = temp.path().join("archived_sessions");
         fs::create_dir_all(&sessions_day).expect("test dirs should be created");
         fs::create_dir_all(&archived_day).expect("test dirs should be created");
         let lines = concat!(
             r#"{"timestamp":"2026-06-01T00:00:00Z","type":"session_meta","payload":{"id":"s1","model_provider":"openai"}}"#,
             "\n",
             r#"{"timestamp":"2026-06-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"total_tokens":110}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-01T00:00:04Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":4000}}"#,
             "\n"
         );
         fs::write(sessions_day.join("rollout-s1.jsonl"), lines).expect("fixture should be written");
@@ -372,6 +431,7 @@ mod tests {
         assert_eq!(collection.stats.files_seen, 1);
         assert_eq!(collection.usage_events.len(), 1);
         assert_eq!(collection.usage_events[0].usage.token_volume(), 110);
+        assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.session_touches.len(), 2);
     }
 

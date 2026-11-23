@@ -1,10 +1,14 @@
 mod ledger;
+mod receipts;
+mod segments;
+mod sources;
 
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use rayon::prelude::*;
 use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -21,7 +25,9 @@ use crate::model::{
 };
 use crate::timestamp::parse_rfc3339;
 
-use ledger::{read_call_ledger, supersede_snapshots};
+use ledger::read_call_ledger;
+use receipts::Receipts;
+use sources::{OWN_PREFIX, choose_sources};
 
 /// Token counts are untrusted log data; clamp to a generous sanity bound so
 /// downstream sums of a handful of fields can never overflow u64.
@@ -41,19 +47,16 @@ pub fn collect(
         return collection;
     }
 
-    let mut per_file = if files.is_empty() {
-        Vec::new()
-    } else {
-        parse_files_cached(
-            use_cache.then_some("copilot"),
-            &files,
-            local_offset,
-            |path| parse_file(path, local_offset),
-        )
-    };
+    let mut per_file = parse_heads(files, use_cache, local_offset);
+    let (live, caught_up) = ledger
+        .as_ref()
+        .map(|ledger| (ledger.live_sessions(), ledger.caught_up_sessions()))
+        .unwrap_or_default();
+    let from_receipts = choose_sources(&mut per_file, &live, &caught_up);
     if let Some(mut ledger) = ledger {
+        ledger.ignore_caught_up(&from_receipts);
         ledger.fall_back_where_incomplete(&per_file);
-        supersede_snapshots(&mut per_file, &ledger.first_call);
+        ledger.supersede_log_usage(&mut per_file);
         per_file.push((db_path, Some(ledger.events)));
     }
     merge_into(&mut collection, per_file);
@@ -108,8 +111,36 @@ fn event_files(
     files
 }
 
+/// The cache stamps only the file it is keyed by, so a head that links back
+/// is parsed every run: served from the cache, it kept the history it had
+/// when first parsed, and a predecessor restored later was never read.
+fn parse_heads(
+    files: Vec<PathBuf>,
+    use_cache: bool,
+    local_offset: UtcOffset,
+) -> Vec<(PathBuf, Option<FileEvents>)> {
+    let (linked, plain): (Vec<PathBuf>, Vec<PathBuf>) = files
+        .into_iter()
+        .partition(|head| segments::links_back(head));
+    let mut parsed = if plain.is_empty() {
+        Vec::new()
+    } else {
+        parse_files_cached(
+            use_cache.then_some("copilot"),
+            &plain,
+            local_offset,
+            |path| parse_file(path, local_offset),
+        )
+    };
+    parsed.par_extend(linked.into_par_iter().map(|head| {
+        let events = parse_file(&head, local_offset);
+        (head, events)
+    }));
+    parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
+    parsed
+}
+
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
     let session_id = path
         .parent()
         .and_then(Path::file_name)
@@ -117,35 +148,69 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
         .and_then(ident)
         .map(ToOwned::to_owned);
     let mut events = FileEvents::default();
-    let mut project: Option<String> = None;
-    let mut cumulative: HashMap<String, RawCounters> = HashMap::new();
-    let mut shutdown_index = 0usize;
-    let mut last_nano_aiu = 0u64;
-    let mut credit_index = 0usize;
-    let mut turn_starts: HashMap<String, OffsetDateTime> = HashMap::new();
+    let journal = segments::journal(path, &mut events)?;
+    let mut session = SessionState::default();
 
-    while let Some((_, line)) = lines.next(&mut events) {
-        let Some(value) = parse_line(line, &mut events) else {
-            continue;
+    for file in &journal {
+        let reader = match open_regular(file) {
+            Ok(reader) => reader,
+            Err(_) if file == path => return None,
+            Err(_) => {
+                events.parse_errors += 1;
+                continue;
+            }
         };
+        let mut lines = Lines::new(BufReader::new(reader));
+        while let Some((_, line)) = lines.next(&mut events) {
+            let Some(value) = parse_line(line, &mut events) else {
+                continue;
+            };
+            session.record(&value, session_id.as_ref(), &mut events);
+        }
+    }
 
+    events.compress_touches(local_offset);
+    Some(events)
+}
+
+#[derive(Default)]
+struct SessionState {
+    project: Option<String>,
+    cumulative: HashMap<String, RawCounters>,
+    shutdown_index: usize,
+    last_nano_aiu: u64,
+    credit_index: usize,
+    turn_starts: HashMap<String, OffsetDateTime>,
+    receipts: Receipts,
+}
+
+impl SessionState {
+    fn record(&mut self, value: &Value, session_id: Option<&String>, events: &mut FileEvents) {
+        let kind = value.get("type").and_then(Value::as_str);
+        // A rotated journal's head opens with a replay checkpoint: copies of
+        // records its archived segments already hold. Only the session's
+        // start is taken from it, for when the archive is gone.
+        let replayed = value.get("checkpoint").and_then(Value::as_bool) == Some(true);
+        if replayed && kind != Some("session.start") {
+            return;
+        }
         let timestamp = value
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339);
         let line = Line {
             timestamp,
-            session_id: session_id.as_ref(),
+            session_id,
             event_id: value.get("id").and_then(Value::as_str).and_then(ident),
         };
-        if let (Some(timestamp), Some(session_id)) = (timestamp, session_id.as_ref()) {
+        if let (false, Some(timestamp), Some(session_id)) = (replayed, timestamp, session_id) {
             events.session_touches.push(SessionTouch {
                 timestamp,
                 session_id: session_id.clone(),
             });
         }
 
-        match value.get("type").and_then(Value::as_str) {
+        match kind {
             Some("session.start") => {
                 if let Some(cwd) = value
                     .get("data")
@@ -153,53 +218,55 @@ fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
                     .and_then(|context| context.get("cwd"))
                     .and_then(Value::as_str)
                 {
-                    project = project_from_cwd(cwd);
+                    self.project = project_from_cwd(cwd);
                 }
             }
             Some("tool.execution_start") => {
-                collect_tool_event(&value, &line, &mut events);
+                collect_tool_event(value, &line, events);
             }
             Some("assistant.turn_start") => {
-                if let (Some(turn_id), Some(timestamp)) = (turn_id(&value), timestamp) {
-                    turn_starts.insert(turn_id, timestamp);
+                if let (Some(turn_id), Some(timestamp)) = (turn_id(value), timestamp) {
+                    self.turn_starts.insert(turn_id, timestamp);
                 }
             }
             Some("assistant.turn_end") => {
-                collect_turn_duration(&value, &line, &mut turn_starts, &mut events);
+                collect_turn_duration(value, &line, &mut self.turn_starts, events);
+            }
+            Some("session.usage_record") => {
+                self.receipts
+                    .collect(value, &line, self.project.as_deref(), events);
             }
             Some("session.usage_checkpoint") => {
                 collect_credit_delta(
-                    &value,
+                    value,
                     &line,
-                    &mut last_nano_aiu,
-                    &mut credit_index,
-                    &mut events,
+                    &mut self.last_nano_aiu,
+                    &mut self.credit_index,
+                    events,
                 );
             }
             Some("session.shutdown") => {
                 collect_credit_delta(
-                    &value,
+                    value,
                     &line,
-                    &mut last_nano_aiu,
-                    &mut credit_index,
-                    &mut events,
+                    &mut self.last_nano_aiu,
+                    &mut self.credit_index,
+                    events,
                 );
                 collect_shutdown_usage(
-                    &value,
+                    value,
                     &line,
-                    project.as_deref(),
-                    &mut cumulative,
-                    shutdown_index,
-                    &mut events,
+                    self.project.as_deref(),
+                    &mut self.cumulative,
+                    &mut self.receipts,
+                    self.shutdown_index,
+                    events,
                 );
-                shutdown_index += 1;
+                self.shutdown_index += 1;
             }
             _ => {}
         }
     }
-
-    events.compress_touches(local_offset);
-    Some(events)
 }
 
 /// Keys built from the event `id` collapse a fork's copy of a shutdown,
@@ -226,6 +293,14 @@ impl RawCounters {
             || self.cache_read < other.cache_read
             || self.cache_write < other.cache_write
             || self.reasoning < other.reasoning
+    }
+
+    fn add(&mut self, other: Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
     }
 
     fn minus(self, other: Self) -> Self {
@@ -260,6 +335,7 @@ fn collect_shutdown_usage(
     line: &Line,
     project: Option<&str>,
     cumulative: &mut HashMap<String, RawCounters>,
+    receipts: &mut Receipts,
     shutdown_index: usize,
     events: &mut FileEvents,
 ) {
@@ -307,7 +383,10 @@ fn collect_shutdown_usage(
         } else {
             previous
         };
-        let delta = current.minus(base);
+        // A copied receipt's call is counted by the session that made it,
+        // from its receipts or its store rows, so it always comes off.
+        let covered = receipts.take_covered(value, model);
+        let delta = current.minus(base).minus(covered.copied);
         cumulative.insert(model.clone(), current);
 
         let usage = delta.to_usage();
@@ -319,20 +398,42 @@ fn collect_shutdown_usage(
             (None, Some(sid)) => Some(format!("copilot:{sid}:{model}:{shutdown_index}")),
             (None, None) => None,
         };
+        // The journal's own receipts come off only if its session has no
+        // store rows, which parsing can't see: what they carried goes along
+        // for `choose_sources`.
+        let own = covered.own.to_usage();
+        if let Some(key) = &key
+            && own.token_volume() > 0
+        {
+            events.usage_events.push(KeyedUsageEvent {
+                key: Some(format!("{OWN_PREFIX}{key}")),
+                event: exit_usage(line, Some(model), None, own),
+            });
+        }
         events.usage_events.push(KeyedUsageEvent {
             key,
-            event: UsageEvent {
-                timestamp: line.timestamp,
-                session_id: line.session_id.cloned(),
-                model: Some(model.clone()),
-                source_kind: SourceKind::Main,
-                attribution_agent: None,
-                attribution_skill: None,
-                project: project.map(ToOwned::to_owned),
-                usage,
-                granularity: crate::model::UsageGranularity::Aggregate,
-            },
+            event: exit_usage(line, Some(model), project, usage),
         });
+    }
+}
+
+fn exit_usage(
+    line: &Line,
+    model: Option<&String>,
+    project: Option<&str>,
+    usage: TokenUsage,
+) -> UsageEvent {
+    UsageEvent {
+        timestamp: line.timestamp,
+        session_id: line.session_id.cloned(),
+        model: model.cloned(),
+        source_kind: SourceKind::Main,
+        attribution_agent: None,
+        attribution_skill: None,
+        project: project.map(ToOwned::to_owned),
+        usage,
+        granularity: crate::model::UsageGranularity::Aggregate,
+        billing: crate::model::Billing::default(),
     }
 }
 

@@ -1,18 +1,15 @@
-use std::io::BufReader;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
 
-use serde_json::Value;
-use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+use time::UtcOffset;
 
-use crate::collector::ident::ident;
-use crate::collector::json::parse_line;
-use crate::collector::read::{Lines, open_regular};
-use crate::collector::{FileEvents, KeyedToolEvent, list_files, merge_into, parse_files_cached};
-use crate::model::{Collection, Provider, SessionTouch, SourceKind, ToolEvent};
-use crate::timestamp::{from_unix_seconds, plausible};
+use crate::collector::{FileEvents, list_files, merge_into, parse_files_cached};
+use crate::model::{Collection, Provider, SessionTouch, SourceKind};
 
 mod conv;
+mod history;
+mod log;
 
 const CLI_STORE: &str = "antigravity-cli";
 const APP_STORE: &str = "antigravity";
@@ -55,6 +52,7 @@ pub fn collect(
         local_offset,
         &mut collection.stats,
     );
+    attribute_subagents(&mut collection, &usage.subagents);
     // App conversations, and CLI conversations with no history or log lines,
     // have nothing but their generations: without a touch per generation their
     // sessions count in the total but never reach daily sessions, spans or
@@ -63,181 +61,45 @@ pub fn collect(
     // into one session.
     collection
         .session_touches
-        .extend(usage.iter().filter_map(|event| {
+        .extend(usage.events.iter().filter_map(|event| {
             Some(SessionTouch {
                 timestamp: event.timestamp?,
                 session_id: event.session_id.clone()?,
             })
         }));
-    collection.usage_events.extend(usage);
+    collection.usage_events.extend(usage.events);
     collection.stats.usage_events = collection.usage_events.len();
     collection
 }
 
+/// Log and history lines are parsed per file, without the conversation DBs,
+/// so a line naming a subagent conversation is moved to its top-level session
+/// here, the way its generations are.
+fn attribute_subagents(collection: &mut Collection, subagents: &HashMap<String, conv::Subagent>) {
+    if subagents.is_empty() {
+        return;
+    }
+    for touch in &mut collection.session_touches {
+        if let Some(subagent) = subagents.get(&touch.session_id) {
+            touch.session_id.clone_from(&subagent.session_id);
+        }
+    }
+    for tool in &mut collection.tool_events {
+        let Some(subagent) = tool.session_id.as_ref().and_then(|id| subagents.get(id)) else {
+            continue;
+        };
+        tool.session_id = Some(subagent.session_id.clone());
+        tool.source_kind = SourceKind::Subagent;
+        tool.subagent_type.clone_from(&subagent.name);
+    }
+}
+
 fn parse_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
     if path.file_name().is_some_and(|name| name == "history.jsonl") {
-        parse_history_file(path, local_offset)
+        history::parse_history_file(path, local_offset)
     } else {
-        parse_log_file(path, local_offset)
+        log::parse_log_file(path, local_offset)
     }
-}
-
-fn parse_history_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
-    let mut events = FileEvents::default();
-
-    while let Some((line_index, line)) = lines.next(&mut events) {
-        let Some(value) = parse_line(line, &mut events) else {
-            continue;
-        };
-        // An unusable timestamp cannot be placed on the timeline; count it as a
-        // parse error rather than dropping it silently.
-        let Some(timestamp) = value
-            .get("timestamp")
-            .and_then(Value::as_i64)
-            .and_then(|timestamp_ms| from_unix_seconds(timestamp_ms / 1_000))
-        else {
-            events.parse_errors += 1;
-            continue;
-        };
-        let session_id = string_field(&value, "conversationId")
-            .unwrap_or_else(|| format!("history:{}", line_index + 1));
-        events.session_touches.push(SessionTouch {
-            timestamp,
-            session_id,
-        });
-    }
-
-    events.compress_touches(local_offset);
-    Some(events)
-}
-
-fn parse_log_file(path: &Path, local_offset: UtcOffset) -> Option<FileEvents> {
-    let mut lines = Lines::new(BufReader::new(open_regular(path).ok()?));
-    let mut events = FileEvents::default();
-    let log_session_id = fallback_session_id(path);
-    let mut current_conversation_id = None;
-
-    while let Some((_, line)) = lines.next(&mut events) {
-        let Ok(line) = std::str::from_utf8(line) else {
-            events.parse_errors += 1;
-            continue;
-        };
-        let timestamp = parse_log_timestamp(path, line, local_offset);
-
-        if line.contains("HandleUserInput called with text") {
-            let session_id = current_conversation_id
-                .clone()
-                .or_else(|| log_session_id.clone());
-            if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
-                events.session_touches.push(SessionTouch {
-                    timestamp,
-                    session_id,
-                });
-            }
-            continue;
-        }
-
-        if line.contains("Responding to tool confirmation") {
-            current_conversation_id = value_after(line, "convID=").or(current_conversation_id);
-            let session_id = current_conversation_id
-                .clone()
-                .or_else(|| log_session_id.clone());
-            if let (Some(timestamp), Some(session_id)) = (timestamp, session_id) {
-                events.session_touches.push(SessionTouch {
-                    timestamp,
-                    session_id: session_id.clone(),
-                });
-                events.tool_events.push(KeyedToolEvent {
-                    key: None,
-                    event: ToolEvent {
-                        timestamp: Some(timestamp),
-                        session_id: Some(session_id),
-                        tool_name: command_grant(line)
-                            .unwrap_or_else(|| "ToolConfirmation".to_owned()),
-                        subagent_type: None,
-                        source_kind: SourceKind::Main,
-                    },
-                });
-            }
-        }
-    }
-
-    events.compress_touches(local_offset);
-    Some(events)
-}
-
-fn parse_log_timestamp(path: &Path, line: &str, local_offset: UtcOffset) -> Option<OffsetDateTime> {
-    let mut parts = line.split_whitespace();
-    let severity_date = parts.next()?;
-    let time_part = parts.next()?;
-    let year = log_year(path)?;
-    if severity_date.len() != 5 {
-        return None;
-    }
-    let month = severity_date.get(1..3)?.parse::<u8>().ok()?;
-    let day = severity_date.get(3..5)?.parse::<u8>().ok()?;
-    let mut time_parts = time_part.split([':', '.']);
-    let hour = time_parts.next()?.parse::<u8>().ok()?;
-    let minute = time_parts.next()?.parse::<u8>().ok()?;
-    let second = time_parts.next()?.parse::<u8>().ok()?;
-    let microsecond = time_parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    let date = Date::from_calendar_date(year, Month::try_from(month).ok()?, day).ok()?;
-    let time = Time::from_hms_micro(hour, minute, second, microsecond).ok()?;
-    // Log lines carry no timezone; the CLI wrote them in this machine's local
-    // time, so assume the local offset, not UTC.
-    plausible(PrimitiveDateTime::new(date, time).assume_offset(local_offset))
-}
-
-fn log_year(path: &Path) -> Option<i32> {
-    let file_stem = path.file_stem()?.to_str()?;
-    let raw_date = file_stem.strip_prefix("cli-")?.get(0..8)?;
-    raw_date.get(0..4)?.parse::<i32>().ok()
-}
-
-fn value_after(line: &str, marker: &str) -> Option<String> {
-    let start = line.find(marker)? + marker.len();
-    let rest = line.get(start..)?;
-    let end = rest
-        .find(|character: char| character.is_whitespace() || character == ',')
-        .unwrap_or(rest.len());
-    let value = rest.get(0..end)?;
-    if value.is_empty() {
-        None
-    } else {
-        ident(value).map(ToOwned::to_owned)
-    }
-}
-
-fn command_grant(line: &str) -> Option<String> {
-    let command_start = line.find("command(")? + "command(".len();
-    let rest = line.get(command_start..)?;
-    let command = rest.get(0..rest.find(')')?)?.trim();
-    let executable = ident(command.split_whitespace().next()?)?;
-    if executable.is_empty() {
-        None
-    } else {
-        Some(format!("command:{executable}"))
-    }
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .and_then(ident)
-        .map(ToOwned::to_owned)
-}
-
-fn fallback_session_id(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -247,7 +109,10 @@ mod tests {
     use tempfile::TempDir;
     use time::macros::{date, datetime};
 
-    use super::conv::tests::{served_only_gen_blob, step_metadata, write_dated_conversation};
+    use super::conv::tests::{
+        served_only_gen_blob, step_metadata, subagent_trajectory, write_dated_conversation,
+        write_trajectory_conversation,
+    };
     use super::*;
     use crate::collector::ident::tests::overlong_ident;
     use crate::collector::read::tests::oversized_json;
@@ -352,6 +217,108 @@ mod tests {
                 .duration_secs(),
             7_200
         );
+    }
+
+    #[test]
+    fn subagent_work_counts_in_the_parent_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE);
+        let log_dir = cli.join("log");
+        let conversations = cli.join("conversations");
+        fs::create_dir_all(&log_dir).expect("log dir should be created");
+        fs::create_dir_all(&conversations).expect("conversations dir should be created");
+        let started_ms = 1_780_966_800_000; // 2026-06-09 01:00 UTC
+        write_dated_conversation(
+            &conversations.join("parent.db"),
+            started_ms,
+            &[served_only_gen_blob("gemini-3.8-flash", "r1", None)],
+            &[step_metadata(started_ms + 60_000, "r1")],
+        );
+        write_trajectory_conversation(
+            &conversations.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            &[served_only_gen_blob("gemini-3.8-flash", "r2", None)],
+            &[step_metadata(started_ms + 120_000, "r2")],
+        );
+        fs::write(
+            log_dir.join("cli-20260609_010000.log"),
+            "I0609 01:03:00.000000  8577 input_loop.go:451] Responding to tool confirmation: convID=child, stepIdx=3, approved=true, turnGrants=[command(bun run)]\n",
+        )
+        .expect("log fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let summary = crate::analyzer::summarize(
+            &collection,
+            datetime!(2026-06-09 23:00 UTC),
+            7,
+            UtcOffset::UTC,
+        );
+
+        assert_eq!(summary.sessions, 1);
+        let tool = &collection.tool_events[0];
+        assert_eq!(tool.session_id.as_deref(), Some("parent"));
+        assert_eq!(tool.source_kind, SourceKind::Subagent);
+        assert_eq!(tool.subagent_type.as_deref(), Some("research"));
+        let agents: Vec<_> = summary
+            .agents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.usage.token_volume()))
+            .collect();
+        assert_eq!(agents, [("research", 4270)]);
+    }
+
+    /// The CLI copy of a subagent conversation wins on time while only the
+    /// app copy names the parent: its generation still touches the parent
+    /// session, not a session of its own.
+    #[test]
+    fn a_subagent_named_only_in_the_other_store_counts_in_the_parent_session() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        let cli = temp.path().join(CLI_STORE).join("conversations");
+        let app = temp.path().join(APP_STORE).join("conversations");
+        fs::create_dir_all(&cli).expect("conversations dir should be created");
+        fs::create_dir_all(&app).expect("conversations dir should be created");
+        let started_ms = 1_780_966_800_000; // 2026-06-09 01:00 UTC
+        let child_row = served_only_gen_blob("gemini-3.8-flash", "r2", None);
+        write_dated_conversation(
+            &cli.join("parent.db"),
+            started_ms,
+            &[served_only_gen_blob("gemini-3.8-flash", "r1", None)],
+            &[step_metadata(started_ms + 60_000, "r1")],
+        );
+        write_dated_conversation(
+            &cli.join("child.db"),
+            started_ms,
+            std::slice::from_ref(&child_row),
+            &[step_metadata(started_ms + 120_000, "r2")],
+        );
+        write_trajectory_conversation(
+            &app.join("child.db"),
+            &subagent_trajectory(started_ms, "parent", "parent", "research"),
+            &[child_row],
+            &[],
+        );
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+        let summary = crate::analyzer::summarize(
+            &collection,
+            datetime!(2026-06-09 23:00 UTC),
+            7,
+            UtcOffset::UTC,
+        );
+
+        assert_eq!(summary.sessions, 1);
+        assert!(
+            collection
+                .session_touches
+                .iter()
+                .all(|touch| touch.session_id == "parent")
+        );
+        let agents: Vec<_> = summary
+            .agents
+            .iter()
+            .map(|agent| (agent.name.as_str(), agent.usage.token_volume()))
+            .collect();
+        assert_eq!(agents, [("research", 4270)]);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
-use time::UtcOffset;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::collector::ident::{ident, ident_string};
 use crate::collector::json::parse_bounded;
@@ -11,12 +11,20 @@ use crate::collector::project_from_cwd;
 use crate::collector::store::Store;
 use crate::model::{Collection, DurationEvent, SessionTouch, SourceKind, ToolEvent, UsageEvent};
 
+use super::parts::{PartTool, split_parts};
 use super::{Generation, ms_to_offset, token_usage};
 
 #[derive(Default)]
 struct SessionMeta {
     directory: Option<String>,
     copied_through_seq: Option<i64>,
+}
+
+/// An assistant message whose tools are read after every message's usage.
+struct ToolsDue {
+    message: String,
+    session_id: String,
+    inline: Vec<PartTool>,
 }
 
 pub(super) fn parse_session_messages(
@@ -54,6 +62,7 @@ pub(super) fn parse_session_messages(
         return;
     };
 
+    let mut tools_due: Vec<ToolsDue> = Vec::new();
     for row in rows {
         collection.stats.lines_seen += 1;
         let Ok((id, Some(session_id), kind, seq, time_created, data)) = row else {
@@ -100,32 +109,69 @@ pub(super) fn parse_session_messages(
         if !has_usage {
             continue;
         }
-        collection.usage_events.push(UsageEvent {
-            timestamp: Some(timestamp),
-            session_id: Some(session_id.clone()),
-            model: value
-                .pointer("/model/id")
-                .and_then(Value::as_str)
-                .and_then(ident)
-                .map(ToOwned::to_owned),
-            source_kind: SourceKind::Main,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: meta
-                .and_then(|meta| meta.directory.as_deref())
-                .filter(|dir| !dir.is_empty())
-                .and_then(project_from_cwd),
-            usage: token_usage(&value),
-            granularity: crate::model::UsageGranularity::Call,
-        });
+        push_usage(&kind, &value, timestamp, &session_id, meta, collection);
         if kind == "assistant" {
             push_turn(&value, created_ms, &session_id, local_offset, collection);
             if let Entry::Vacant(slot) = tools_from.entry(id) {
+                tools_due.push(ToolsDue {
+                    message: slot.key().clone(),
+                    session_id,
+                    inline: inline_tools(&value, created_ms),
+                });
                 slot.insert(Generation::V2);
-                push_tools(&value, created_ms, &session_id, local_offset, collection);
             }
         }
     }
+
+    // Tool parts after the messages: read first, payloads that spent the
+    // store's read budget left every message without its usage.
+    let parts = split_parts(conn, floor_ms, collection);
+    for due in &tools_due {
+        let tools = parts.tools_of(&due.message).unwrap_or(&due.inline);
+        push_tools(tools, &due.session_id, local_offset, collection);
+    }
+}
+
+fn push_usage(
+    kind: &str,
+    value: &Value,
+    timestamp: OffsetDateTime,
+    session_id: &str,
+    meta: Option<&SessionMeta>,
+    collection: &mut Collection,
+) {
+    let usage = token_usage(value);
+    if usage.token_volume() == 0 || claude_code_records_usage(kind, value) {
+        return;
+    }
+    collection.usage_events.push(UsageEvent {
+        timestamp: Some(timestamp),
+        session_id: Some(session_id.to_owned()),
+        model: value
+            .pointer("/model/id")
+            .and_then(Value::as_str)
+            .and_then(ident)
+            .map(ToOwned::to_owned),
+        source_kind: SourceKind::Main,
+        attribution_agent: None,
+        attribution_skill: None,
+        project: meta
+            .and_then(|meta| meta.directory.as_deref())
+            .filter(|dir| !dir.is_empty())
+            .and_then(project_from_cwd),
+        usage,
+        granularity: crate::model::UsageGranularity::Call,
+        billing: crate::model::Billing::default(),
+    });
+}
+
+/// The Claude Agent provider runs the installed Claude Code, whose own
+/// transcript already holds each primary turn with the full model id, so the
+/// Claude tab counts it. Side calls (compaction, generate, titles) run with
+/// `--no-session-persistence` and leave no transcript, so their rows count here.
+fn claude_code_records_usage(kind: &str, value: &Value) -> bool {
+    kind == "assistant"
+        && value.pointer("/model/providerID").and_then(Value::as_str) == Some("claude-agent")
 }
 
 fn push_turn(
@@ -150,31 +196,36 @@ fn push_turn(
     }
 }
 
-fn push_tools(
-    value: &Value,
-    created_ms: i64,
-    session_id: &str,
-    local_offset: UtcOffset,
-    collection: &mut Collection,
-) {
-    let tools = value
+fn inline_tools(value: &Value, created_ms: i64) -> Vec<PartTool> {
+    value
         .get("content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"));
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool"))
+        .filter_map(|tool| {
+            Some(PartTool {
+                name: tool.get("name")?.as_str().and_then(ident)?.to_owned(),
+                start_ms: tool
+                    .pointer("/time/created")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(created_ms),
+            })
+        })
+        .collect()
+}
+
+fn push_tools(
+    tools: &[PartTool],
+    session_id: &str,
+    local_offset: UtcOffset,
+    collection: &mut Collection,
+) {
     for tool in tools {
-        let Some(name) = tool.get("name").and_then(Value::as_str).and_then(ident) else {
-            continue;
-        };
-        let start_ms = tool
-            .pointer("/time/created")
-            .and_then(Value::as_i64)
-            .unwrap_or(created_ms);
         collection.tool_events.push(ToolEvent {
-            timestamp: ms_to_offset(start_ms, local_offset),
+            timestamp: ms_to_offset(tool.start_ms, local_offset),
             session_id: Some(session_id.to_owned()),
-            tool_name: name.to_owned(),
+            tool_name: tool.name.clone(),
             subagent_type: None,
             source_kind: SourceKind::Main,
         });
@@ -332,6 +383,132 @@ mod tests {
         assert_eq!(collection.duration_events.len(), 1);
         assert_eq!(collection.duration_events[0].duration_ms, 1_000);
         assert_eq!(collection.session_touches.len(), 4);
+    }
+
+    #[test]
+    fn assistant_without_tokens_keeps_its_turn_and_tools_but_is_not_a_call() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        let aborted = v2_assistant(1_781_542_363_256, 0, Some("bash")).replace(
+            r#""output":10,"reasoning":2,"cache":{"read":30,"write":4}"#,
+            r#""output":0,"reasoning":0,"cache":{"read":0,"write":0}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &aborted,
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert!(collection.usage_events.is_empty());
+        assert_eq!(collection.duration_events.len(), 1);
+        assert_eq!(collection.tool_events.len(), 1);
+        assert_eq!(collection.session_touches.len(), 1);
+    }
+
+    /// Claude Code's transcript counts a Claude Agent turn; its compaction
+    /// leaves no transcript and counts here.
+    #[test]
+    fn claude_agent_turns_keep_activity_and_tools_but_not_usage() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        let via_claude = v2_assistant(1_781_542_363_256, 100, Some("read")).replace(
+            r#""model":{"id":"claude-sonnet-4.6","providerID":"anthropic"}"#,
+            r#""model":{"id":"opus","providerID":"claude-agent"}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &via_claude,
+        );
+        insert_v2(
+            &conn,
+            "msg_c",
+            "s1",
+            "compaction",
+            2,
+            1_781_542_400_000,
+            r#"{"status":"completed","reason":"auto","summary":"s","model":{"id":"opus","providerID":"claude-agent"},"tokens":{"input":5000,"output":200,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1781542400000}}"#,
+        );
+        insert_v2(
+            &conn,
+            "msg_b",
+            "s1",
+            "assistant",
+            3,
+            1_781_542_500_000,
+            &v2_assistant(1_781_542_500_000, 300, Some("bash")),
+        );
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![300 + 12 + 30 + 4, 5_200]);
+        assert_eq!(collection.tool_events.len(), 2);
+        assert_eq!(collection.duration_events.len(), 2);
+        assert_eq!(collection.session_touches.len(), 3);
+    }
+
+    /// Tool payloads that spend the store's read budget must not cost the
+    /// messages their usage. An added column's default is returned for
+    /// every older row without being stored, so a small store returns more
+    /// than the budget; a blob default keeps the test from decoding it all.
+    #[test]
+    fn tool_parts_past_the_read_budget_keep_the_usage() {
+        let dir = TempDir::new().expect("tempdir");
+        let conn = Connection::open(dir.path().join("opencode.db")).expect("open temp db");
+        conn.execute_batch(V2_SCHEMA).expect("create schema");
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('s1', '/somewhere/proj', NULL, NULL, 1781542000000)",
+            [],
+        )
+        .expect("insert session");
+        insert_v2(
+            &conn,
+            "msg_a",
+            "s1",
+            "assistant",
+            1,
+            1_781_542_363_256,
+            &v2_assistant(1_781_542_363_256, 100, None),
+        );
+        conn.execute_batch(&format!(
+            "CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 65)
+             INSERT INTO session_part SELECT 'msg_a', 's1', n, 'tool', NULL, 1781542363300, 1781542363300 FROM r;
+             ALTER TABLE session_part ADD COLUMN data TEXT NOT NULL DEFAULT x'{}';",
+            "00".repeat(16 << 20)
+        ))
+        .expect("create part rows");
+        drop(conn);
+
+        let collection = collect(dir.path(), None, false, UtcOffset::UTC);
+
+        assert_eq!(volumes(&collection), vec![100 + 12 + 30 + 4]);
+        assert_eq!(collection.duration_events.len(), 1);
+        assert!(collection.stats.parse_errors > 0);
     }
 
     fn write_fork_db(dir: &Path, boundary: &str) {

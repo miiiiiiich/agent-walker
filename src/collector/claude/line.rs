@@ -8,8 +8,8 @@ use crate::collector::{
     KeyedToolEvent, KeyedUsageEvent,
 };
 use crate::model::{
-    EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, SessionTouch, SourceKind, TokenUsage,
-    ToolEvent, UsageEvent,
+    Billing, EffortEvent, InterruptEvent, ModeEvent, PermissionEvent, ServiceTier, SessionTouch,
+    SourceKind, TokenUsage, ToolEvent, UsageEvent,
 };
 
 use super::turns::is_human_turn;
@@ -91,6 +91,7 @@ pub(in crate::collector::claude) fn parse_line(
                 project: project.map(ToOwned::to_owned),
                 usage,
                 granularity: crate::model::UsageGranularity::Call,
+                billing: billing(usage_value),
             },
         });
     }
@@ -122,6 +123,7 @@ pub(in crate::collector::claude) fn parse_line(
                     project: project.map(ToOwned::to_owned),
                     usage,
                     granularity: crate::model::UsageGranularity::Call,
+                    billing: billing(Some(iteration)),
                 },
             });
         }
@@ -318,6 +320,25 @@ fn collect_tool_events(
     }
 }
 
+/// Read from the object the tokens come from. An advisor iteration records
+/// no speed or geography of its own; it is not given the main call's, which
+/// bill the main model.
+fn billing(usage: Option<&Value>) -> Billing {
+    let field = |key: &str| {
+        usage
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_str)
+    };
+    Billing {
+        tier: if field("speed") == Some("fast") {
+            ServiceTier::Fast
+        } else {
+            ServiceTier::Standard
+        },
+        us_only: field("inference_geo") == Some("us"),
+    }
+}
+
 fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let value = value?;
     let input_tokens = u64_field(value, "input_tokens");
@@ -346,6 +367,19 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
         usage.cache_creation_ephemeral_5m_input_tokens =
             u64_field(cache_creation, "ephemeral_5m_input_tokens");
     }
+    // An advisor turn's top-level split is the first iteration's alone while
+    // its total sums every iteration, so a later 1h write priced at the 5m
+    // rate (ccusage#2084).
+    let split = usage
+        .cache_creation_ephemeral_5m_input_tokens
+        .saturating_add(usage.cache_creation_ephemeral_1h_input_tokens);
+    if split < cache_creation_input_tokens
+        && let Some((short, long)) = message_iterations_split(value)
+        && (split + 1..=cache_creation_input_tokens).contains(&short.saturating_add(long))
+    {
+        usage.cache_creation_ephemeral_5m_input_tokens = short;
+        usage.cache_creation_ephemeral_1h_input_tokens = long;
+    }
 
     if let Some(server_tool_use) = value.get("server_tool_use").and_then(Value::as_object) {
         for (key, child) in server_tool_use {
@@ -358,6 +392,25 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     Some(usage)
 }
 
+/// The 5m/1h split summed over the `message` iterations, when there are
+/// several; one iteration's split is already the top level's.
+fn message_iterations_split(value: &Value) -> Option<(u64, u64)> {
+    let iterations = value.get("iterations")?.as_array()?;
+    let mut count = 0_usize;
+    let (mut short, mut long) = (0_u64, 0_u64);
+    for iteration in iterations {
+        if string_field(iteration, "type").as_deref() != Some("message") {
+            continue;
+        }
+        count += 1;
+        if let Some(cache_creation) = iteration.get("cache_creation") {
+            short = short.saturating_add(u64_field(cache_creation, "ephemeral_5m_input_tokens"));
+            long = long.saturating_add(u64_field(cache_creation, "ephemeral_1h_input_tokens"));
+        }
+    }
+    (count >= 2).then_some((short, long))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -366,6 +419,7 @@ mod tests {
     use time::UtcOffset;
 
     use crate::collector::claude::collect;
+    use crate::model::{Billing, ServiceTier};
 
     /// A mid-turn model fallback: the failed attempt in `usage.iterations`
     /// is NOT billed (the turn is billed as the serving model, mirrored at
@@ -423,6 +477,75 @@ mod tests {
             .find(|event| event.model.as_deref() == Some("claude-sonnet-5"))
             .expect("main turn should be counted once");
         assert_eq!(main.usage.token_volume(), 22 + 12 + 220);
+    }
+
+    /// An advisor turn's top level carries only the first iteration's cache
+    /// write split; a 1h write in the last iteration must not read as 5m.
+    #[test]
+    fn advisor_turn_cache_write_split_sums_the_message_iterations() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":4,"output_tokens":6,"cache_creation_input_tokens":300,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0},"iterations":[{"type":"message","input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":100,"cache_read_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0}},{"type":"advisor_message","model":"claude-fable-5-2","input_tokens":7,"output_tokens":1,"cache_creation_input_tokens":40,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":0}},{"type":"message","input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":200,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":200}}]},"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let usage = |model: &str| {
+            &collection
+                .usage_events
+                .iter()
+                .find(|event| event.model.as_deref() == Some(model))
+                .expect("event present")
+                .usage
+        };
+        let main = usage("claude-opus-5-5");
+        assert_eq!(main.cache_creation_input_tokens, 300);
+        assert_eq!(main.cache_creation_ephemeral_5m_input_tokens, 100);
+        assert_eq!(main.cache_creation_ephemeral_1h_input_tokens, 200);
+        let advisor = usage("claude-fable-5-2");
+        assert_eq!(advisor.cache_creation_ephemeral_5m_input_tokens, 40);
+        assert_eq!(advisor.cache_creation_ephemeral_1h_input_tokens, 0);
+    }
+
+    /// Fast mode and US-only inference come from the call's own usage; the
+    /// advisor iteration records neither and stays standard.
+    #[test]
+    fn billing_is_read_from_the_usage_of_each_call() {
+        let temp = TempDir::new().expect("test tempdir should be created");
+        fs::write(
+            temp.path().join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-01T00:00:00Z","sessionId":"s1","type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":22,"output_tokens":12,"speed":"fast","inference_geo":"us","iterations":[{"type":"message","input_tokens":10,"output_tokens":5},{"type":"advisor_message","model":"claude-fable-5-2","input_tokens":3,"output_tokens":9},{"type":"message","input_tokens":12,"output_tokens":7}]},"content":[{"type":"text","text":"hi"}]}}"#,
+                "
+",
+                r#"{"timestamp":"2026-06-01T00:01:00Z","sessionId":"s1","type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","usage":{"input_tokens":5,"output_tokens":2,"speed":"standard","inference_geo":"global"},"content":[{"type":"text","text":"plain"}]}}"#,
+                "
+"
+            ),
+        )
+        .expect("fixture should be written");
+
+        let collection = collect(temp.path(), None, false, UtcOffset::UTC);
+
+        let billing = |model: &str, input: u64| {
+            collection
+                .usage_events
+                .iter()
+                .find(|event| {
+                    event.model.as_deref() == Some(model) && event.usage.input_tokens == input
+                })
+                .map(|event| event.billing)
+                .expect("event present")
+        };
+        let fast_us = Billing {
+            tier: ServiceTier::Fast,
+            us_only: true,
+        };
+        assert_eq!(billing("claude-opus-5-5", 22), fast_us);
+        assert_eq!(billing("claude-fable-5-2", 3), Billing::default());
+        assert_eq!(billing("claude-opus-5-5", 5), Billing::default());
     }
 
     #[test]
