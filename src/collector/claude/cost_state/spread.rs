@@ -14,13 +14,8 @@ use super::transcript::{Call, transcripts};
 /// A local date and hour.
 type Slot = (Date, u8);
 
-/// One session-hour's share of the uncounted usage of one model.
-struct Bucket {
-    usage: TokenUsage,
-    at: OffsetDateTime,
-    project: Option<String>,
-    source_kind: SourceKind,
-}
+/// Each session-hour's share of the uncounted usage of each model.
+type Buckets = BTreeMap<(String, String, Slot), UsageEvent>;
 
 /// What each session's cost-state holds over its transcript, per model and
 /// field, spread over the local hours the session ran in proportion to its
@@ -43,7 +38,7 @@ pub(in crate::collector::claude) fn uncounted_calls(
         .map(|(&session, rows)| (session, restarts(rows)))
         .collect();
     discount_forks(&mut logs, &mut transcripts, &restarts);
-    let mut buckets: BTreeMap<(String, String, Slot), Bucket> = BTreeMap::new();
+    let mut buckets = Buckets::new();
     for (session, rows) in logs {
         let Some(calls) = transcripts.remove(session) else {
             continue;
@@ -51,21 +46,7 @@ pub(in crate::collector::claude) fn uncounted_calls(
         let runs = runs(&rows, &restarts[session]);
         spread_session(session, &runs, calls, local_offset, &mut buckets);
     }
-    buckets
-        .into_iter()
-        .map(|((session, model, _), bucket)| UsageEvent {
-            timestamp: Some(bucket.at),
-            session_id: Some(session),
-            model: Some(model),
-            source_kind: bucket.source_kind,
-            attribution_agent: None,
-            attribution_skill: None,
-            project: bucket.project,
-            usage: bucket.usage,
-            granularity: UsageGranularity::Remainder,
-            billing: Billing::default(),
-        })
-        .collect()
+    buckets.into_values().collect()
 }
 
 /// Every session's rows from one file. A session whose rows are in more than
@@ -183,7 +164,7 @@ fn spread_session(
     runs: &[&CostStateRow],
     calls: Vec<Call>,
     local_offset: UtcOffset,
-    buckets: &mut BTreeMap<(String, String, Slot), Bucket>,
+    buckets: &mut Buckets,
 ) {
     let mut per_run: Vec<Vec<Call>> = runs.iter().map(|_| Vec::new()).collect();
     let last = runs.len() - 1;
@@ -207,30 +188,30 @@ fn spread_run(
     total: &CostStateRow,
     calls: &[Call],
     local_offset: UtcOffset,
-    buckets: &mut BTreeMap<(String, String, Slot), Bucket>,
+    buckets: &mut Buckets,
 ) {
     let mut counted: HashMap<&str, TokenUsage> = HashMap::new();
-    let mut slots: BTreeMap<Slot, (u64, &Call)> = BTreeMap::new();
+    let mut slots: BTreeMap<Slot, (u64, OffsetDateTime, &Call)> = BTreeMap::new();
     for call in calls {
         counted
             .entry(call.model())
             .or_default()
             .add_assign(&call.usage);
-        let Some(local) = call
+        let Some((at, local)) = call
             .timestamp
-            .and_then(|timestamp| to_local(timestamp, local_offset))
+            .and_then(|at| Some((at, to_local(at, local_offset)?)))
         else {
             continue;
         };
         let slot = slots
             .entry((local.date(), local.hour()))
-            .or_insert((0, call));
+            .or_insert((0, at, call));
         slot.0 = slot.0.saturating_add(call.usage.token_volume());
-        if call.timestamp > slot.1.timestamp {
-            slot.1 = call;
+        if at > slot.1 {
+            (slot.1, slot.2) = (at, call);
         }
     }
-    let weights: Vec<u64> = slots.values().map(|(volume, _)| *volume).collect();
+    let weights: Vec<u64> = slots.values().map(|(volume, _, _)| *volume).collect();
     if weights.iter().all(|weight| *weight == 0) {
         return;
     }
@@ -240,35 +221,34 @@ fn spread_run(
             continue;
         }
         let shares = split_by_weight(&excess, &weights);
-        for ((slot, (_, latest)), usage) in slots.iter().zip(shares) {
+        for ((slot, &(_, at, latest)), usage) in slots.iter().zip(shares) {
             if usage.token_volume() == 0 {
                 continue;
             }
-            let Some(at) = latest.timestamp else {
-                continue;
-            };
-            let bucket = buckets
+            let event = buckets
                 .entry((session.to_owned(), model.clone(), *slot))
-                .or_insert_with(|| Bucket {
-                    usage: TokenUsage::default(),
-                    at,
+                .or_insert_with(|| UsageEvent {
+                    timestamp: Some(at),
+                    session_id: Some(session.to_owned()),
+                    model: Some(model.clone()),
+                    source_kind: if latest.source_kind == SourceKind::Background {
+                        SourceKind::Background
+                    } else {
+                        SourceKind::Main
+                    },
+                    attribution_agent: None,
+                    attribution_skill: None,
                     project: latest.project.clone(),
-                    source_kind: background_or_main(latest.source_kind),
+                    usage: TokenUsage::default(),
+                    granularity: UsageGranularity::Remainder,
+                    billing: Billing::default(),
                 });
-            bucket.usage.add_assign(&usage);
-            if at > bucket.at {
-                bucket.at = at;
-                bucket.project = latest.project.clone().or(bucket.project.take());
+            event.usage.add_assign(&usage);
+            if Some(at) > event.timestamp {
+                event.timestamp = Some(at);
+                event.project = latest.project.clone().or(event.project.take());
             }
         }
-    }
-}
-
-fn background_or_main(kind: SourceKind) -> SourceKind {
-    if kind == SourceKind::Background {
-        SourceKind::Background
-    } else {
-        SourceKind::Main
     }
 }
 
