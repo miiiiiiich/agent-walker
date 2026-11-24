@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.22.2] - 2026-11-24
+
+### Changed
+
+- Claude Code's calls besides answering you now count: prompt suggestions,
+  auto mode's permission checks, titles and the like. They come from Claude
+  Code's own session totals, so a heavy user's total rises; docs/claude.md
+  lists what they are.
+- Codex's tools show the commands Code Mode ran instead of `exec`. Your pace
+  shows again on current rollouts.
+- Subagent work counts in the session it serves for Codex and Antigravity, as
+  it already did for Claude Code, so their session counts drop. Antigravity's
+  subagents show under subagents.
+- The claude-mem observer's usage counts toward tokens and cost, without
+  counting it as sessions or activity.
+- A model the price table doesn't list yet shows as unpriced instead of
+  borrowing an older version's rate.
+
+### Fixed
+
+- Copilot CLI's per-call usage records and split session logs are read, so a
+  session the session store doesn't know no longer shows zero, and a call is
+  no longer counted twice across forks, the session store and shutdowns.
+- Antigravity no longer counts its model id as input, and reads thinking and
+  response output the right way round.
+- Codex counts the subagent rollouts its migration rewrote.
+- OpenCode reads tools from its new parts table, and no longer counts turns
+  without tokens as calls, nor Claude Agent turns that Claude Code already
+  counts.
+- Fast mode, US-only inference and Codex's priority and ultrafast tiers price
+  at their own rates.
+
 ## [0.22.1] - 2026-11-09
 
 ### Changed
@@ -464,6 +496,7 @@ First public release, with the codename system and the shareable stats card.
 
 Initial npm packaging.
 
+[0.22.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.22.1...v0.22.2
 [0.22.1]: https://github.com/miiiiiiich/agent-walker/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.2...v0.22.0
 [0.21.2]: https://github.com/miiiiiiich/agent-walker/compare/v0.21.1...v0.21.2
